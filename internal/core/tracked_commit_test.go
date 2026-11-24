@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTrackedCommitValidate(t *testing.T) {
 	t.Parallel()
@@ -44,15 +47,17 @@ func TestTrackedCommitOpen(t *testing.T) {
 
 	deployment := DeploymentID(3)
 	newer := TrackedCommitID(9)
+	enqueuedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	tests := []struct {
 		name   string
 		commit TrackedCommit
 		want   bool
 	}{
 		{name: "new", commit: TrackedCommit{}, want: true},
-		{name: "enqueued", commit: TrackedCommit{DeploymentID: &deployment}},
+		{name: "enqueued", commit: TrackedCommit{DeploymentID: &deployment, EnqueuedAt: &enqueuedAt}},
+		{name: "enqueued deployment since deleted", commit: TrackedCommit{EnqueuedAt: &enqueuedAt}},
 		{name: "superseded", commit: TrackedCommit{SupersededByID: &newer}},
-		{name: "both", commit: TrackedCommit{DeploymentID: &deployment, SupersededByID: &newer}},
+		{name: "both", commit: TrackedCommit{DeploymentID: &deployment, EnqueuedAt: &enqueuedAt, SupersededByID: &newer}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,6 +65,28 @@ func TestTrackedCommitOpen(t *testing.T) {
 			if got := tt.commit.Open(); got != tt.want {
 				t.Errorf("Open() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func TestChecksEvaluationValidate(t *testing.T) {
+	t.Parallel()
+
+	readAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name       string
+		evaluation ChecksEvaluation
+		wantErr    []string
+	}{
+		{name: "valid", evaluation: ChecksEvaluation{State: ChecksSuccess, ReadAt: readAt}},
+		{name: "unknown state", evaluation: ChecksEvaluation{State: "neutral", ReadAt: readAt}, wantErr: []string{`checks state "neutral"`}},
+		{name: "missing read time", evaluation: ChecksEvaluation{State: ChecksPending}, wantErr: []string{"time the checks were read"}},
+		{name: "both", evaluation: ChecksEvaluation{}, wantErr: []string{`checks state ""`, "time the checks were read"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assertError(t, tt.evaluation.Validate(), tt.wantErr, nil)
 		})
 	}
 }

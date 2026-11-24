@@ -82,6 +82,9 @@ func (s *Server) handleCheckRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs := c.runs
+	if name := r.URL.Query().Get("check_name"); name != "" {
+		runs = slices.DeleteFunc(runs, func(run CheckRun) bool { return run.Name != name })
+	}
 	if r.URL.Query().Get("filter") != "all" {
 		runs = latestRuns(runs)
 	}

@@ -29,14 +29,16 @@ Repository permissions:
 | Permission | Access | Needed on | Why |
 | --- | --- | --- | --- |
 | Metadata | Read | all | mandatory for every App |
-| Contents | Read and write | GitOps repository | read manifests and commit digest pins through the Contents and Git Data APIs |
+| Contents | Read and write | GitOps repository; read on application repositories | read manifests and commit digest pins through the Contents and Git Data APIs; read the head of an app's branch and receive push events |
 | Pull requests | Read and write | GitOps repository | open and update pull requests when pins go through review |
 | Checks | Read | application repositories | read check runs for the CI gate |
 | Commit statuses | Read and write | application repositories | read statuses for the CI gate; write statuses that mirror doorstep's gates |
 
 No organization or account permissions are needed.
 
-To decide whether a commit is green, doorstep reads, per tracked commit and with the installation token, `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?filter=latest`, `GET /repos/{owner}/{repo}/commits/{sha}/status` and, for apps without `required_checks`, `GET /repos/{owner}/{repo}/commits/{sha}/check-suites`. These need only the Checks and Commit statuses read permissions above. Results are read 100 per page; a commit with more than 1,000 check runs, statuses or suites is treated as an error rather than evaluated on a partial list.
+Before recording a push, doorstep reads `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` to check that the pushed commit is still the branch head (Contents read).
+
+To decide whether a commit is green, doorstep reads, per tracked commit and with the installation token, `GET /repos/{owner}/{repo}/commits/{sha}/status` and the commit's check runs. When every app following the commit lists `required_checks`, it reads only those check runs, one `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name={name}&filter=latest` per name. Otherwise it reads every check run (`check-runs?filter=latest`) and `GET /repos/{owner}/{repo}/commits/{sha}/check-suites`. These need only the Checks and Commit statuses read permissions above. Results are read 100 per page; more than 1,000 results for one request (all check runs, the check runs of one name, statuses or suites) is treated as an error rather than evaluated on a partial list, so very large monorepos should list `required_checks`.
 
 **GitHub applies one permission set to every repository an installation can reach.** The table says which repositories *need* each permission, but GitHub cannot express that: if the App can write contents in the GitOps repository, it can write contents in every repository the installation includes. Least privilege therefore comes from the repository selection:
 

@@ -254,3 +254,56 @@ func TestChecksRequireInstallationToken(t *testing.T) {
 		t.Errorf("unauthenticated request reached the checks handler")
 	}
 }
+
+func TestListCheckRunsNamed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		check     string
+		wantIDs   []int64
+		wantCalls int64
+		wantErr   string
+	}{
+		{name: "latest run of the name", check: "test", wantIDs: []int64{1003}, wantCalls: 1},
+		{name: "name needing escapes", check: "build & test (linux)", wantIDs: []int64{1004}, wantCalls: 1},
+		{name: "unreported name", check: "e2e", wantCalls: 1},
+		{name: "names match exactly", check: "Test", wantCalls: 1},
+		{name: "empty name", check: " ", wantErr: "check name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.srv.Install("acme", "app", 1)
+			runs := append(checkRuns(1001),
+				githubtest.CheckRun{ID: 1002, Name: "test", Status: "completed", Conclusion: "failure"},
+				githubtest.CheckRun{ID: 1003, Name: "test", Status: "completed", Conclusion: "success"},
+				githubtest.CheckRun{ID: 1004, Name: "build & test (linux)", Status: "queued"},
+			)
+			f.srv.SetCheckRuns("acme", "app", checksSHA, runs...)
+
+			got, err := f.repoClient(t, "acme", "app").ListCheckRunsNamed(t.Context(), "acme", "app", checksSHA, tt.check)
+			if calls := f.srv.ChecksCalls(); calls != tt.wantCalls {
+				t.Errorf("made %d API calls, want %d", calls, tt.wantCalls)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ListCheckRunsNamed error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ListCheckRunsNamed: %v", err)
+			}
+			if len(got) != len(tt.wantIDs) {
+				t.Fatalf("ListCheckRunsNamed = %+v, want ids %v", got, tt.wantIDs)
+			}
+			for i, run := range got {
+				if run.ID != tt.wantIDs[i] {
+					t.Errorf("run %d = %+v, want id %d", i, run, tt.wantIDs[i])
+				}
+			}
+		})
+	}
+}

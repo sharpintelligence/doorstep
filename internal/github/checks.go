@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -68,6 +69,17 @@ type commitResource struct {
 
 func (c *Client) ListCheckRuns(ctx context.Context, owner, repo, sha string) ([]CheckRun, error) {
 	r := commitResource{owner: owner, repo: repo, sha: sha, resource: "check-runs", query: "filter=latest&", what: "check runs"}
+	return collectPages(ctx, c, r, func(p checkRunsPage) (int, []CheckRun) { return p.TotalCount, p.CheckRuns })
+}
+
+func (c *Client) ListCheckRunsNamed(ctx context.Context, owner, repo, sha, name string) ([]CheckRun, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("list check runs for %s/%s@%s: check name must not be empty", owner, repo, sha)
+	}
+	r := commitResource{
+		owner: owner, repo: repo, sha: sha, resource: "check-runs",
+		query: "check_name=" + url.QueryEscape(name) + "&filter=latest&", what: "check runs named " + strconv.Quote(name),
+	}
 	return collectPages(ctx, c, r, func(p checkRunsPage) (int, []CheckRun) { return p.TotalCount, p.CheckRuns })
 }
 

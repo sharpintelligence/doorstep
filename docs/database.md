@@ -114,7 +114,7 @@ The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transi
 
 ### `tracked_commits`
 
-Added by migration `00002_tracked_commits.sql`. One row per app and pushed commit that doorstep is watching CI for, written by `internal/intake` (see [architecture.md](architecture.md#merge-and-ci-detection)). Tracking is per app rather than per repository because several apps can share a source repository with different required checks.
+Added by migration `00005_tracked_commits.sql`. One row per app and pushed commit that doorstep is watching CI for, written by `internal/intake` (see [architecture.md](architecture.md#merge-and-ci-detection)). Tracking is per app rather than per repository because several apps can share a source repository with different required checks.
 
 | Column | Notes |
 | --- | --- |
@@ -124,15 +124,17 @@ Added by migration `00002_tracked_commits.sql`. One row per app and pushed commi
 | `checks_state` | `pending`, `success` or `failure` (`core.ChecksState`); starts `pending` |
 | `checks` | the evidence of the last evaluation: a JSON array of `{name, kind, state, detail}` (`core.Check`) |
 | `deployment_id` | the deployment created for the commit; `UNIQUE`, `ON DELETE SET NULL` |
-| `superseded_by_id` | the newer tracked commit of the same app that superseded this one; `ON DELETE SET NULL` |
-| `created_at`, `updated_at`, `evaluated_at` | `evaluated_at` is set each time checks are saved |
+| `enqueued_at` | when the deployment was created; set together with `deployment_id` (`tracked_commits_enqueued_check`) and kept if the deployment is later deleted, so the commit never deploys twice |
+| `superseded_by_id` | the tracked commit that became the branch head after this one; `ON DELETE SET NULL` |
+| `created_at`, `updated_at`, `evaluated_at` | `evaluated_at` is the time the saved checks were read from GitHub, not the time they were saved |
 
-`UNIQUE (app_id, commit_sha)` makes tracking idempotent: tracking a known commit again returns the existing row unchanged, even when it is superseded or enqueued. `tracked_commits_commit_sha_idx` serves the lookup by SHA that every check run and status event performs (most of them for pull request commits nobody tracks), and the partial index `tracked_commits_pending_idx` on `(app_id, id)` covers the open, pending commits the poller lists.
+`UNIQUE (app_id, commit_sha)` keeps one row per app and commit: tracking a known commit again returns the existing row (`existing`), or reopens it when it was superseded and is the branch head again (`reopened`). `tracked_commits_commit_sha_idx` serves the lookup by SHA that every check run and status event performs (most of them for pull request commits nobody tracks), and the partial index `tracked_commits_open_idx` on `app_id` covers the open commits the poller lists.
 
-A commit is open while both `deployment_id` and `superseded_by_id` are null. Only open commits are evaluated: `SaveCommitChecks` updates nothing on a closed row. The rules that keep this consistent with several replicas:
+A commit is open while both `enqueued_at` and `superseded_by_id` are null. Only open commits are evaluated. The rules that keep this consistent with several replicas:
 
-- **Supersession.** `TrackCommit` locks the app's `apps` row (`FOR NO KEY UPDATE`), inserts the commit and, if it was new, sets `superseded_by_id` on every older open commit of the app, in one transaction. Concurrent pushes for one app are therefore serialised, and the newest commit always wins.
-- **Promotion.** `PromoteTrackedCommit(ctx, id, enqueue)` locks the app row and then the tracked row, and only when `checks_state = 'success'` and the commit is open calls `enqueue` with a store bound to the same transaction and stores the returned deployment id. The deployment, its queue entry and the link commit together or not at all, so concurrent promotions create exactly one deployment. Locking the app row first, in the same order as `TrackCommit`, keeps a push and a promotion from deadlocking; whichever commits first wins, and the other sees the commit closed.
+- **Tracking and supersession.** `TrackCommit(ctx, commit, isHead)` locks the app's `apps` row (`FOR NO KEY UPDATE`) and calls `isHead` while holding it. If the commit is not the branch head it returns `stale` without writing. Otherwise it inserts the commit (`created`), reopens a superseded row (`reopened`) or finds the existing one (`existing`), and sets `superseded_by_id` on every other open commit of the app, all in one transaction. Pushes for one app are serialised and each sees the current head, so the branch head always wins regardless of the order in which pushes are delivered.
+- **Settlement.** `SettleTrackedCommit(ctx, id, evaluation, enqueue)` locks the app row and then the tracked row and does nothing for a closed commit. It saves `checks_state`, `checks` and `evaluated_at` only when `evaluated_at` is null or older than the evaluation's read time, so an older snapshot never overwrites a newer one. When the stored state is then `success`, it calls `enqueue` with a store bound to the same transaction and stores the deployment id and `enqueued_at`. The evaluation, the deployment, its queue entry and the link commit together or not at all, so concurrent settlements create exactly one deployment and never deploy on a stale snapshot. Locking the app row first, in the same order as `TrackCommit`, keeps a push and a settlement from deadlocking; whichever commits first wins, and the other sees the commit closed.
+- **Open commits.** `OpenTrackedCommits(ctx, followed, limit)` lists open commits of the given app, repository (case-insensitive) and branch triples, least recently evaluated first, so rows of apps that are no longer configured never take the poller's slots.
 
 ## Transactions
 

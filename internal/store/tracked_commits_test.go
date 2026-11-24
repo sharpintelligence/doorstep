@@ -1,15 +1,20 @@
 package store_test
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/store"
 	"github.com/sharpintelligence/doorstep/internal/store/storetest"
 )
+
+var evaluatedAt = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 
 func shaOf(c byte) string {
 	return strings.Repeat(string(c), 40)
@@ -25,22 +30,17 @@ func newTrackedCommit(app, sha string) core.TrackedCommit {
 	}
 }
 
+func isHead(head bool) func(context.Context) (bool, error) {
+	return func(context.Context) (bool, error) { return head, nil }
+}
+
 func mustTrack(t *testing.T, st *store.Store, c core.TrackedCommit) core.TrackedCommit {
 	t.Helper()
-	tracked, _, err := st.TrackCommit(t.Context(), c)
+	tracked, _, err := st.TrackCommit(t.Context(), c, isHead(true))
 	if err != nil {
 		t.Fatalf("TrackCommit(%s): %v", c.Commit.SHA, err)
 	}
 	return tracked
-}
-
-func mustSaveChecks(t *testing.T, st *store.Store, id core.TrackedCommitID, state core.ChecksState, checks ...core.Check) core.TrackedCommit {
-	t.Helper()
-	c, err := st.SaveCommitChecks(t.Context(), id, state, checks)
-	if err != nil {
-		t.Fatalf("SaveCommitChecks(%d): %v", id, err)
-	}
-	return c
 }
 
 func mustGetTracked(t *testing.T, st *store.Store, id core.TrackedCommitID) core.TrackedCommit {
@@ -50,6 +50,10 @@ func mustGetTracked(t *testing.T, st *store.Store, id core.TrackedCommitID) core
 		t.Fatalf("GetTrackedCommit(%d): %v", id, err)
 	}
 	return c
+}
+
+func evaluation(state core.ChecksState, readAt time.Time, checks ...core.Check) core.ChecksEvaluation {
+	return core.ChecksEvaluation{State: state, Checks: checks, ReadAt: readAt}
 }
 
 func enqueueDeployment(t *testing.T, c core.TrackedCommit) func(tx *store.Store) (core.DeploymentID, error) {
@@ -63,38 +67,77 @@ func enqueueDeployment(t *testing.T, c core.TrackedCommit) func(tx *store.Store)
 	}
 }
 
+func refuseEnqueue(t *testing.T) func(*store.Store) (core.DeploymentID, error) {
+	t.Helper()
+	return func(*store.Store) (core.DeploymentID, error) {
+		t.Error("enqueue called for an ineligible commit")
+		return 0, errors.New("enqueue refused")
+	}
+}
+
+func mustSettle(t *testing.T, st *store.Store, c core.TrackedCommit, eval core.ChecksEvaluation) (core.TrackedCommit, bool) {
+	t.Helper()
+	settled, promoted, err := st.SettleTrackedCommit(t.Context(), c.ID, eval, enqueueDeployment(t, c))
+	if err != nil {
+		t.Fatalf("SettleTrackedCommit(%d): %v", c.ID, err)
+	}
+	return settled, promoted
+}
+
+func mustEnqueue(t *testing.T, st *store.Store, c core.TrackedCommit) core.TrackedCommit {
+	t.Helper()
+	settled, promoted := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt))
+	if !promoted {
+		t.Fatalf("SettleTrackedCommit(%d) did not enqueue: %+v", c.ID, settled)
+	}
+	return settled
+}
+
+func setChecksState(t *testing.T, st *store.Store, id core.TrackedCommitID, state core.ChecksState, at time.Time) {
+	t.Helper()
+	mustExec(t, st, "UPDATE tracked_commits SET checks_state = $2, evaluated_at = $3 WHERE id = $1", id, state, at)
+}
+
+func trackedIDs(commits []core.TrackedCommit) []core.TrackedCommitID {
+	ids := make([]core.TrackedCommitID, 0, len(commits))
+	for _, c := range commits {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
 func TestTrackCommit(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	in := newTrackedCommit("blog", shaOf('a'))
-	got, created, err := st.TrackCommit(t.Context(), in)
+	got, outcome, err := st.TrackCommit(t.Context(), in, isHead(true))
 	if err != nil {
 		t.Fatalf("TrackCommit: %v", err)
 	}
-	if !created {
-		t.Error("created = false for a new commit")
+	if outcome != core.TrackCreated {
+		t.Errorf("outcome = %s for a new commit, want %s", outcome, core.TrackCreated)
 	}
 	if got.ID == 0 || got.Target != in.Target || got.Commit != in.Commit || got.Branch != "main" ||
 		got.Source != core.SourceWebhook || got.PushedBy != "octocat" || got.ChecksState != core.ChecksPending {
 		t.Errorf("TrackCommit = %+v", got)
 	}
-	if len(got.Checks) != 0 || got.EvaluatedAt != nil || !got.Open() || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+	if len(got.Checks) != 0 || got.EvaluatedAt != nil || got.EnqueuedAt != nil || !got.Open() || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 		t.Errorf("new tracked commit is not empty and open: %+v", got)
 	}
 
 	again := in
 	again.Source = core.SourcePoll
 	again.PushedBy = "someone-else"
-	repeat, created, err := st.TrackCommit(t.Context(), again)
+	repeat, outcome, err := st.TrackCommit(t.Context(), again, isHead(true))
 	if err != nil {
 		t.Fatalf("second TrackCommit: %v", err)
 	}
-	if created {
-		t.Error("created = true for a known commit")
+	if outcome != core.TrackExisting {
+		t.Errorf("outcome = %s for a known commit, want %s", outcome, core.TrackExisting)
 	}
-	if repeat.ID != got.ID || repeat.Source != core.SourceWebhook || repeat.PushedBy != "octocat" {
-		t.Errorf("second TrackCommit = %+v, want the original row %+v", repeat, got)
+	if repeat.ID != got.ID || repeat.Source != core.SourceWebhook || repeat.PushedBy != "octocat" || !repeat.Open() {
+		t.Errorf("second TrackCommit = %+v, want the original open row %+v", repeat, got)
 	}
 	if n := queryInt(t, st, "SELECT count(*) FROM tracked_commits"); n != 1 {
 		t.Errorf("tracked_commits has %d rows, want 1", n)
@@ -106,9 +149,11 @@ func TestTrackCommitRejectsInvalidInput(t *testing.T) {
 
 	deployment := core.DeploymentID(1)
 	newer := core.TrackedCommitID(1)
+	enqueuedAt := evaluatedAt
 	tests := []struct {
 		name    string
 		mutate  func(*core.TrackedCommit)
+		head    func(context.Context) (bool, error)
 		wantErr string
 		wantIs  error
 	}{
@@ -116,16 +161,23 @@ func TestTrackCommitRejectsInvalidInput(t *testing.T) {
 		{name: "missing branch", mutate: func(c *core.TrackedCommit) { c.Branch = "" }, wantErr: "branch"},
 		{name: "unknown source", mutate: func(c *core.TrackedCommit) { c.Source = "cron" }, wantErr: "source"},
 		{name: "already evaluated", mutate: func(c *core.TrackedCommit) { c.ChecksState = core.ChecksSuccess }, wantErr: "start pending"},
-		{name: "already enqueued", mutate: func(c *core.TrackedCommit) { c.DeploymentID = &deployment }, wantErr: "already be enqueued"},
+		{name: "already linked", mutate: func(c *core.TrackedCommit) { c.DeploymentID = &deployment }, wantErr: "already be enqueued"},
+		{name: "already enqueued", mutate: func(c *core.TrackedCommit) { c.EnqueuedAt = &enqueuedAt }, wantErr: "already be enqueued"},
 		{name: "already superseded", mutate: func(c *core.TrackedCommit) { c.SupersededByID = &newer }, wantErr: "superseded"},
+		{name: "no head check", head: nil, wantErr: "branch head check"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			st := storetest.Open(t)
 			c := newTrackedCommit("blog", shaOf('a'))
-			tt.mutate(&c)
-			_, _, err := st.TrackCommit(t.Context(), c)
+			head := isHead(true)
+			if tt.mutate != nil {
+				tt.mutate(&c)
+			} else {
+				head = tt.head
+			}
+			_, _, err := st.TrackCommit(t.Context(), c, head)
 			if err == nil {
 				t.Fatal("TrackCommit accepted invalid input")
 			}
@@ -142,17 +194,13 @@ func TestTrackCommitRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestTrackCommitSupersedesOlderOpenCommits(t *testing.T) {
+func TestTrackCommitSupersedesOtherOpenCommits(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
-	enqueued := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, enqueued.ID, core.ChecksSuccess)
-	if _, ok, err := st.PromoteTrackedCommit(t.Context(), enqueued.ID, enqueueDeployment(t, enqueued)); err != nil || !ok {
-		t.Fatalf("PromoteTrackedCommit = %v, %v", ok, err)
-	}
+	enqueued := mustEnqueue(t, st, mustTrack(t, st, newTrackedCommit("blog", shaOf('a'))))
 	failed := mustTrack(t, st, newTrackedCommit("blog", shaOf('b')))
-	mustSaveChecks(t, st, failed.ID, core.ChecksFailure)
+	mustSettle(t, st, failed, evaluation(core.ChecksFailure, evaluatedAt))
 	pending := mustTrack(t, st, newTrackedCommit("blog", shaOf('c')))
 	other := mustTrack(t, st, newTrackedCommit("api", shaOf('d')))
 
@@ -178,13 +226,135 @@ func TestTrackCommitSupersedesOlderOpenCommits(t *testing.T) {
 			t.Errorf("%s: superseded by %v, want %d", tt.name, got.SupersededByID, *tt.wantSuperseded)
 		}
 	}
+}
 
-	again := mustTrack(t, st, newTrackedCommit("blog", shaOf('c')))
-	if again.ID != pending.ID || again.SupersededByID == nil || *again.SupersededByID != head.ID {
-		t.Errorf("re-tracking a superseded SHA = %+v, want the superseded row", again)
+func TestTrackCommitIgnoresPushesThatAreNoLongerTheHead(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	newer := mustTrack(t, st, newTrackedCommit("blog", shaOf('b')))
+
+	got, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('a')), isHead(false))
+	if err != nil {
+		t.Fatalf("TrackCommit of a late delivery: %v", err)
+	}
+	if outcome != core.TrackStale || got.ID != 0 {
+		t.Errorf("TrackCommit of a late delivery = %+v, %s, want %s and no commit", got, outcome, core.TrackStale)
+	}
+	if got := mustGetTracked(t, st, newer.ID); !got.Open() {
+		t.Errorf("a late delivery of an older push closed the branch head: %+v", got)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM tracked_commits"); n != 1 {
+		t.Errorf("tracked_commits has %d rows, want only the head", n)
+	}
+
+	enqueued := mustEnqueue(t, st, newer)
+	if _, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')), isHead(false)); err != nil || outcome != core.TrackStale {
+		t.Errorf("TrackCommit of a known commit that is no longer the head = %s, %v, want %s", outcome, err, core.TrackStale)
+	}
+	if got := mustGetTracked(t, st, enqueued.ID); got.EnqueuedAt == nil {
+		t.Errorf("stale push changed the enqueued commit: %+v", got)
+	}
+}
+
+func TestTrackCommitReopensSupersededCommitThatIsTheHeadAgain(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	first := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	second := mustTrack(t, st, newTrackedCommit("blog", shaOf('b')))
+
+	reopened, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('a')), isHead(true))
+	if err != nil {
+		t.Fatalf("TrackCommit after a force-push back: %v", err)
+	}
+	if outcome != core.TrackReopened || reopened.ID != first.ID || !reopened.Open() {
+		t.Errorf("TrackCommit after a force-push back = %+v, %s, want the first row reopened", reopened, outcome)
+	}
+	if got := mustGetTracked(t, st, second.ID); got.SupersededByID == nil || *got.SupersededByID != first.ID {
+		t.Errorf("commit force-pushed away = %+v, want superseded by %d", got, first.ID)
+	}
+
+	mustEnqueue(t, st, reopened)
+	third := mustTrack(t, st, newTrackedCommit("blog", shaOf('c')))
+	again, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('a')), isHead(true))
+	if err != nil {
+		t.Fatalf("TrackCommit of an enqueued commit that is the head again: %v", err)
+	}
+	if outcome != core.TrackExisting || again.ID != first.ID || again.SupersededByID != nil || again.EnqueuedAt == nil {
+		t.Errorf("TrackCommit of an enqueued head = %+v, %s, want the enqueued row unchanged", again, outcome)
+	}
+	if got := mustGetTracked(t, st, third.ID); got.SupersededByID == nil || *got.SupersededByID != first.ID {
+		t.Errorf("commit force-pushed away = %+v, want superseded by %d", got, first.ID)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != 1 {
+		t.Errorf("%d deployments, want 1", n)
+	}
+}
+
+func TestTrackCommitHeadCheckError(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	head := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	boom := errors.New("github unavailable")
+	_, _, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')), func(context.Context) (bool, error) { return false, boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("TrackCommit error = %v, want %v", err, boom)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM tracked_commits"); n != 1 {
+		t.Errorf("tracked_commits has %d rows after a failed head check, want 1", n)
 	}
 	if got := mustGetTracked(t, st, head.ID); !got.Open() {
-		t.Errorf("re-tracking an older SHA superseded the head: %+v", got)
+		t.Errorf("failed head check closed the previous head: %+v", got)
+	}
+}
+
+func TestTrackCommitChecksTheHeadUnderTheAppLock(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	slowHead := func(ctx context.Context) (bool, error) {
+		close(entered)
+		<-release
+		return true, ctx.Err()
+	}
+
+	var (
+		wg      sync.WaitGroup
+		errs    [2]error
+		newerAt time.Time
+	)
+	wg.Go(func() {
+		_, _, errs[0] = st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('a')), slowHead)
+	})
+	<-entered
+	wg.Go(func() {
+		_, _, errs[1] = st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')), isHead(true))
+		newerAt = time.Now()
+	})
+	time.Sleep(200 * time.Millisecond)
+	releasedAt := time.Now()
+	close(release)
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent TrackCommit: %v", err)
+		}
+	}
+	if newerAt.Before(releasedAt) {
+		t.Error("the newer push was tracked while the older push held the app lock")
+	}
+	commits, err := st.TrackedCommits(t.Context(), "acme/blog", shaOf('b'))
+	if err != nil || len(commits) != 1 || !commits[0].Open() {
+		t.Fatalf("newer push = %+v, %v, want it open", commits, err)
+	}
+	older, err := st.TrackedCommits(t.Context(), "acme/blog", shaOf('a'))
+	if err != nil || len(older) != 1 || older[0].SupersededByID == nil || *older[0].SupersededByID != commits[0].ID {
+		t.Errorf("older push = %+v, %v, want superseded by the newer push", older, err)
 	}
 }
 
@@ -202,9 +372,9 @@ func TestTrackCommitSameSHAForTwoApps(t *testing.T) {
 	if first.ID == second.ID {
 		t.Fatal("two apps share one tracked commit row")
 	}
-	mustSaveChecks(t, st, first.ID, core.ChecksFailure)
-	if got := mustGetTracked(t, st, second.ID); got.ChecksState != core.ChecksPending {
-		t.Errorf("saving checks for one app changed the other: %+v", got)
+	mustSettle(t, st, first, evaluation(core.ChecksFailure, evaluatedAt))
+	if got := mustGetTracked(t, st, second.ID); got.ChecksState != core.ChecksPending || !got.Open() {
+		t.Errorf("settling one app changed the other: %+v", got)
 	}
 
 	commits, err := st.TrackedCommits(t.Context(), "ACME/Blog", shaOf('a'))
@@ -242,37 +412,26 @@ func TestTrackedCommitsLookup(t *testing.T) {
 			if err != nil {
 				t.Fatalf("TrackedCommits: %v", err)
 			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("TrackedCommits = %+v, want ids %v", got, tt.want)
-			}
-			for i, c := range got {
-				if c.ID != tt.want[i] {
-					t.Errorf("TrackedCommits[%d].ID = %d, want %d", i, c.ID, tt.want[i])
-				}
+			if ids := trackedIDs(got); !slices.Equal(ids, tt.want) && len(ids)+len(tt.want) > 0 {
+				t.Errorf("TrackedCommits = %v, want %v", ids, tt.want)
 			}
 		})
 	}
 }
 
-func TestGetTrackedCommitNotFound(t *testing.T) {
+func TestTrackedCommitNotFound(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	if _, err := st.GetTrackedCommit(t.Context(), 42); !errors.Is(err, core.ErrNotFound) {
 		t.Errorf("GetTrackedCommit error = %v, want ErrNotFound", err)
 	}
-	if _, err := st.SaveCommitChecks(t.Context(), 42, core.ChecksSuccess, nil); !errors.Is(err, core.ErrNotFound) {
-		t.Errorf("SaveCommitChecks error = %v, want ErrNotFound", err)
-	}
-	if _, _, err := st.PromoteTrackedCommit(t.Context(), 42, func(*store.Store) (core.DeploymentID, error) {
-		t.Error("enqueue called for a missing commit")
-		return 0, nil
-	}); !errors.Is(err, core.ErrNotFound) {
-		t.Errorf("PromoteTrackedCommit error = %v, want ErrNotFound", err)
+	if _, _, err := st.SettleTrackedCommit(t.Context(), 42, evaluation(core.ChecksSuccess, evaluatedAt), refuseEnqueue(t)); !errors.Is(err, core.ErrNotFound) {
+		t.Errorf("SettleTrackedCommit error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestSaveCommitChecks(t *testing.T) {
+func TestSettleTrackedCommitSavesEvidence(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
@@ -281,28 +440,73 @@ func TestSaveCommitChecks(t *testing.T) {
 		{Name: "lint", Kind: core.CheckKindStatus, State: core.ChecksSuccess},
 		{Name: "test", Kind: core.CheckKindRun, State: core.ChecksFailure, Detail: "failure"},
 	}
-	saved := mustSaveChecks(t, st, c.ID, core.ChecksFailure, checks...)
-	if saved.ChecksState != core.ChecksFailure || saved.EvaluatedAt == nil {
-		t.Errorf("SaveCommitChecks = %+v", saved)
+	saved, promoted := mustSettle(t, st, c, evaluation(core.ChecksFailure, evaluatedAt, checks...))
+	if promoted || saved.ChecksState != core.ChecksFailure || saved.EvaluatedAt == nil || !saved.EvaluatedAt.Equal(evaluatedAt) || !saved.Open() {
+		t.Errorf("SettleTrackedCommit = %+v, %v", saved, promoted)
 	}
-	if len(saved.Checks) != 2 || saved.Checks[0] != checks[0] || saved.Checks[1] != checks[1] {
+	if !slices.Equal(saved.Checks, checks) {
 		t.Errorf("saved checks = %+v, want %+v", saved.Checks, checks)
 	}
 
-	rerun := mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
-	if rerun.ChecksState != core.ChecksSuccess || len(rerun.Checks) != 0 {
-		t.Errorf("re-evaluation after failure = %+v, want success with no checks", rerun)
+	pending, promoted := mustSettle(t, st, c, evaluation(core.ChecksPending, evaluatedAt.Add(time.Second)))
+	if promoted || pending.ChecksState != core.ChecksPending || len(pending.Checks) != 0 {
+		t.Errorf("re-run = %+v, %v, want pending with no checks", pending, promoted)
 	}
 	if n := queryInt(t, st, "SELECT count(*) FROM tracked_commits WHERE checks = '[]'::jsonb"); n != 1 {
 		t.Errorf("nil checks stored as %d empty arrays, want 1", n)
 	}
+}
 
-	if _, err := st.SaveCommitChecks(t.Context(), c.ID, "neutral", nil); err == nil {
-		t.Error("SaveCommitChecks accepted an unknown state")
+func TestSettleTrackedCommitRejectsInvalidEvaluations(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	tests := []struct {
+		name string
+		eval core.ChecksEvaluation
+		want string
+	}{
+		{name: "unknown state", eval: evaluation("neutral", evaluatedAt), want: "checks state"},
+		{name: "no read time", eval: evaluation(core.ChecksSuccess, time.Time{}), want: "time the checks were read"},
+	}
+	for _, tt := range tests {
+		if _, _, err := st.SettleTrackedCommit(t.Context(), c.ID, tt.eval, refuseEnqueue(t)); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: SettleTrackedCommit error = %v, want %q", tt.name, err, tt.want)
+		}
+	}
+	if got := mustGetTracked(t, st, c.ID); got.EvaluatedAt != nil {
+		t.Errorf("invalid evaluation was saved: %+v", got)
 	}
 }
 
-func TestSaveCommitChecksIgnoresClosedCommits(t *testing.T) {
+func TestSettleTrackedCommitEnqueuesOnce(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	promoted := mustEnqueue(t, st, c)
+	if promoted.DeploymentID == nil || promoted.EnqueuedAt == nil || promoted.Open() || promoted.ChecksState != core.ChecksSuccess {
+		t.Fatalf("enqueued commit = %+v, want success, a deployment and closed", promoted)
+	}
+	d, err := st.GetDeployment(t.Context(), *promoted.DeploymentID)
+	if err != nil {
+		t.Fatalf("GetDeployment: %v", err)
+	}
+	if d.Commit != c.Commit || d.State != core.StateQueued {
+		t.Errorf("deployment = %+v", d)
+	}
+
+	again, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, evaluation(core.ChecksFailure, evaluatedAt.Add(time.Hour)), refuseEnqueue(t))
+	if err != nil || ok {
+		t.Errorf("settling an enqueued commit = %v, %v, want false", ok, err)
+	}
+	if again.DeploymentID == nil || *again.DeploymentID != d.ID || again.ChecksState != core.ChecksSuccess || !again.UpdatedAt.Equal(promoted.UpdatedAt) {
+		t.Errorf("settling an enqueued commit changed it: %+v", again)
+	}
+}
+
+func TestSettleTrackedCommitIgnoresClosedCommits(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -311,14 +515,10 @@ func TestSaveCommitChecksIgnoresClosedCommits(t *testing.T) {
 	}{
 		{name: "enqueued", close: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
 			t.Helper()
-			mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
-			if _, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, enqueueDeployment(t, c)); err != nil || !ok {
-				t.Fatalf("PromoteTrackedCommit = %v, %v", ok, err)
-			}
+			mustEnqueue(t, st, c)
 		}},
 		{name: "superseded", close: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
 			t.Helper()
-			mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
 			mustTrack(t, st, newTrackedCommit(c.Target.App, shaOf('b')))
 		}},
 	}
@@ -329,123 +529,115 @@ func TestSaveCommitChecksIgnoresClosedCommits(t *testing.T) {
 			c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
 			tt.close(t, st, c)
 			before := mustGetTracked(t, st, c.ID)
-			got := mustSaveChecks(t, st, c.ID, core.ChecksFailure, core.Check{Name: "test", Kind: core.CheckKindRun, State: core.ChecksFailure})
-			if got.ChecksState != core.ChecksSuccess || len(got.Checks) != 0 || !got.UpdatedAt.Equal(before.UpdatedAt) {
-				t.Errorf("SaveCommitChecks on a closed commit changed it: %+v", got)
+			got, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, evaluation(core.ChecksSuccess, evaluatedAt.Add(time.Hour)), refuseEnqueue(t))
+			if err != nil || ok {
+				t.Fatalf("SettleTrackedCommit = %v, %v, want false", ok, err)
+			}
+			if got.ChecksState != before.ChecksState || !got.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Errorf("SettleTrackedCommit on a closed commit changed it: %+v, was %+v", got, before)
 			}
 		})
 	}
 }
 
-func TestPromoteTrackedCommit(t *testing.T) {
+func TestSettleTrackedCommitIgnoresOlderSnapshots(t *testing.T) {
 	t.Parallel()
 
-	st := storetest.Open(t)
-	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
-
-	promoted, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, enqueueDeployment(t, c))
-	if err != nil || !ok {
-		t.Fatalf("PromoteTrackedCommit = %v, %v", ok, err)
-	}
-	if promoted.DeploymentID == nil || promoted.Open() {
-		t.Fatalf("promoted commit = %+v, want a deployment id", promoted)
-	}
-	d, err := st.GetDeployment(t.Context(), *promoted.DeploymentID)
-	if err != nil {
-		t.Fatalf("GetDeployment: %v", err)
-	}
-	if d.Commit != c.Commit || d.State != core.StateQueued {
-		t.Errorf("deployment = %+v", d)
-	}
-
-	again, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, func(*store.Store) (core.DeploymentID, error) {
-		t.Error("enqueue called for an enqueued commit")
-		return 0, nil
-	})
-	if err != nil || ok {
-		t.Errorf("second PromoteTrackedCommit = %v, %v, want false", ok, err)
-	}
-	if again.DeploymentID == nil || *again.DeploymentID != d.ID {
-		t.Errorf("second PromoteTrackedCommit = %+v, want the existing deployment", again)
-	}
-}
-
-func TestPromoteTrackedCommitRefusesIneligibleCommits(t *testing.T) {
-	t.Parallel()
-
+	older, newer := evaluatedAt, evaluatedAt.Add(time.Second)
 	tests := []struct {
-		name    string
-		prepare func(t *testing.T, st *store.Store, c core.TrackedCommit)
+		name         string
+		first        core.ChecksEvaluation
+		second       core.ChecksEvaluation
+		wantState    core.ChecksState
+		wantEnqueued bool
 	}{
-		{name: "pending", prepare: func(*testing.T, *store.Store, core.TrackedCommit) {}},
-		{name: "failure", prepare: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
-			t.Helper()
-			mustSaveChecks(t, st, c.ID, core.ChecksFailure)
-		}},
-		{name: "superseded", prepare: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
-			t.Helper()
-			mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
-			mustTrack(t, st, newTrackedCommit(c.Target.App, shaOf('b')))
-		}},
+		{
+			name:  "newer pending saved first, then older success",
+			first: evaluation(core.ChecksPending, newer), second: evaluation(core.ChecksSuccess, older),
+			wantState: core.ChecksPending,
+		},
+		{
+			name:  "older pending saved first, then newer success",
+			first: evaluation(core.ChecksPending, older), second: evaluation(core.ChecksSuccess, newer),
+			wantState: core.ChecksSuccess, wantEnqueued: true,
+		},
+		{
+			name:  "newer failure saved first, then older success",
+			first: evaluation(core.ChecksFailure, newer), second: evaluation(core.ChecksSuccess, older),
+			wantState: core.ChecksFailure,
+		},
+		{
+			name:  "same read time",
+			first: evaluation(core.ChecksPending, older), second: evaluation(core.ChecksSuccess, older),
+			wantState: core.ChecksPending,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			st := storetest.Open(t)
 			c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-			tt.prepare(t, st, c)
-			got, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, func(*store.Store) (core.DeploymentID, error) {
-				t.Error("enqueue called for an ineligible commit")
-				return 0, nil
-			})
-			if err != nil || ok {
-				t.Errorf("PromoteTrackedCommit = %v, %v, want false", ok, err)
+			mustSettle(t, st, c, tt.first)
+			got, promoted := mustSettle(t, st, c, tt.second)
+			if got.ChecksState != tt.wantState || promoted != tt.wantEnqueued {
+				t.Errorf("after both evaluations = %s, enqueued %v, want %s, enqueued %v", got.ChecksState, promoted, tt.wantState, tt.wantEnqueued)
 			}
-			if got.ID != c.ID || got.DeploymentID != nil {
-				t.Errorf("PromoteTrackedCommit returned %+v", got)
+			if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != boolInt(tt.wantEnqueued) {
+				t.Errorf("%d deployments, want %d", n, boolInt(tt.wantEnqueued))
 			}
 		})
 	}
 }
 
-func TestPromoteTrackedCommitRollsBackOnEnqueueError(t *testing.T) {
+func TestSettleTrackedCommitEnqueuesSavedSuccess(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
+	setChecksState(t, st, c.ID, core.ChecksSuccess, evaluatedAt.Add(time.Minute))
+
+	got, promoted := mustSettle(t, st, c, evaluation(core.ChecksPending, evaluatedAt))
+	if !promoted || got.ChecksState != core.ChecksSuccess || got.DeploymentID == nil {
+		t.Errorf("settling a saved success with an older snapshot = %+v, %v, want it enqueued", got, promoted)
+	}
+}
+
+func TestSettleTrackedCommitRollsBackOnEnqueueError(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
 	boom := errors.New("queue unavailable")
 
-	_, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, func(tx *store.Store) (core.DeploymentID, error) {
+	_, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, evaluation(core.ChecksSuccess, evaluatedAt), func(tx *store.Store) (core.DeploymentID, error) {
 		if _, err := enqueueDeployment(t, c)(tx); err != nil {
 			return 0, err
 		}
 		return 0, boom
 	})
 	if !errors.Is(err, boom) || ok {
-		t.Fatalf("PromoteTrackedCommit = %v, %v, want %v", ok, err, boom)
+		t.Fatalf("SettleTrackedCommit = %v, %v, want %v", ok, err, boom)
 	}
-	if got := mustGetTracked(t, st, c.ID); got.DeploymentID != nil || got.ChecksState != core.ChecksSuccess {
-		t.Errorf("tracked commit after failed enqueue = %+v", got)
+	got := mustGetTracked(t, st, c.ID)
+	if got.DeploymentID != nil || got.EnqueuedAt != nil || got.ChecksState != core.ChecksPending || got.EvaluatedAt != nil {
+		t.Errorf("tracked commit after failed enqueue = %+v, want it unchanged", got)
 	}
 	if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != 0 {
 		t.Errorf("%d deployments left after failed enqueue, want 0", n)
 	}
 
-	if _, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, enqueueDeployment(t, c)); err != nil || !ok {
-		t.Errorf("retry PromoteTrackedCommit = %v, %v", ok, err)
+	if _, ok := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt)); !ok {
+		t.Error("retry with the same snapshot did not enqueue")
 	}
 }
 
-func TestPromoteTrackedCommitConcurrently(t *testing.T) {
+func TestSettleTrackedCommitConcurrently(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
 
-	const promoters = 8
+	const settlers = 8
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -453,10 +645,15 @@ func TestPromoteTrackedCommitConcurrently(t *testing.T) {
 		errs     []error
 	)
 	start := make(chan struct{})
-	for range promoters {
+	for i := range settlers {
 		wg.Go(func() {
 			<-start
-			_, ok, err := st.PromoteTrackedCommit(t.Context(), c.ID, enqueueDeployment(t, c))
+			state := core.ChecksSuccess
+			if i%2 == 1 {
+				state = core.ChecksPending
+			}
+			eval := evaluation(state, evaluatedAt.Add(time.Duration(i)*time.Second))
+			_, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, eval, enqueueDeployment(t, c))
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -471,22 +668,28 @@ func TestPromoteTrackedCommitConcurrently(t *testing.T) {
 	wg.Wait()
 
 	for _, err := range errs {
-		t.Errorf("PromoteTrackedCommit: %v", err)
+		t.Errorf("SettleTrackedCommit: %v", err)
 	}
-	if promoted != 1 {
-		t.Errorf("%d promotions succeeded, want 1", promoted)
+	if promoted > 1 {
+		t.Errorf("%d settles enqueued, want at most 1", promoted)
 	}
-	if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != 1 {
-		t.Errorf("%d deployments created, want 1", n)
+	if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != promoted {
+		t.Errorf("%d deployments created, want %d", n, promoted)
+	}
+	got := mustGetTracked(t, st, c.ID)
+	if got.Open() && got.ChecksState != core.ChecksPending {
+		t.Errorf("commit left open as %s", got.ChecksState)
+	}
+	if final, ok := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt.Add(time.Hour))); final.Open() || promoted+boolInt(ok) != 1 {
+		t.Errorf("after a final green snapshot = %+v, want exactly one enqueue overall", final)
 	}
 }
 
-func TestTrackAndPromoteConcurrently(t *testing.T) {
+func TestTrackAndSettleConcurrently(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	old := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, old.ID, core.ChecksSuccess)
 
 	var (
 		wg       sync.WaitGroup
@@ -496,18 +699,18 @@ func TestTrackAndPromoteConcurrently(t *testing.T) {
 	start := make(chan struct{})
 	wg.Go(func() {
 		<-start
-		_, promoted, errs[0] = st.PromoteTrackedCommit(t.Context(), old.ID, enqueueDeployment(t, old))
+		_, promoted, errs[0] = st.SettleTrackedCommit(t.Context(), old.ID, evaluation(core.ChecksSuccess, evaluatedAt), enqueueDeployment(t, old))
 	})
 	wg.Go(func() {
 		<-start
-		_, _, errs[1] = st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')))
+		_, _, errs[1] = st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')), isHead(true))
 	})
 	close(start)
 	wg.Wait()
 
 	for _, err := range errs {
 		if err != nil {
-			t.Fatalf("concurrent track and promote: %v", err)
+			t.Fatalf("concurrent track and settle: %v", err)
 		}
 	}
 	got := mustGetTracked(t, st, old.ID)
@@ -519,64 +722,85 @@ func TestTrackAndPromoteConcurrently(t *testing.T) {
 	}
 }
 
-func TestPendingTrackedCommits(t *testing.T) {
+func followed(app, repository, branch string) core.FollowedBranch {
+	return core.FollowedBranch{Target: core.Target{App: app, Environment: "prod"}, Repository: repository, Branch: branch}
+}
+
+func TestOpenTrackedCommits(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
 	blog := mustTrack(t, st, newTrackedCommit("blog", shaOf('b')))
 	api := mustTrack(t, st, newTrackedCommit("api", shaOf('c')))
+	mustSettle(t, st, api, evaluation(core.ChecksPending, evaluatedAt.Add(2*time.Minute)))
 	failed := mustTrack(t, st, newTrackedCommit("web", shaOf('d')))
-	mustSaveChecks(t, st, failed.ID, core.ChecksFailure)
-	enqueued := mustTrack(t, st, newTrackedCommit("docs", shaOf('e')))
-	mustSaveChecks(t, st, enqueued.ID, core.ChecksSuccess)
-	if _, ok, err := st.PromoteTrackedCommit(t.Context(), enqueued.ID, enqueueDeployment(t, enqueued)); err != nil || !ok {
-		t.Fatalf("PromoteTrackedCommit = %v, %v", ok, err)
-	}
-	worker := mustTrack(t, st, newTrackedCommit("worker", shaOf('f')))
+	mustSettle(t, st, failed, evaluation(core.ChecksFailure, evaluatedAt))
+	mustEnqueue(t, st, mustTrack(t, st, newTrackedCommit("docs", shaOf('e'))))
+	green := mustTrack(t, st, newTrackedCommit("worker", shaOf('f')))
+	setChecksState(t, st, green.ID, core.ChecksSuccess, evaluatedAt.Add(time.Minute))
+	mustTrack(t, st, newTrackedCommit("removed", shaOf('1')))
+	moved := newTrackedCommit("moved", shaOf('2'))
+	mustTrack(t, st, moved)
+	rebranched := newTrackedCommit("rebranched", shaOf('3'))
+	mustTrack(t, st, rebranched)
 
+	all := []core.FollowedBranch{
+		followed("blog", "acme/BLOG", "main"),
+		followed("api", "Acme/api", "main"),
+		followed("web", "Acme/web", "main"),
+		followed("docs", "Acme/docs", "main"),
+		followed("worker", "Acme/worker", "main"),
+		followed("moved", "Acme/moved-v2", "main"),
+		followed("rebranched", "Acme/rebranched", "release"),
+	}
 	tests := []struct {
-		limit int
-		want  []core.TrackedCommitID
+		name     string
+		followed []core.FollowedBranch
+		limit    int
+		want     []core.TrackedCommitID
 	}{
-		{limit: 10, want: []core.TrackedCommitID{blog.ID, api.ID, worker.ID}},
-		{limit: 2, want: []core.TrackedCommitID{blog.ID, api.ID}},
+		{name: "least recently evaluated first", followed: all, limit: 10, want: []core.TrackedCommitID{blog.ID, failed.ID, green.ID, api.ID}},
+		{name: "limit", followed: all, limit: 2, want: []core.TrackedCommitID{blog.ID, failed.ID}},
+		{name: "one app", followed: all[1:2], limit: 10, want: []core.TrackedCommitID{api.ID}},
+		{name: "nothing followed", limit: 10},
 	}
 	for _, tt := range tests {
-		got, err := st.PendingTrackedCommits(t.Context(), tt.limit)
-		if err != nil {
-			t.Fatalf("PendingTrackedCommits(%d): %v", tt.limit, err)
-		}
-		var ids []core.TrackedCommitID
-		for _, c := range got {
-			ids = append(ids, c.ID)
-		}
-		if len(ids) != len(tt.want) {
-			t.Fatalf("PendingTrackedCommits(%d) = %v, want %v", tt.limit, ids, tt.want)
-		}
-		for i := range ids {
-			if ids[i] != tt.want[i] {
-				t.Errorf("PendingTrackedCommits(%d) = %v, want %v", tt.limit, ids, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := st.OpenTrackedCommits(t.Context(), tt.followed, tt.limit)
+			if err != nil {
+				t.Fatalf("OpenTrackedCommits: %v", err)
 			}
-		}
+			if ids := trackedIDs(got); !slices.Equal(ids, tt.want) && len(ids)+len(tt.want) > 0 {
+				t.Errorf("OpenTrackedCommits = %v, want %v", ids, tt.want)
+			}
+		})
 	}
-	if _, err := st.PendingTrackedCommits(t.Context(), 0); err == nil {
-		t.Error("PendingTrackedCommits(0) accepted a non-positive limit")
+	if _, err := st.OpenTrackedCommits(t.Context(), all, 0); err == nil {
+		t.Error("OpenTrackedCommits(0) accepted a non-positive limit")
 	}
 }
 
-func TestTrackedCommitDeploymentDeleteSetsNull(t *testing.T) {
+func TestTrackedCommitStaysClosedWhenItsDeploymentIsDeleted(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
 	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	mustSaveChecks(t, st, c.ID, core.ChecksSuccess)
-	promoted, _, err := st.PromoteTrackedCommit(t.Context(), c.ID, enqueueDeployment(t, c))
-	if err != nil {
-		t.Fatalf("PromoteTrackedCommit: %v", err)
-	}
+	promoted := mustEnqueue(t, st, c)
 	mustExec(t, st, "DELETE FROM deployments WHERE id = $1", *promoted.DeploymentID)
-	if got := mustGetTracked(t, st, c.ID); got.DeploymentID != nil {
+	got := mustGetTracked(t, st, c.ID)
+	if got.DeploymentID != nil {
 		t.Errorf("deployment_id = %d after the deployment was deleted, want null", *got.DeploymentID)
+	}
+	if got.Open() || got.EnqueuedAt == nil {
+		t.Errorf("commit reopened after its deployment was deleted: %+v", got)
+	}
+	open, err := st.OpenTrackedCommits(t.Context(), []core.FollowedBranch{followed("blog", "acme/blog", "main")}, 10)
+	if err != nil || len(open) != 0 {
+		t.Errorf("OpenTrackedCommits = %+v, %v, want none", open, err)
+	}
+	if _, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, evaluation(core.ChecksSuccess, evaluatedAt.Add(time.Hour)), refuseEnqueue(t)); err != nil || ok {
+		t.Errorf("SettleTrackedCommit = %v, %v, want no new deployment", ok, err)
 	}
 }

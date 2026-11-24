@@ -20,14 +20,16 @@ CREATE TABLE tracked_commits (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     evaluated_at timestamptz,
+    enqueued_at timestamptz,
     CONSTRAINT tracked_commits_app_id_commit_sha_key UNIQUE (app_id, commit_sha),
+    CONSTRAINT tracked_commits_enqueued_check CHECK (deployment_id IS NULL OR enqueued_at IS NOT NULL),
     CONSTRAINT tracked_commits_deployment_id_key UNIQUE (deployment_id)
 );
 
 CREATE INDEX tracked_commits_commit_sha_idx ON tracked_commits (commit_sha);
 
-CREATE INDEX tracked_commits_pending_idx ON tracked_commits (app_id, id)
-    WHERE checks_state = 'pending' AND deployment_id IS NULL AND superseded_by_id IS NULL;
+CREATE INDEX tracked_commits_open_idx ON tracked_commits (app_id)
+    WHERE enqueued_at IS NULL AND superseded_by_id IS NULL;
 
 CREATE INDEX tracked_commits_superseded_by_id_idx ON tracked_commits (superseded_by_id)
     WHERE superseded_by_id IS NOT NULL;

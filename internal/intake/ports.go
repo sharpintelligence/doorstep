@@ -12,14 +12,19 @@ type Queue interface {
 
 type EnqueueFunc func(ctx context.Context, q Queue) (core.DeploymentID, error)
 
+type HeadCheck func(ctx context.Context) (bool, error)
+
 type Commits interface {
-	Track(ctx context.Context, c core.TrackedCommit) (core.TrackedCommit, error)
+	Track(ctx context.Context, c core.TrackedCommit, isHead HeadCheck) (core.TrackedCommit, core.TrackOutcome, error)
 	Tracked(ctx context.Context, repository, sha string) ([]core.TrackedCommit, error)
-	SaveChecks(ctx context.Context, id core.TrackedCommitID, state core.ChecksState, checks []core.Check) (core.TrackedCommit, error)
-	Promote(ctx context.Context, id core.TrackedCommitID, enqueue EnqueueFunc) (core.TrackedCommit, bool, error)
-	Pending(ctx context.Context, limit int) ([]core.TrackedCommit, error)
+	Settle(ctx context.Context, id core.TrackedCommitID, eval core.ChecksEvaluation, enqueue EnqueueFunc) (core.TrackedCommit, bool, error)
+	Open(ctx context.Context, followed []core.FollowedBranch, limit int) ([]core.TrackedCommit, error)
 }
 
 type CheckSource interface {
-	Checks(ctx context.Context, repository, sha string, withSuites bool) (Snapshot, error)
+	Checks(ctx context.Context, repository, sha string, names []string) (Snapshot, error)
+}
+
+type Branches interface {
+	BranchHead(ctx context.Context, repository, branch string) (string, error)
 }

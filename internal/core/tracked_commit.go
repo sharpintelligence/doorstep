@@ -63,6 +63,7 @@ type TrackedCommit struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	EvaluatedAt    *time.Time
+	EnqueuedAt     *time.Time
 }
 
 func (c TrackedCommit) Validate() error {
@@ -80,5 +81,37 @@ func (c TrackedCommit) Validate() error {
 }
 
 func (c TrackedCommit) Open() bool {
-	return c.DeploymentID == nil && c.SupersededByID == nil
+	return c.EnqueuedAt == nil && c.SupersededByID == nil
+}
+
+type ChecksEvaluation struct {
+	State  ChecksState
+	Checks []Check
+	ReadAt time.Time
+}
+
+func (e ChecksEvaluation) Validate() error {
+	var errs []error
+	if !e.State.Valid() {
+		errs = append(errs, fmt.Errorf("unknown checks state %q", e.State))
+	}
+	if e.ReadAt.IsZero() {
+		errs = append(errs, errors.New("checks evaluation needs the time the checks were read"))
+	}
+	return errors.Join(errs...)
+}
+
+type TrackOutcome string
+
+const (
+	TrackCreated  TrackOutcome = "created"
+	TrackReopened TrackOutcome = "reopened"
+	TrackExisting TrackOutcome = "existing"
+	TrackStale    TrackOutcome = "stale"
+)
+
+type FollowedBranch struct {
+	Target     Target
+	Repository string
+	Branch     string
 }

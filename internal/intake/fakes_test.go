@@ -6,46 +6,63 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/intake"
 )
 
 type fakeCommits struct {
-	mu       sync.Mutex
-	rows     []core.TrackedCommit
-	queue    *fakeQueue
-	trackErr map[core.Target]error
-	saveErr  error
+	mu        sync.Mutex
+	rows      []core.TrackedCommit
+	queue     *fakeQueue
+	trackErr  map[core.Target]error
+	settleErr error
+	openCalls [][]core.FollowedBranch
 }
 
 func newFakeCommits() *fakeCommits {
 	return &fakeCommits{queue: &fakeQueue{}, trackErr: map[core.Target]error{}}
 }
 
-func (f *fakeCommits) Track(_ context.Context, c core.TrackedCommit) (core.TrackedCommit, error) {
+func (f *fakeCommits) Track(ctx context.Context, c core.TrackedCommit, isHead intake.HeadCheck) (core.TrackedCommit, core.TrackOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.trackErr[c.Target]; err != nil {
-		return core.TrackedCommit{}, err
+		return core.TrackedCommit{}, "", err
 	}
 	if err := c.Validate(); err != nil {
-		return core.TrackedCommit{}, err
+		return core.TrackedCommit{}, "", err
 	}
-	for _, row := range f.rows {
-		if row.Target == c.Target && row.Commit.SHA == c.Commit.SHA {
-			return row, nil
-		}
+	head, err := isHead(ctx)
+	if err != nil {
+		return core.TrackedCommit{}, "", err
 	}
-	c.ID = core.TrackedCommitID(len(f.rows) + 1)
+	if !head {
+		return core.TrackedCommit{}, core.TrackStale, nil
+	}
+	outcome := core.TrackCreated
+	index := slices.IndexFunc(f.rows, func(row core.TrackedCommit) bool {
+		return row.Target == c.Target && row.Commit.SHA == c.Commit.SHA
+	})
+	switch {
+	case index < 0:
+		c.ID = core.TrackedCommitID(len(f.rows) + 1)
+		f.rows = append(f.rows, c)
+		index = len(f.rows) - 1
+	case f.rows[index].SupersededByID != nil && f.rows[index].EnqueuedAt == nil:
+		f.rows[index].SupersededByID = nil
+		outcome = core.TrackReopened
+	default:
+		outcome = core.TrackExisting
+	}
+	id := f.rows[index].ID
 	for i := range f.rows {
-		if f.rows[i].Target == c.Target && f.rows[i].Open() {
-			id := c.ID
+		if i != index && f.rows[i].Target == c.Target && f.rows[i].Open() {
 			f.rows[i].SupersededByID = &id
 		}
 	}
-	f.rows = append(f.rows, c)
-	return c, nil
+	return f.rows[index], outcome, nil
 }
 
 func (f *fakeCommits) Tracked(_ context.Context, repository, sha string) ([]core.TrackedCommit, error) {
@@ -60,41 +77,47 @@ func (f *fakeCommits) Tracked(_ context.Context, repository, sha string) ([]core
 	return out, nil
 }
 
-func (f *fakeCommits) SaveChecks(_ context.Context, id core.TrackedCommitID, state core.ChecksState, checks []core.Check) (core.TrackedCommit, error) {
+func (f *fakeCommits) Settle(ctx context.Context, id core.TrackedCommitID, eval core.ChecksEvaluation, enqueue intake.EnqueueFunc) (core.TrackedCommit, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.saveErr != nil {
-		return core.TrackedCommit{}, f.saveErr
+	if f.settleErr != nil {
+		return core.TrackedCommit{}, false, f.settleErr
 	}
-	row := &f.rows[id-1]
-	if row.Open() {
-		row.ChecksState = state
-		row.Checks = slices.Clone(checks)
+	if err := eval.Validate(); err != nil {
+		return core.TrackedCommit{}, false, err
 	}
-	return *row, nil
-}
-
-func (f *fakeCommits) Promote(ctx context.Context, id core.TrackedCommitID, enqueue intake.EnqueueFunc) (core.TrackedCommit, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	row := &f.rows[id-1]
-	if row.ChecksState != core.ChecksSuccess || !row.Open() {
-		return *row, false, nil
+	row := f.rows[id-1]
+	if !row.Open() {
+		return row, false, nil
+	}
+	if row.EvaluatedAt == nil || row.EvaluatedAt.Before(eval.ReadAt) {
+		readAt := eval.ReadAt
+		row.ChecksState, row.Checks, row.EvaluatedAt = eval.State, slices.Clone(eval.Checks), &readAt
+	}
+	if row.ChecksState != core.ChecksSuccess {
+		f.rows[id-1] = row
+		return row, false, nil
 	}
 	deploymentID, err := enqueue(ctx, f.queue)
 	if err != nil {
 		return core.TrackedCommit{}, false, err
 	}
-	row.DeploymentID = &deploymentID
-	return *row, true, nil
+	enqueuedAt := eval.ReadAt
+	row.DeploymentID, row.EnqueuedAt = &deploymentID, &enqueuedAt
+	f.rows[id-1] = row
+	return row, true, nil
 }
 
-func (f *fakeCommits) Pending(_ context.Context, limit int) ([]core.TrackedCommit, error) {
+func (f *fakeCommits) Open(_ context.Context, followed []core.FollowedBranch, limit int) ([]core.TrackedCommit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.openCalls = append(f.openCalls, slices.Clone(followed))
 	var out []core.TrackedCommit
 	for _, row := range f.rows {
-		if row.ChecksState == core.ChecksPending && row.Open() && len(out) < limit {
+		follows := slices.ContainsFunc(followed, func(b core.FollowedBranch) bool {
+			return b.Target == row.Target && strings.EqualFold(b.Repository, row.Commit.Repository) && b.Branch == row.Branch
+		})
+		if follows && row.Open() && len(out) < limit {
 			out = append(out, row)
 		}
 	}
@@ -151,7 +174,7 @@ func (q *fakeQueue) fail(err error) {
 type checksCall struct {
 	repository string
 	sha        string
-	withSuites bool
+	names      []string
 }
 
 type fakeChecks struct {
@@ -159,20 +182,26 @@ type fakeChecks struct {
 	snapshots map[string]intake.Snapshot
 	err       error
 	calls     []checksCall
+	onRead    func(call int, s intake.Snapshot) intake.Snapshot
 }
 
 func newFakeChecks() *fakeChecks {
 	return &fakeChecks{snapshots: map[string]intake.Snapshot{}}
 }
 
-func (f *fakeChecks) Checks(_ context.Context, repository, sha string, withSuites bool) (intake.Snapshot, error) {
+func (f *fakeChecks) Checks(_ context.Context, repository, sha string, names []string) (intake.Snapshot, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, checksCall{repository: repository, sha: sha, withSuites: withSuites})
-	if f.err != nil {
-		return intake.Snapshot{}, f.err
+	f.calls = append(f.calls, checksCall{repository: repository, sha: sha, names: slices.Clone(names)})
+	call, onRead, err := len(f.calls), f.onRead, f.err
+	snapshot := f.snapshots[strings.ToLower(repository)+"@"+sha]
+	f.mu.Unlock()
+	if err != nil {
+		return intake.Snapshot{}, err
 	}
-	return f.snapshots[strings.ToLower(repository)+"@"+sha], nil
+	if onRead != nil {
+		snapshot = onRead(call, snapshot)
+	}
+	return snapshot, nil
 }
 
 func (f *fakeChecks) set(repository, sha string, s intake.Snapshot) {
@@ -200,6 +229,55 @@ func (f *fakeChecks) lastCall() checksCall {
 		return checksCall{}
 	}
 	return f.calls[len(f.calls)-1]
+}
+
+type fakeBranches struct {
+	mu    sync.Mutex
+	heads map[string]string
+	err   error
+	calls int
+}
+
+func newFakeBranches() *fakeBranches {
+	return &fakeBranches{heads: map[string]string{}}
+}
+
+func (f *fakeBranches) BranchHead(_ context.Context, repository, branch string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.heads[strings.ToLower(repository)+":"+branch], nil
+}
+
+func (f *fakeBranches) set(repository, branch, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heads[strings.ToLower(repository)+":"+branch] = sha
+}
+
+func (f *fakeBranches) fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+type tickingClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTickingClock() *tickingClock {
+	return &tickingClock{now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *tickingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(time.Second)
+	return c.now
 }
 
 var errBoom = errors.New("boom")

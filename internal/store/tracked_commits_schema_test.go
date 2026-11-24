@@ -103,8 +103,19 @@ func TestSchemaTrackedCommitsUniqueness(t *testing.T) {
 		d := mustCreate(t, st, newDeployment("blog"), 0)
 		first := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
 		second := mustTrack(t, st, newTrackedCommit("other", shaOf('b')))
-		mustExec(t, st, "UPDATE tracked_commits SET deployment_id = $1 WHERE id = $2", d.ID, first.ID)
-		err := store.ExecSQL(t.Context(), st, "UPDATE tracked_commits SET deployment_id = $1 WHERE id = $2", d.ID, second.ID)
+		mustExec(t, st, "UPDATE tracked_commits SET deployment_id = $1, enqueued_at = now() WHERE id = $2", d.ID, first.ID)
+		err := store.ExecSQL(t.Context(), st, "UPDATE tracked_commits SET deployment_id = $1, enqueued_at = now() WHERE id = $2", d.ID, second.ID)
 		assertConstraint(t, err, "tracked_commits_deployment_id_key")
 	})
+}
+
+func TestSchemaTrackedCommitsLinkedDeploymentNeedsEnqueuedAt(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	d := mustCreate(t, st, newDeployment("blog"), 0)
+	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	err := store.ExecSQL(t.Context(), st, "UPDATE tracked_commits SET deployment_id = $1 WHERE id = $2", d.ID, c.ID)
+	assertConstraint(t, err, "tracked_commits_enqueued_check")
+	mustExec(t, st, "UPDATE tracked_commits SET enqueued_at = now() WHERE id = $1", c.ID)
 }
