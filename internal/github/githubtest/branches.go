@@ -22,7 +22,21 @@ func (s *Server) BranchCalls() int64 {
 }
 
 func (s *Server) registerBranches() {
-	s.Handle("GET /repos/{owner}/{repo}/git/ref/heads/{branch...}", http.HandlerFunc(s.handleBranchRef))
+	s.Handle("GET /repos/{owner}/{repo}/git/ref/{ref...}", http.HandlerFunc(s.handleRef))
+}
+
+func (s *Server) handleRef(w http.ResponseWriter, r *http.Request) {
+	if repo, ok := s.fakeRepo(r); ok {
+		repo.serve((*Repo).handleGetRef, w, r)
+		return
+	}
+	branch, isBranch := strings.CutPrefix(r.PathValue("ref"), "heads/")
+	if !isBranch {
+		WriteError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	r.SetPathValue("branch", branch)
+	s.handleBranchRef(w, r)
 }
 
 func (s *Server) handleBranchRef(w http.ResponseWriter, r *http.Request) {

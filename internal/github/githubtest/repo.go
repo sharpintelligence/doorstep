@@ -19,7 +19,6 @@ import (
 const (
 	maxContentsSize  = 1 << 20
 	base64LineLength = 60
-	defaultPerPage   = 30
 )
 
 type Commit struct {
@@ -251,7 +250,6 @@ func (s *Server) routeFakeRepos() {
 	routes := map[string]func(*Repo, http.ResponseWriter, *http.Request){
 		"GET /repos/{owner}/{repo}/contents/{path...}":           (*Repo).handleGetContents,
 		"PUT /repos/{owner}/{repo}/contents/{path...}":           (*Repo).handlePutContents,
-		"GET /repos/{owner}/{repo}/git/ref/{ref...}":             (*Repo).handleGetRef,
 		"POST /repos/{owner}/{repo}/git/refs":                    (*Repo).handleCreateRef,
 		"DELETE /repos/{owner}/{repo}/git/refs/{ref...}":         (*Repo).handleDeleteRef,
 		"PATCH /repos/{owner}/{repo}/git/refs/{ref...}":          (*Repo).handleUpdateRef,
@@ -270,15 +268,19 @@ func (s *Server) routeFakeRepos() {
 				WriteError(w, http.StatusNotFound, "Not Found")
 				return
 			}
-			repo.mu.Lock()
-			hook := repo.onRequest
-			repo.mu.Unlock()
-			if hook != nil {
-				hook(req.Method, req.URL.Path)
-			}
-			handle(repo, w, req)
+			repo.serve(handle, w, req)
 		}))
 	}
+}
+
+func (r *Repo) serve(handle func(*Repo, http.ResponseWriter, *http.Request), w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	hook := r.onRequest
+	r.mu.Unlock()
+	if hook != nil {
+		hook(req.Method, req.URL.Path)
+	}
+	handle(r, w, req)
 }
 
 func (s *Server) fakeRepo(req *http.Request) (*Repo, bool) {
