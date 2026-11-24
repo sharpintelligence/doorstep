@@ -852,3 +852,32 @@ func TestRunServeError(t *testing.T) {
 		t.Fatalf("Run() = %v, want net.ErrClosed", err)
 	}
 }
+
+func TestRoutesRejectReservedPatterns(t *testing.T) {
+	t.Parallel()
+
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	tests := []struct {
+		name    string
+		pattern string
+		wantMsg string
+	}{
+		{name: "healthz", pattern: "GET /healthz", wantMsg: `"GET /healthz" is reserved`},
+		{name: "readyz", pattern: "GET /readyz", wantMsg: `"GET /readyz" is reserved`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				v := recover()
+				msg, _ := v.(string)
+				if !strings.Contains(msg, tt.wantMsg) {
+					t.Errorf("panic = %v, want message containing %q", v, tt.wantMsg)
+				}
+			}()
+			New(Options{Routes: map[string]http.Handler{tt.pattern: handler}})
+			t.Error("New did not panic")
+		})
+	}
+}

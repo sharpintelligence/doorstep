@@ -52,6 +52,7 @@ func TestHandler(t *testing.T) {
 			opts: Options{Build: build, QueueDepth: func(context.Context) (int, error) { return 3, nil }},
 			wantContains: []string{
 				"doorstep_queue_depth 3",
+				"doorstep_queue_depth_errors_total 0",
 			},
 		},
 		{
@@ -59,8 +60,9 @@ func TestHandler(t *testing.T) {
 			opts: Options{Build: build, QueueDepth: func(context.Context) (int, error) { return 0, errors.New("db down") }},
 			wantContains: []string{
 				"doorstep_build_info{",
+				"doorstep_queue_depth_errors_total 1",
 			},
-			wantMissing: []string{"doorstep_queue_depth"},
+			wantMissing: []string{"doorstep_queue_depth "},
 		},
 		{
 			name:  "recorded values are exposed",

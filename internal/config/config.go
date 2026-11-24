@@ -58,9 +58,10 @@ type Registry struct {
 func Default() Config {
 	return Config{
 		Server: Server{
-			ListenAddr:      ":8080",
-			ShutdownDelay:   5 * time.Second,
-			ShutdownTimeout: 15 * time.Second,
+			ListenAddr:        ":8080",
+			MetricsListenAddr: ":9090",
+			ShutdownDelay:     5 * time.Second,
+			ShutdownTimeout:   15 * time.Second,
 		},
 		Log: Log{
 			Level:  "info",
@@ -123,6 +124,8 @@ func (c Config) Validate() error {
 	if c.Server.MetricsListenAddr != "" {
 		if err := validateListenAddr(c.Server.MetricsListenAddr); err != nil {
 			errs = append(errs, fmt.Errorf("metrics listen address: %w", err))
+		} else if sharesFixedPort(c.Server.ListenAddr, c.Server.MetricsListenAddr) {
+			errs = append(errs, fmt.Errorf("metrics listen address: %q must differ from the listen address; leave it empty to serve /metrics on the main listener", c.Server.MetricsListenAddr))
 		}
 	}
 	if c.Server.ShutdownDelay < 0 {
@@ -184,4 +187,28 @@ func validateListenAddr(addr string) error {
 		return fmt.Errorf("port %q must be a number between 0 and 65535", port)
 	}
 	return nil
+}
+
+func sharesFixedPort(a, b string) bool {
+	hostA, portA, errA := net.SplitHostPort(a)
+	hostB, portB, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if portA == "0" || portB == "0" {
+		return false
+	}
+	if portA != portB {
+		return false
+	}
+	return hostA == hostB || isWildcardHost(hostA) || isWildcardHost(hostB)
+}
+
+func isWildcardHost(host string) bool {
+	switch host {
+	case "", "0.0.0.0", "::":
+		return true
+	default:
+		return false
+	}
 }

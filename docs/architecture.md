@@ -73,7 +73,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/api` | HTTP JSON API (`/api/v1`) handlers | planned |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
 | `internal/auth` | hashed API tokens for CLI/CI, OIDC login for the UI | planned |
-| `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector | built |
+| `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener | built |
 
 Planned packages are created by the bead that implements them; there are no placeholder packages.
 
@@ -255,20 +255,20 @@ Setup, permissions and the least-privilege model are described in [github-app.md
 
 ## HTTP surface
 
-One listener (default `:8080`) serves everything public, plus `/metrics` unless it is moved to its own listener:
+One listener (default `:8080`) serves everything public:
 
 | Path | Purpose | Status |
 | --- | --- | --- |
 | `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
 | `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
-| `GET /metrics` | Prometheus exposition; on the main listener by default, only on the metrics listener when `--metrics-listen-addr` is set (see [metrics.md](metrics.md)) | built |
+| `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) | built |
 | `/api/v1/...` | JSON API | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
 
 Readiness checks are registered by name in `server.Options.Checks`; `serve` registers `postgres`, which pings the connection pool. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. Further handlers are mounted through `server.Options.Routes` (a map of `ServeMux` pattern to handler), which keeps them inside the request logging and panic recovery middleware; `/metrics` requests are logged at debug like probes.
 
-`/metrics` is served on the main listener by default. When `--metrics-listen-addr` is set, a second `server.Server` serves it on that address only and the main listener does not mount it, so it is not exposed through the public ingress. Metrics live in a private Prometheus registry owned by `metrics.Metrics` (no global registry); components record through the typed `metrics.Recorder`, and the queue depth is read lazily from the database at scrape time.
+`/metrics` is served by a second `server.Server` on its own listener (default `:9090`, `--metrics-listen-addr`), which also answers `/healthz` and `/readyz` with the same checks, and the main listener does not mount it. This keeps it off the public ingress that receives GitHub webhooks, as the metrics are unauthenticated and name apps and builds. Setting the address to empty is an explicit opt-in to mounting `/metrics` on the main listener. Server-mounted routes may not use the built-in `GET /healthz` and `GET /readyz` patterns; `server.New` panics on them. Metrics live in a private Prometheus registry owned by `metrics.Metrics` (no global registry); components record through the typed `metrics.Recorder`, and the queue depth is read lazily from the database at scrape time, bounded by a 2 second timeout.
 
 On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for the shutdown delay (default 5 s), so `/readyz` answers `503 {"status":"shutting_down"}` while load balancers and Kubernetes endpoints stop routing to it. It then stops accepting connections and waits up to the shutdown timeout for in-flight requests before exiting. A second signal during shutdown terminates the process immediately.
 

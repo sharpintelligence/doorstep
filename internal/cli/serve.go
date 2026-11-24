@@ -42,7 +42,7 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	flags.StringVar(&overrides.Server.ListenAddr, flagListenAddr, defaults.Server.ListenAddr,
 		"address to listen on as host:port (env "+config.EnvListenAddr+")")
 	flags.StringVar(&overrides.Server.MetricsListenAddr, flagMetricsListenAddr, defaults.Server.MetricsListenAddr,
-		"address for a separate /metrics listener as host:port; empty serves /metrics on the main listener (env "+config.EnvMetricsListenAddr+")")
+		"address for the /metrics listener as host:port; empty serves /metrics on the main listener instead (env "+config.EnvMetricsListenAddr+")")
 	flags.DurationVar(&overrides.Server.ShutdownDelay, flagShutdownDelay, defaults.Server.ShutdownDelay,
 		"time to keep serving while reporting not ready before draining on shutdown (env "+config.EnvShutdownDelay+")")
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
@@ -100,12 +100,13 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 	build := buildinfo.Read()
 	m := metrics.New(metrics.Options{Logger: logger, Build: build})
 	routes := map[string]http.Handler{"GET /metrics": m.Handler()}
+	checks := map[string]server.Check{"postgres": st.Ping}
 	newServer := func(routes map[string]http.Handler) *server.Server {
 		return server.New(server.Options{
+			Checks:          checks,
 			Logger:          logger,
 			ShutdownDelay:   cfg.Server.ShutdownDelay,
 			ShutdownTimeout: cfg.Server.ShutdownTimeout,
-			Checks:          map[string]server.Check{"postgres": st.Ping},
 			Routes:          routes,
 		})
 	}

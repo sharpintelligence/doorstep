@@ -16,7 +16,7 @@ An environment variable that is set but empty counts as set, and is then validat
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `--listen-addr` | `DOORSTEP_LISTEN_ADDR` | `:8080` | Address for the HTTP listener as `host:port`. The port must be numeric; `0` picks a free port. |
-| `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | empty | Address for a separate `/metrics` listener as `host:port`. Empty serves `/metrics` on the main listener; when set, `/metrics` is served only on this address. Recommended whenever the main listener is reachable from the internet. See [metrics.md](metrics.md). |
+| `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | `:9090` | Address for the `/metrics` listener as `host:port`; `/metrics` is served only there. Must differ from `--listen-addr`. Set it to an empty value to serve `/metrics` on the main listener instead, which is only safe when the main listener is not reachable from the internet. See [metrics.md](metrics.md). |
 | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` | `5s` | How long the server keeps serving after `SIGINT`/`SIGTERM` while `/readyz` reports `shutting_down`, before it stops accepting connections. Gives load balancers time to stop routing to the instance. Go duration syntax. `0s` disables it; must not be negative. |
 | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` | `15s` | How long in-flight requests may run once the shutdown delay has passed, before the server is closed. Go duration syntax (`30s`, `1m`). Must be positive. |
 | `--log-level` | `DOORSTEP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (case-insensitive). Health probe and `/metrics` requests are logged at `debug`. |

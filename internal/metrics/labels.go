@@ -71,3 +71,31 @@ func (r GateResult) label() string {
 		return unknownLabel
 	}
 }
+
+type GateKind string
+
+const (
+	GateKindCI      GateKind = "ci"
+	GateKindLock    GateKind = "lock"
+	GateKindArgoCD  GateKind = "argocd"
+	GateKindSoak    GateKind = "soak"
+	GateKindMetrics GateKind = "metrics"
+	GateKindManual  GateKind = "manual"
+)
+
+func (k GateKind) label() string {
+	switch k {
+	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual:
+		return string(k)
+	default:
+		return unknownLabel
+	}
+}
+
+var (
+	allOutcomes = []Outcome{OutcomeSucceeded, OutcomeFailed, OutcomeRolledBack, OutcomeRollbackFailed, OutcomeCancelled, OutcomeSuperseded}
+	allReasons  = []RollbackReason{RollbackReasonGateFailed, RollbackReasonSyncFailed, RollbackReasonManual}
+	allPhases   = []Phase{PhaseDeploy, PhaseRollback}
+	allResults  = []GateResult{GateResultPassed, GateResultFailed, GateResultError}
+	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual}
+)

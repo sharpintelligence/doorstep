@@ -28,6 +28,14 @@ func TestLabels(t *testing.T) {
 		{"result passed", GateResultPassed.label(), "passed"},
 		{"result failed", GateResultFailed.label(), "failed"},
 		{"result error", GateResultError.label(), "error"},
+		{"gate ci", GateKindCI.label(), "ci"},
+		{"gate lock", GateKindLock.label(), "lock"},
+		{"gate argocd", GateKindArgoCD.label(), "argocd"},
+		{"gate soak", GateKindSoak.label(), "soak"},
+		{"gate metrics", GateKindMetrics.label(), "metrics"},
+		{"gate manual", GateKindManual.label(), "manual"},
+		{"gate unknown", GateKind("my-custom-gate").label(), "unknown"},
+		{"gate empty", GateKind("").label(), "unknown"},
 		{"result unknown", GateResult("maybe").label(), "unknown"},
 	}
 

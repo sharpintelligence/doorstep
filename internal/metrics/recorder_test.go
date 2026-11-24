@@ -190,10 +190,11 @@ func TestRecorderGateEvaluated(t *testing.T) {
 	t.Parallel()
 
 	type call struct {
-		app, gate string
-		phase     Phase
-		result    GateResult
-		duration  time.Duration
+		app      string
+		gate     GateKind
+		phase    Phase
+		result   GateResult
+		duration time.Duration
 	}
 	tests := []struct {
 		name  string
@@ -203,22 +204,29 @@ func TestRecorderGateEvaluated(t *testing.T) {
 		{
 			name: "grouped by all labels",
 			calls: []call{
-				{"web", "health", PhaseDeploy, GateResultPassed, 200 * time.Millisecond},
-				{"web", "health", PhaseDeploy, GateResultPassed, 300 * time.Millisecond},
-				{"web", "soak", PhaseRollback, GateResultFailed, 10 * time.Minute},
-				{"web", "metrics", PhaseDeploy, GateResultError, time.Second},
+				{"web", GateKindArgoCD, PhaseDeploy, GateResultPassed, 200 * time.Millisecond},
+				{"web", GateKindArgoCD, PhaseDeploy, GateResultPassed, 300 * time.Millisecond},
+				{"web", GateKindSoak, PhaseRollback, GateResultFailed, 10 * time.Minute},
+				{"web", GateKindMetrics, PhaseDeploy, GateResultError, time.Second},
 			},
 			want: []histogramSample{
-				{labels: map[string]string{"app": "web", "gate": "health", "phase": "deploy", "result": "passed"}, count: 2, sum: 0.5},
+				{labels: map[string]string{"app": "web", "gate": "argocd", "phase": "deploy", "result": "passed"}, count: 2, sum: 0.5},
 				{labels: map[string]string{"app": "web", "gate": "soak", "phase": "rollback", "result": "failed"}, count: 1, sum: 600},
 				{labels: map[string]string{"app": "web", "gate": "metrics", "phase": "deploy", "result": "error"}, count: 1, sum: 1},
 			},
 		},
 		{
 			name:  "unknown phase and result are normalised",
-			calls: []call{{"web", "health", Phase("x"), GateResult("y"), time.Second}},
+			calls: []call{{"web", GateKindArgoCD, Phase("x"), GateResult("y"), time.Second}},
 			want: []histogramSample{
-				{labels: map[string]string{"app": "web", "gate": "health", "phase": "unknown", "result": "unknown"}, count: 1, sum: 1},
+				{labels: map[string]string{"app": "web", "gate": "argocd", "phase": "unknown", "result": "unknown"}, count: 1, sum: 1},
+			},
+		},
+		{
+			name:  "unknown gate kind is normalised",
+			calls: []call{{"web", GateKind("user-defined-name"), PhaseDeploy, GateResultPassed, time.Second}},
+			want: []histogramSample{
+				{labels: map[string]string{"app": "web", "gate": "unknown", "phase": "deploy", "result": "passed"}, count: 1, sum: 1},
 			},
 		},
 	}

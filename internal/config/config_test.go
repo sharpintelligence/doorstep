@@ -23,7 +23,7 @@ func TestDefault(t *testing.T) {
 	t.Parallel()
 
 	want := Config{
-		Server: Server{ListenAddr: ":8080", ShutdownDelay: 5 * time.Second, ShutdownTimeout: 15 * time.Second},
+		Server: Server{ListenAddr: ":8080", MetricsListenAddr: ":9090", ShutdownDelay: 5 * time.Second, ShutdownTimeout: 15 * time.Second},
 		Log:    Log{Level: "info", Format: "json"},
 		GitHub: GitHub{APIURL: "https://api.github.com"},
 	}
@@ -112,17 +112,18 @@ func TestFromEnv(t *testing.T) {
 		{
 			name: "all variables",
 			env: map[string]string{
-				EnvListenAddr:      ":9090",
-				EnvShutdownDelay:   "2s",
-				EnvShutdownTimeout: "5s",
-				EnvLogLevel:        "warn",
-				EnvLogFormat:       "text",
-				EnvDatabaseURL:     testDatabaseURL,
+				EnvListenAddr:        ":9090",
+				EnvMetricsListenAddr: ":9091",
+				EnvShutdownDelay:     "2s",
+				EnvShutdownTimeout:   "5s",
+				EnvLogLevel:          "warn",
+				EnvLogFormat:         "text",
+				EnvDatabaseURL:       testDatabaseURL,
 
 				EnvRegistryCredentialsFile: "/creds.json",
 			},
 			want: func(c *Config) {
-				c.Server = Server{ListenAddr: ":9090", ShutdownDelay: 2 * time.Second, ShutdownTimeout: 5 * time.Second}
+				c.Server = Server{ListenAddr: ":9090", MetricsListenAddr: ":9091", ShutdownDelay: 2 * time.Second, ShutdownTimeout: 5 * time.Second}
 				c.Log = Log{Level: "warn", Format: "text"}
 				c.Database.URL = testDatabaseURL
 				c.Registry = Registry{CredentialsFile: "/creds.json"}
@@ -184,6 +185,40 @@ func TestValidate(t *testing.T) {
 			name:    "metrics named port",
 			mutate:  func(c *Config) { c.Server.MetricsListenAddr = ":http" },
 			wantErr: []string{"metrics listen address", `port "http"`},
+		},
+		{
+			name: "metrics listen address equal to listen address",
+			mutate: func(c *Config) {
+				c.Server.ListenAddr = "127.0.0.1:8080"
+				c.Server.MetricsListenAddr = "127.0.0.1:8080"
+			},
+			wantErr: []string{"metrics listen address", "must differ"},
+		},
+		{
+			name: "metrics wildcard host clashes with listen address host",
+			mutate: func(c *Config) {
+				c.Server.ListenAddr = "127.0.0.1:8080"
+				c.Server.MetricsListenAddr = ":8080"
+			},
+			wantErr: []string{"metrics listen address", "must differ"},
+		},
+		{
+			name: "same port on different hosts",
+			mutate: func(c *Config) {
+				c.Server.ListenAddr = "127.0.0.1:8080"
+				c.Server.MetricsListenAddr = "127.0.0.2:8080"
+			},
+		},
+		{
+			name: "both ephemeral ports",
+			mutate: func(c *Config) {
+				c.Server.ListenAddr = ":0"
+				c.Server.MetricsListenAddr = ":0"
+			},
+		},
+		{
+			name:   "empty metrics address with any listen address",
+			mutate: func(c *Config) { c.Server.MetricsListenAddr = "" },
 		},
 		{name: "text format", mutate: func(c *Config) { c.Log.Format = "text" }},
 		{

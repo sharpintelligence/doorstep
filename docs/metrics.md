@@ -4,11 +4,11 @@ doorstep exposes Prometheus metrics at `GET /metrics`. The endpoint is unauthent
 
 ## Enabling and scraping
 
-By default `/metrics` is served on the main listener (`--listen-addr`, default `:8080`), so a homelab needs no extra configuration.
+By default `/metrics` is served on a dedicated listener, `--metrics-listen-addr` (`DOORSTEP_METRICS_LISTEN_ADDR`, default `:9090`), and is not mounted on the main listener at all. The dedicated listener also answers `/healthz` and `/readyz`, with the same readiness checks as the main listener. The address must differ from `--listen-addr`.
 
-Set `--metrics-listen-addr` (`DOORSTEP_METRICS_LISTEN_ADDR`) to serve it on a dedicated address instead, for example `:9090`. The endpoint is then not mounted on the main listener at all. The dedicated listener also answers `/healthz` and `/readyz`.
+The main listener is the one that receives public GitHub webhooks. Metrics reveal application names and build information and the endpoint is unauthenticated, so authentication is left to network placement: keep the metrics port off the public ingress.
 
-Use the dedicated listener whenever the main listener is reachable from the internet (for GitHub webhooks, for instance). Metrics reveal application names and build information, and authentication is left to network placement: keep the metrics port off the public ingress.
+To serve `/metrics` on the main listener instead, opt in explicitly with an empty address (`--metrics-listen-addr=""` or `DOORSTEP_METRICS_LISTEN_ADDR=""`). Do that only when the main listener is not reachable from the internet.
 
 Prometheus `scrape_config`:
 
@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment, rollback, gate and queue series appear once the engine and queue features record into them. Until then only `doorstep_build_info`, the Go runtime and the process metrics are emitted.
+Deployment, rollback, gate and queue series appear once the engine and queue features record into them. Until then only `doorstep_build_info`, the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -46,13 +46,14 @@ Deployment, rollback, gate and queue series appear once the engine and queue fea
 | `doorstep_deployment_duration_seconds` | histogram | `app`, `outcome` | Time from deployment start to a final outcome. Its `_count` is the number of finished deployments per outcome. |
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
 | `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time spent evaluating a gate. Its `_count` is the number of evaluations. |
-| `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time. Omitted for a scrape if the database cannot be read (a warning is logged), rather than reported as zero. |
+| `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time. The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
+| `doorstep_queue_depth_errors_total` | counter | none | Scrapes where the queue depth could not be read. The first failure of a streak is logged at `warn` and the recovery at `info`; further failures are only counted. |
 | `doorstep_build_info` | gauge | `version`, `commit`, `go_version` | Always 1; identifies the running build. |
 | `go_*`, `process_*` | various | | Standard Go runtime and process collectors. `process_*` is only available on platforms that support it (Linux). |
 
 ### Labels
 
-`app` is the application name from the configuration and `gate` is the gate kind (`health`, `metrics` or `soak`), never a user-defined instance name. There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
+`app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
 
 The other labels are fixed sets. Any other value is recorded as `unknown`.
 
@@ -61,6 +62,7 @@ The other labels are fixed sets. Any other value is recorded as `unknown`.
 | `outcome` | `succeeded`, `failed` (failed before anything was pinned, nothing to roll back), `rolled_back`, `rollback_failed`, `cancelled`, `superseded`, `unknown` |
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
+| `gate` | `ci`, `lock`, `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
 | `result` | `passed`, `failed`, `error` (the gate could not be evaluated), `unknown` |
 
 ### Histogram buckets
@@ -76,10 +78,10 @@ Counters and histograms are per process: sum them across replicas (`sum by (app)
 
 ## PromQL examples
 
-Deployment failure ratio per app over the last day:
+Deployment failure ratio per app over the last day (cancelled and superseded deployments are not failures):
 
 ```promql
-sum by (app) (increase(doorstep_deployment_duration_seconds_count{outcome!="succeeded"}[1d]))
+sum by (app) (increase(doorstep_deployment_duration_seconds_count{outcome=~"failed|rolled_back|rollback_failed"}[1d]))
 /
 sum by (app) (increase(doorstep_deployment_duration_seconds_count[1d]))
 ```

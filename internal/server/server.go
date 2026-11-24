@@ -19,6 +19,9 @@ const (
 	checkTimeout           = 2 * time.Second
 	checkCacheTTL          = time.Second
 
+	patternHealthz = "GET /healthz"
+	patternReadyz  = "GET /readyz"
+
 	checkPassed = "ok"
 	checkFailed = "fail"
 
@@ -80,9 +83,12 @@ func New(opts Options) *Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc(patternHealthz, s.handleHealthz)
+	mux.HandleFunc(patternReadyz, s.handleReadyz)
 	for pattern, handler := range opts.Routes {
+		if pattern == patternHealthz || pattern == patternReadyz {
+			panic(fmt.Sprintf("server: route pattern %q is reserved for a built-in endpoint", pattern))
+		}
 		mux.Handle(pattern, handler)
 	}
 	s.handler = logRequests(s.logger, recoverPanics(s.logger, mux))

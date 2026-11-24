@@ -63,6 +63,23 @@ func (r *Recorder) Rollback(app string, reason RollbackReason) {
 	r.rollbacks.WithLabelValues(app, reason.label()).Inc()
 }
 
-func (r *Recorder) GateEvaluated(app, gate string, phase Phase, result GateResult, duration time.Duration) {
-	r.gateDuration.WithLabelValues(app, gate, phase.label(), result.label()).Observe(duration.Seconds())
+func (r *Recorder) GateEvaluated(app string, gate GateKind, phase Phase, result GateResult, duration time.Duration) {
+	r.gateDuration.WithLabelValues(app, gate.label(), phase.label(), result.label()).Observe(duration.Seconds())
+}
+
+func (r *Recorder) PrimeApp(app string) {
+	r.deploymentsStarted.WithLabelValues(app)
+	for _, outcome := range allOutcomes {
+		r.deploymentDuration.WithLabelValues(app, outcome.label())
+	}
+	for _, reason := range allReasons {
+		r.rollbacks.WithLabelValues(app, reason.label())
+	}
+	for _, gate := range allGates {
+		for _, phase := range allPhases {
+			for _, result := range allResults {
+				r.gateDuration.WithLabelValues(app, gate.label(), phase.label(), result.label())
+			}
+		}
+	}
 }
