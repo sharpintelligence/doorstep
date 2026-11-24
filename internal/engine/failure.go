@@ -211,6 +211,10 @@ func (e *Engine) failFinal(ctx context.Context, d core.Deployment, f Failure, de
 	if rollbackEligible(f, decision) && e.rollbacks != nil && e.rollbacks.Enabled(d.Target) {
 		return e.failAndRollBack(ctx, d, f, decision)
 	}
+	return e.failPlain(ctx, d, f, decision)
+}
+
+func (e *Engine) failPlain(ctx context.Context, d core.Deployment, f Failure, decision Decision) (core.Deployment, Result, error) {
 	t, err := failureTransition(f, decision, nil)
 	if err != nil {
 		return d, Result{}, err

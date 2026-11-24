@@ -46,14 +46,15 @@ func (s fakeState) clone() fakeState {
 }
 
 type fakeRepo struct {
-	mu        sync.Mutex
-	state     fakeState
-	conflicts int
-	errs      map[string]error
-	locked    []core.Target
-	txs       int
-	trailers  core.BlockTrailers
-	now       time.Time
+	mu         sync.Mutex
+	state      fakeState
+	conflicts  int
+	conflictOn core.DeploymentID
+	errs       map[string]error
+	locked     []core.Target
+	txs        int
+	trailers   core.BlockTrailers
+	now        time.Time
 }
 
 func newFakeRepo() *fakeRepo {
@@ -254,7 +255,7 @@ func (f *fakeRepo) ListDeployments(_ context.Context, filter store.DeploymentFil
 func (f *fakeRepo) TransitionDeployment(_ context.Context, t store.Transition) (core.Deployment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.conflicts > 0 {
+	if f.conflicts > 0 && (f.conflictOn == 0 || f.conflictOn == t.ID) {
 		f.conflicts--
 		return core.Deployment{}, fmt.Errorf("transition deployment %d: %w", t.ID, core.ErrStateConflict)
 	}

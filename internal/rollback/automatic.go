@@ -50,7 +50,10 @@ type AutomaticResult struct {
 	Cancelled []core.DeploymentID
 }
 
-var errNotFailed = errors.New("the failure transition must move the failing deployment to failed")
+var (
+	errNotFailed     = errors.New("the failure transition must move the failing deployment to failed")
+	errFailedChanged = errors.New("the failing deployment changed")
+)
 
 func (s *Service) Automatic(ctx context.Context, req AutomaticRequest) (AutomaticResult, error) {
 	if err := req.validate(); err != nil {
@@ -62,7 +65,7 @@ func (s *Service) Automatic(ctx context.Context, req AutomaticRequest) (Automati
 	)
 	for range MaxAttempts {
 		result, err = s.automaticOnce(ctx, req)
-		if !errors.Is(err, core.ErrStateConflict) {
+		if !errors.Is(err, core.ErrStateConflict) || errors.Is(err, errFailedChanged) {
 			break
 		}
 	}
@@ -207,7 +210,11 @@ func failDeployment(ctx context.Context, tx Repository, req AutomaticRequest, pl
 		return core.Deployment{}, err
 	}
 	if t.ID != req.Deployment.ID || t.To != core.StateFailed {
-		return core.Deployment{}, fmt.Errorf("%w: got deployment %d -> %s", errNotFailed, t.ID, t.To)
+		return core.Deployment{}, fmt.Errorf("%w: %w: got deployment %d -> %s", core.ErrInvalidRollback, errNotFailed, t.ID, t.To)
 	}
-	return tx.TransitionDeployment(ctx, t)
+	failed, err := tx.TransitionDeployment(ctx, t)
+	if errors.Is(err, core.ErrStateConflict) {
+		return core.Deployment{}, fmt.Errorf("%w: %w", errFailedChanged, err)
+	}
+	return failed, err
 }

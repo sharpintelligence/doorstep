@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -36,6 +37,10 @@ func (e *Engine) failAndRollBack(ctx context.Context, d core.Deployment, f Failu
 			return failureTransition(f, decision, &plan)
 		},
 	})
+	if errors.Is(err, core.ErrInvalidRollback) {
+		e.logFor(d).ErrorContext(ctx, "automatic rollback rejected; failing without it", slog.String("error", err.Error()))
+		return e.failPlain(ctx, d, f, decision)
+	}
 	if err != nil {
 		return d, Result{}, err
 	}

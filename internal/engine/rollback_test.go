@@ -455,3 +455,46 @@ func TestHandleAutomaticRollbackErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleFailsWithoutRollbackWhenTheRollbackIsRejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "invalid request", err: fmt.Errorf("automatic rollback: %w: unknown trigger", core.ErrInvalidRollback)},
+		{name: "transition does not fail the deployment", err: fmt.Errorf("%w: %w", core.ErrInvalidRollback, errors.New("must move to failed"))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			rollbacks := withRollbacks(h, true)
+			rollbacks.err = tt.err
+			d := failingAfterGates(h)
+
+			if _, err := h.run(t, t.Context(), d.ID); err != nil {
+				t.Fatalf("Handle = %v, want the deploy failed without a rollback", err)
+			}
+			if len(rollbacks.received()) != 1 {
+				t.Errorf("FailAndRollBack calls = %d, want 1", len(rollbacks.received()))
+			}
+			got := h.store.deployment(d.ID)
+			if got.State != core.StateFailed || !strings.HasPrefix(got.FailureReason, "after gates failed:") {
+				t.Fatalf("deployment = %s %q, want failed with the gate failure as reason", got.State, got.FailureReason)
+			}
+			recorded := h.store.recorded()
+			last := recorded[len(recorded)-1]
+			if last.Message != "failed while verifying" || autoRollbackData(t, last) != nil {
+				t.Errorf("event = %q with auto_rollback %+v, want a plain failure", last.Message, autoRollbackData(t, last))
+			}
+			if kinds := h.notifier.kinds(); !slices.Equal(kinds, []core.NotificationKind{core.NotificationDeployFailed}) {
+				t.Errorf("notifications = %v, want deploy.failed only", kinds)
+			}
+			if outcomes := h.metrics.outcomes(); !slices.Equal(outcomes, []engine.Outcome{engine.OutcomeFailed}) {
+				t.Errorf("finished metrics = %v", outcomes)
+			}
+		})
+	}
+}

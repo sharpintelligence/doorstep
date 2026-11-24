@@ -370,6 +370,7 @@ func TestAutomaticAbortsEverything(t *testing.T) {
 					return store.Transition{ID: bad.ID, From: bad.State, To: core.StateCancelled}, nil
 				}
 			},
+			wantErr: core.ErrInvalidRollback,
 		},
 		{
 			name: "the transition names another deployment",
@@ -378,6 +379,7 @@ func TestAutomaticAbortsEverything(t *testing.T) {
 					return store.Transition{ID: bad.ID + 1, From: bad.State, To: core.StateFailed, FailureReason: "x"}, nil
 				}
 			},
+			wantErr: core.ErrInvalidRollback,
 		},
 		{
 			name: "the deployment moved on",
@@ -418,8 +420,11 @@ func TestAutomaticAbortsEverything(t *testing.T) {
 			if err == nil {
 				t.Fatal("Automatic succeeded")
 			}
-			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("error = %v, want %v", err, tt.wantErr)
+			}
+			if f.txs != 1 {
+				t.Errorf("transactions = %d, want 1: none of these errors is worth a retry", f.txs)
 			}
 			after := f.snapshot()
 			if !slices.EqualFunc(after.deployments, before.deployments, func(a, b core.Deployment) bool { return a.ID == b.ID && a.State == b.State }) ||
@@ -438,27 +443,35 @@ func TestAutomaticRetriesStateConflicts(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		onFailing bool
 		conflicts int
+		wantTxs   int
 		wantErr   error
 	}{
-		{name: "succeeds after two conflicts", conflicts: rollback.MaxAttempts - 1},
-		{name: "gives up after max attempts", conflicts: rollback.MaxAttempts, wantErr: core.ErrStateConflict},
+		{name: "succeeds after two conflicts cancelling a duplicate", conflicts: rollback.MaxAttempts - 1, wantTxs: rollback.MaxAttempts},
+		{name: "gives up after max attempts", conflicts: rollback.MaxAttempts, wantTxs: rollback.MaxAttempts, wantErr: core.ErrStateConflict},
+		{name: "a changed failing deployment is not retried", onFailing: true, conflicts: rollback.MaxAttempts, wantTxs: 1, wantErr: core.ErrStateConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRepo()
 			seed(f)
+			duplicate := f.add(deployment(blog, core.StateQueued, sha4, ""))
 			bad := f.add(failing(sha4, digestD))
 			f.conflicts = tt.conflicts
+			f.conflictOn = duplicate.ID
+			if tt.onFailing {
+				f.conflictOn = bad.ID
+			}
 			svc, _ := newService(t, f)
 
 			got, err := svc.Automatic(t.Context(), automaticRequest(bad, (&failRecorder{}).fail(bad)))
 			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
 				t.Fatalf("Automatic = %v, want %v", err, tt.wantErr)
 			}
-			if f.txs != min(tt.conflicts+1, rollback.MaxAttempts) {
-				t.Errorf("transactions = %d", f.txs)
+			if f.txs != tt.wantTxs {
+				t.Errorf("transactions = %d, want %d", f.txs, tt.wantTxs)
 			}
 			rollbacks := 0
 			for _, d := range f.snapshot().deployments {
