@@ -84,7 +84,7 @@ func mustSettle(t *testing.T, st *store.Store, c core.TrackedCommit, eval core.C
 	return settled, promoted
 }
 
-func mustEnqueue(t *testing.T, st *store.Store, c core.TrackedCommit) core.TrackedCommit {
+func mustEnqueueCommit(t *testing.T, st *store.Store, c core.TrackedCommit) core.TrackedCommit {
 	t.Helper()
 	settled, promoted := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt))
 	if !promoted {
@@ -198,7 +198,7 @@ func TestTrackCommitSupersedesOtherOpenCommits(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
-	enqueued := mustEnqueue(t, st, mustTrack(t, st, newTrackedCommit("blog", shaOf('a'))))
+	enqueued := mustEnqueueCommit(t, st, mustTrack(t, st, newTrackedCommit("blog", shaOf('a'))))
 	failed := mustTrack(t, st, newTrackedCommit("blog", shaOf('b')))
 	mustSettle(t, st, failed, evaluation(core.ChecksFailure, evaluatedAt))
 	pending := mustTrack(t, st, newTrackedCommit("blog", shaOf('c')))
@@ -248,7 +248,7 @@ func TestTrackCommitIgnoresPushesThatAreNoLongerTheHead(t *testing.T) {
 		t.Errorf("tracked_commits has %d rows, want only the head", n)
 	}
 
-	enqueued := mustEnqueue(t, st, newer)
+	enqueued := mustEnqueueCommit(t, st, newer)
 	if _, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('b')), isHead(false)); err != nil || outcome != core.TrackStale {
 		t.Errorf("TrackCommit of a known commit that is no longer the head = %s, %v, want %s", outcome, err, core.TrackStale)
 	}
@@ -275,7 +275,7 @@ func TestTrackCommitReopensSupersededCommitThatIsTheHeadAgain(t *testing.T) {
 		t.Errorf("commit force-pushed away = %+v, want superseded by %d", got, first.ID)
 	}
 
-	mustEnqueue(t, st, reopened)
+	mustEnqueueCommit(t, st, reopened)
 	third := mustTrack(t, st, newTrackedCommit("blog", shaOf('c')))
 	again, outcome, err := st.TrackCommit(t.Context(), newTrackedCommit("blog", shaOf('a')), isHead(true))
 	if err != nil {
@@ -485,7 +485,7 @@ func TestSettleTrackedCommitEnqueuesOnce(t *testing.T) {
 
 	st := storetest.Open(t)
 	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	promoted := mustEnqueue(t, st, c)
+	promoted := mustEnqueueCommit(t, st, c)
 	if promoted.DeploymentID == nil || promoted.EnqueuedAt == nil || promoted.Open() || promoted.ChecksState != core.ChecksSuccess {
 		t.Fatalf("enqueued commit = %+v, want success, a deployment and closed", promoted)
 	}
@@ -515,7 +515,7 @@ func TestSettleTrackedCommitIgnoresClosedCommits(t *testing.T) {
 	}{
 		{name: "enqueued", close: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
 			t.Helper()
-			mustEnqueue(t, st, c)
+			mustEnqueueCommit(t, st, c)
 		}},
 		{name: "superseded", close: func(t *testing.T, st *store.Store, c core.TrackedCommit) {
 			t.Helper()
@@ -736,7 +736,7 @@ func TestOpenTrackedCommits(t *testing.T) {
 	mustSettle(t, st, api, evaluation(core.ChecksPending, evaluatedAt.Add(2*time.Minute)))
 	failed := mustTrack(t, st, newTrackedCommit("web", shaOf('d')))
 	mustSettle(t, st, failed, evaluation(core.ChecksFailure, evaluatedAt))
-	mustEnqueue(t, st, mustTrack(t, st, newTrackedCommit("docs", shaOf('e'))))
+	mustEnqueueCommit(t, st, mustTrack(t, st, newTrackedCommit("docs", shaOf('e'))))
 	green := mustTrack(t, st, newTrackedCommit("worker", shaOf('f')))
 	setChecksState(t, st, green.ID, core.ChecksSuccess, evaluatedAt.Add(time.Minute))
 	mustTrack(t, st, newTrackedCommit("removed", shaOf('1')))
@@ -787,7 +787,7 @@ func TestTrackedCommitStaysClosedWhenItsDeploymentIsDeleted(t *testing.T) {
 
 	st := storetest.Open(t)
 	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
-	promoted := mustEnqueue(t, st, c)
+	promoted := mustEnqueueCommit(t, st, c)
 	mustExec(t, st, "DELETE FROM deployments WHERE id = $1", *promoted.DeploymentID)
 	got := mustGetTracked(t, st, c.ID)
 	if got.DeploymentID != nil {

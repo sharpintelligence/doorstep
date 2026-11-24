@@ -40,8 +40,6 @@ WHERE t.enqueued_at IS NULL AND t.superseded_by_id IS NULL
 ORDER BY t.evaluated_at NULLS FIRST, t.id
 LIMIT $5`
 
-const lockAppSQL = `SELECT id FROM apps WHERE id = $1 FOR NO KEY UPDATE`
-
 const insertTrackedCommitSQL = `
 INSERT INTO tracked_commits (app_id, repository, branch, commit_sha, source, pushed_by)
 VALUES ($1, $2, $3, $4, $5, $6)
