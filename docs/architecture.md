@@ -50,8 +50,8 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | Package | Responsibility | Status |
 | --- | --- | --- |
 | `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run` | built |
-| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root | built |
-| `internal/config` | configuration model, defaults, environment overrides and validation | built |
+| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file | built |
+| `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates, notification targets) and secret references | built |
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |

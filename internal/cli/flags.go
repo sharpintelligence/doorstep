@@ -36,8 +36,8 @@ func bindDatabaseFlags(flags *pflag.FlagSet, overrides *config.Config) {
 		"file holding the Postgres connection URL (env "+config.EnvDatabaseURLFile+", or the URL itself in "+config.EnvDatabaseURL+")")
 }
 
-func resolveConfig(changed func(name string) bool, overrides config.Config, lookupEnv LookupEnv) (config.Config, error) {
-	cfg, err := config.FromEnv(config.Default(), lookupEnv)
+func resolveConfig(changed func(name string) bool, overrides config.Config, file config.File, lookupEnv LookupEnv) (config.Config, error) {
+	cfg, err := config.FromEnv(file.Apply(config.Default()), lookupEnv)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("invalid environment: %w", err)
 	}

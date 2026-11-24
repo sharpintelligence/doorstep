@@ -38,6 +38,10 @@ linters:
         text: "^Function `newRootCommand->newServeCommand->newServeCommand\\$1` should pass the context parameter$"
         linters:
           - contextcheck
+      - path: _test\.go$
+        text: "^G101: Potential hardcoded credentials"
+        linters:
+          - gosec
   settings:
     depguard:
       rules:

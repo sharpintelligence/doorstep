@@ -35,6 +35,7 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newServeCommand(lookupEnv),
 		newMigrateCommand(lookupEnv),
 		newImageCommand(lookupEnv),
+		newConfigCommand(lookupEnv),
 	)
 	return root
 }

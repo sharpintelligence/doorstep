@@ -4,7 +4,7 @@ doorstep exposes Prometheus metrics at `GET /metrics`. The endpoint is unauthent
 
 ## Enabling and scraping
 
-By default `/metrics` is served on a dedicated listener, `--metrics-listen-addr` (`DOORSTEP_METRICS_LISTEN_ADDR`, default `:9090`), and is not mounted on the main listener at all. The dedicated listener also answers `/healthz` and `/readyz`, with the same readiness checks as the main listener. The address must differ from `--listen-addr`.
+By default `/metrics` is served on a dedicated listener, `--metrics-listen-addr` (`DOORSTEP_METRICS_LISTEN_ADDR`, `server.metrics_listen_addr` in the configuration file, default `:9090`), and is not mounted on the main listener at all. The dedicated listener also answers `/healthz` and `/readyz`, with the same readiness checks as the main listener. The address must differ from `--listen-addr`.
 
 The main listener is the one that receives public GitHub webhooks. Metrics reveal application names and build information and the endpoint is unauthenticated, so authentication is left to network placement: keep the metrics port off the public ingress.
 

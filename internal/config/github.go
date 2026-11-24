@@ -54,11 +54,11 @@ func githubFromEnv(base GitHub, lookup func(string) (string, bool)) GitHub {
 	if v, ok := lookup(EnvGitHubAppID); ok {
 		g.AppID = v
 	}
-	if v, ok := lookup(EnvGitHubAppPrivateKey); ok {
-		g.PrivateKey = Secret(v)
-	}
-	if v, ok := lookup(EnvGitHubAppPrivateKeyFile); ok {
-		g.PrivateKeyFile = v
+	key, keySet := lookup(EnvGitHubAppPrivateKey)
+	keyFile, keyFileSet := lookup(EnvGitHubAppPrivateKeyFile)
+	if keySet || keyFileSet {
+		g.PrivateKey = Secret(key)
+		g.PrivateKeyFile = keyFile
 	}
 	if v, ok := lookup(EnvGitHubAPIURL); ok {
 		g.APIURL = v

@@ -22,7 +22,7 @@ func newImageCommand(lookupEnv LookupEnv) *cobra.Command {
 }
 
 func newImageResolveCommand(lookupEnv LookupEnv) *cobra.Command {
-	var credentialsFile string
+	var credentialsFile, configFlag string
 	cmd := &cobra.Command{
 		Use:   "resolve <repository> <tag>",
 		Short: "Resolve an image tag to its digest",
@@ -31,9 +31,9 @@ func newImageResolveCommand(lookupEnv LookupEnv) *cobra.Command {
 		Example: "  doorstep image resolve ghcr.io/owner/app 0123456789abcdef0123456789abcdef01234567",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := credentialsFile
-			if !cmd.Flags().Changed(flagRegistryAuthFile) {
-				path, _ = lookupEnv(config.EnvRegistryCredentialsFile)
+			path, err := resolveCredentialsFile(cmd.Flags().Changed, credentialsFile, configFlag, lookupEnv)
+			if err != nil {
+				return err
 			}
 			opts := registry.Options{UserAgent: "doorstep/" + buildinfo.Read().Version}
 			if path != "" {
@@ -51,8 +51,23 @@ func newImageResolveCommand(lookupEnv LookupEnv) *cobra.Command {
 			return err
 		},
 	}
+	addConfigFlag(cmd.Flags(), &configFlag)
 	addRegistryCredentialsFlag(cmd.Flags(), &credentialsFile)
 	return cmd
+}
+
+func resolveCredentialsFile(changed func(name string) bool, flagValue, configFlag string, lookupEnv LookupEnv) (string, error) {
+	if changed(flagRegistryAuthFile) {
+		return flagValue, nil
+	}
+	if v, ok := lookupEnv(config.EnvRegistryCredentialsFile); ok {
+		return v, nil
+	}
+	file, err := loadConfigFile(changed, configFlag, lookupEnv)
+	if err != nil {
+		return "", err
+	}
+	return file.Apply(config.Default()).Registry.CredentialsFile, nil
 }
 
 func addRegistryCredentialsFlag(flags *pflag.FlagSet, dst *string) {

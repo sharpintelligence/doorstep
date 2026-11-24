@@ -90,11 +90,10 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup(EnvLogFormat); ok {
 		cfg.Log.Format = v
 	}
-	if v, ok := lookup(EnvDatabaseURL); ok {
-		cfg.Database.URL = v
-	}
-	if v, ok := lookup(EnvDatabaseURLFile); ok {
-		cfg.Database.URLFile = v
+	url, urlSet := lookup(EnvDatabaseURL)
+	urlFile, urlFileSet := lookup(EnvDatabaseURLFile)
+	if urlSet || urlFileSet {
+		cfg.Database = Database{URL: url, URLFile: urlFile}
 	}
 	cfg.GitHub = githubFromEnv(cfg.GitHub, lookup)
 	if v, ok := lookup(EnvRegistryCredentialsFile); ok {
@@ -118,6 +117,15 @@ func lookupDuration(lookup func(string) (string, bool), key string, dst *time.Du
 
 func (c Config) Validate() error {
 	var errs []error
+	errs = append(errs, c.ValidateSettings())
+	if err := c.Database.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("database: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func (c Config) ValidateSettings() error {
+	var errs []error
 	if err := validateListenAddr(c.Server.ListenAddr); err != nil {
 		errs = append(errs, fmt.Errorf("listen address: %w", err))
 	}
@@ -135,9 +143,6 @@ func (c Config) Validate() error {
 		errs = append(errs, fmt.Errorf("shutdown timeout: must be positive, got %s", c.Server.ShutdownTimeout))
 	}
 	errs = append(errs, c.Log.Validate())
-	if err := c.Database.Validate(); err != nil {
-		errs = append(errs, fmt.Errorf("database: %w", err))
-	}
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }
