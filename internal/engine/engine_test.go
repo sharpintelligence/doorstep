@@ -889,6 +889,25 @@ func TestHandleResumesFromEveryState(t *testing.T) {
 			if got := len(h.metrics.startedApps()); got != wantStarted {
 				t.Errorf("started metrics = %d, want %d", got, wantStarted)
 			}
+			resolves, pins, waits := 0, 0, 0
+			if i <= 1 {
+				resolves = 1
+			}
+			if i <= 2 {
+				pins = 1
+			}
+			if i <= 3 {
+				waits = 1
+			}
+			if got := h.resolver.calls(); got != resolves {
+				t.Errorf("resolves = %d, want %d: a resumed deployment must not resolve again", got, resolves)
+			}
+			if got := len(h.pins.pinRequests()); got != pins {
+				t.Errorf("pins = %d, want %d: a resumed deployment must not pin again", got, pins)
+			}
+			if got := h.sync.waitCalls(); len(got) != waits || (waits == 1 && got[0].revision != pinSHA) {
+				t.Errorf("sync waits = %+v, want %d for %s", got, waits, pinSHA)
+			}
 		})
 	}
 

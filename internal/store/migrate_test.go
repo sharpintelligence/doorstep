@@ -31,7 +31,7 @@ func TestMigrateFreshSchema(t *testing.T) {
 
 	st := openUnmigrated(t, storetest.DatabaseURL(t))
 
-	pending, err := st.MigrationStatus(t.Context())
+	pending, _, err := st.MigrationStatus(t.Context())
 	if err != nil {
 		t.Fatalf("MigrationStatus: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestMigrateFreshSchema(t *testing.T) {
 		"00001_initial_schema.sql", "00002_queue_notify.sql", "00003_lock_scope_and_events.sql", "00004_deployment_lineage.sql",
 		"00005_tracked_commits.sql", "00006_gate_result_phase.sql", "00007_auth.sql", "00008_blocks.sql", "00009_webhook_deliveries.sql",
 		"00010_gate_reports.sql",
-		"00011_deployment_migration.sql",
+		"00011_deployment_migration.sql", "00012_schema_compatibility.sql",
 	}
 	for i, name := range wantNames {
 		if i >= len(applied) || applied[i].Version != int64(i+1) || applied[i].Name != name {
@@ -71,9 +71,15 @@ func TestMigrateFreshSchema(t *testing.T) {
 		t.Errorf("second Migrate applied %+v, want nothing", again)
 	}
 
-	status, err := st.MigrationStatus(t.Context())
+	status, ahead, err := st.MigrationStatus(t.Context())
 	if err != nil {
 		t.Fatalf("MigrationStatus: %v", err)
+	}
+	if ahead != nil {
+		t.Errorf("MigrationStatus reports a newer database after Migrate: %+v", ahead)
+	}
+	if floor := queryInt(t, st, "SELECT min_binary_schema FROM schema_compatibility"); floor != 12 {
+		t.Errorf("min_binary_schema = %d, want 12", floor)
 	}
 	for i, m := range status {
 		if !m.Applied || m.AppliedAt.IsZero() {
@@ -124,7 +130,7 @@ func TestMigrateConcurrentWithSessionLock(t *testing.T) {
 		}
 		total += len(results[i])
 	}
-	status, err := stores[0].MigrationStatus(t.Context())
+	status, _, err := stores[0].MigrationStatus(t.Context())
 	if err != nil {
 		t.Fatalf("MigrationStatus: %v", err)
 	}
@@ -133,15 +139,22 @@ func TestMigrateConcurrentWithSessionLock(t *testing.T) {
 	}
 }
 
-func TestMigrateRefusesNewerDatabase(t *testing.T) {
+func TestMigrateAgainstNewerDatabase(t *testing.T) {
 	t.Parallel()
 
+	const newerVersion = 99999
 	tests := []struct {
-		name     string
-		migrated bool
+		name       string
+		migrated   bool
+		setup      []string
+		compatible bool
 	}{
-		{name: "migrated schema", migrated: true},
-		{name: "empty schema", migrated: false},
+		{name: "floor at this binary", migrated: true, setup: []string{"UPDATE schema_compatibility SET min_binary_schema = 12"}, compatible: true},
+		{name: "floor below this binary", migrated: true, setup: []string{"UPDATE schema_compatibility SET min_binary_schema = 1"}, compatible: true},
+		{name: "floor above this binary", migrated: true, setup: []string{"UPDATE schema_compatibility SET min_binary_schema = 13"}},
+		{name: "floor row missing", migrated: true, setup: []string{"DELETE FROM schema_compatibility"}},
+		{name: "floor table missing", migrated: true, setup: []string{"DROP TABLE schema_compatibility"}},
+		{name: "empty schema", setup: []string{"CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp NOT NULL DEFAULT now())"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,24 +164,50 @@ func TestMigrateRefusesNewerDatabase(t *testing.T) {
 				if _, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock()); err != nil {
 					t.Fatalf("Migrate: %v", err)
 				}
-			} else {
-				mustExec(t, st, "CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp NOT NULL DEFAULT now())")
 			}
-			mustExec(t, st, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (99999, true)")
+			for _, sql := range tt.setup {
+				mustExec(t, st, sql)
+			}
+			mustExec(t, st, "INSERT INTO goose_db_version (version_id, is_applied) VALUES ($1, true)", newerVersion)
+			rowsBefore := queryInt(t, st, "SELECT count(*) FROM goose_db_version")
 
 			applied, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock())
-			if !errors.Is(err, store.ErrDatabaseNewer) {
+			if tt.compatible && err != nil {
+				t.Fatalf("Migrate error = %v, want compatibility mode", err)
+			}
+			if !tt.compatible && !errors.Is(err, store.ErrDatabaseNewer) {
 				t.Fatalf("Migrate error = %v, want ErrDatabaseNewer", err)
 			}
 			if len(applied) != 0 {
 				t.Errorf("Migrate applied %+v against a newer database", applied)
 			}
+			if rows := queryInt(t, st, "SELECT count(*) FROM goose_db_version"); rows != rowsBefore {
+				t.Errorf("goose_db_version has %d rows after Migrate, want %d", rows, rowsBefore)
+			}
 			if exists := queryInt(t, st, "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'apps'"); exists != boolInt(tt.migrated) {
-				t.Errorf("apps table count = %d after refused Migrate, want %d", exists, boolInt(tt.migrated))
+				t.Errorf("apps table count = %d after Migrate, want %d", exists, boolInt(tt.migrated))
 			}
 
-			if _, err := st.MigrationStatus(t.Context()); !errors.Is(err, store.ErrDatabaseNewer) {
-				t.Errorf("MigrationStatus error = %v, want ErrDatabaseNewer", err)
+			states, ahead, err := st.MigrationStatus(t.Context())
+			if !tt.compatible {
+				if !errors.Is(err, store.ErrDatabaseNewer) {
+					t.Errorf("MigrationStatus error = %v, want ErrDatabaseNewer", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MigrationStatus: %v", err)
+			}
+			if ahead == nil || ahead.DatabaseVersion != newerVersion || ahead.BinaryVersion != int64(len(states)) {
+				t.Errorf("MigrationStatus ahead = %+v, want database %d and binary %d", ahead, newerVersion, len(states))
+			}
+			if ahead != nil && int64(queryInt(t, st, "SELECT min_binary_schema FROM schema_compatibility")) != ahead.MinBinarySchema {
+				t.Errorf("MigrationStatus floor = %d, want the stored floor", ahead.MinBinarySchema)
+			}
+			for _, m := range states {
+				if !m.Applied {
+					t.Errorf("migration %d reported pending in compatibility mode", m.Version)
+				}
 			}
 		})
 	}

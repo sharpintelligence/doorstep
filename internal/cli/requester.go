@@ -102,7 +102,7 @@ func (a *adminCommand) withRepository(cmd *cobra.Command, fn func(ctx context.Co
 }
 
 func requireCurrentSchema(ctx context.Context, st *store.Store) error {
-	states, err := st.MigrationStatus(ctx)
+	states, _, err := st.MigrationStatus(ctx)
 	if err != nil {
 		return err
 	}

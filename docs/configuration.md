@@ -113,7 +113,7 @@ Postgres 15 or newer is supported. Required privileges and the schema are descri
 
 ## `doorstep migrate`
 
-Applies pending database migrations, printing one line per applied migration (or `no pending migrations`), then exits. Use it to migrate from a separate job before rolling out a new version; `serve` applies the same migrations on start, so running it is optional. Migrations are forward-only: there are no down, redo or create commands.
+Applies pending database migrations, printing one line per applied migration (or `no pending migrations`), then exits. Use it to migrate from a separate job before rolling out a new version; `serve` applies the same migrations on start, so running it is optional. Migrations are forward-only: there are no down, redo or create commands; the previous release keeps working on a migrated database instead ([database.md](database.md#compatibility-across-one-release)).
 
 `doorstep migrate status` prints every migration the binary knows, whether it is applied or pending, and when it was applied:
 
@@ -124,7 +124,7 @@ VERSION  STATE    APPLIED AT            NAME
 3        pending  -                     00003_lock_scope_and_events.sql
 ```
 
-Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock keyed by the schema, so instances that share a schema wait for each other while instances in other schemas of the same database do not. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
+Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock keyed by the schema, so instances that share a schema wait for each other while instances in other schemas of the same database do not. If the database has a newer schema than the binary, `migrate` and `serve` run in one-release compatibility mode when the database's compatibility floor allows this binary, applying nothing and logging a warning, and fail otherwise; `migrate status` then prints `database schema version <n> is newer than this binary (<m>); running in one-release compatibility mode (oldest supported binary schema <floor>)` above the table ([database.md](database.md#migrations)).
 
 ## GitHub App
 

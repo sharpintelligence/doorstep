@@ -4,7 +4,7 @@ Releases are cut by pushing a version tag. `.github/workflows/release.yml` does 
 
 ## Cutting a release
 
-1. Pick a commit on `main` whose CI run is green.
+1. Pick a commit on `main` whose CI run is green. For a final release, [dogfood](#dogfooding) it as a release candidate first once a self-hosted install exists.
 2. Preview the notes with `just changelog --unreleased`.
 3. Tag and push:
 
@@ -15,7 +15,34 @@ Releases are cut by pushing a version tag. `.github/workflows/release.yml` does 
 
    The workflow does not check that the tag is signed or annotated. The enforced control is the `v*` tag ruleset (see One-time setup); signing is a maintainer convention.
 
+4. When the workflow has finished, advance the [release branch](#the-release-branch) to the tag.
+
 Tags with a hyphen (`v0.2.0-rc.1`) become GitHub prereleases. Do not re-use or move a tag.
+
+If the release contains a contract migration (`internal/store/migrations/NNNNN_contract_*.sql`), check that it raises the compatibility floor to the newest migration of the previous release tag, `git ls-tree --name-only <previous tag> internal/store/migrations/ | tail -1` ([database.md](database.md#compatibility-across-one-release)).
+
+## The release branch
+
+The `release` branch is what a self-hosted doorstep follows ([self-hosting.md](self-hosting.md)). It only ever points at commits that have a release image, because doorstep deploys `:<commit SHA>` for the head of the branch it follows and only tagged commits have images. After the release workflow has pushed the images, fast-forward it to the tagged commit:
+
+```sh
+git fetch origin
+git push origin 'vX.Y.Z^{commit}:refs/heads/release'
+```
+
+The push is a fast-forward because every tag is on `main` and `release` only ever holds earlier tagged commits of `main`; if git refuses it as non-fast-forward, stop and find out why instead of forcing it. Advancing `release` is what upgrades a self-hosted install, so it is a deliberate step rather than part of the workflow ([ADR 0022](decisions/0022-self-hosting-through-a-release-branch.md)). Pushing a release candidate tag there is how a candidate is dogfooded.
+
+## Dogfooding
+
+Not applicable until a self-hosted install of doorstep exists. Once one does, every final release is deployed to it through doorstep before it is tagged:
+
+1. Tag the candidate commit `vX.Y.Z-rc.N` and push the tag.
+2. Wait for the release workflow to finish, so `ghcr.io/sharpintelligence/doorstep:<commit SHA>` exists and is signed.
+3. Fast-forward `release` to the candidate tag, as in [The release branch](#the-release-branch).
+4. Confirm the self-deployment reached `succeeded`, including its soak, in the web UI or with `GET /api/v1/apps/doorstep/deployments`. If it failed or was rolled back, fix the problem and start again with the next `-rc`.
+5. Tag `vX.Y.Z` on the same commit and push it, then fast-forward `release` to the final tag, which is a no-op for the branch because the commit is the same.
+
+The final tag rebuilds the same commit, so `:<commit SHA>` then points at the final build, which differs from the candidate only in its version string. Digest pins stay valid; `doorstep deploy doorstep <commit SHA>` moves the install to the final build's digest if wanted.
 
 ## What the workflow does
 
@@ -88,6 +115,7 @@ Update the image digest in `deploy/kustomize/examples/homelab/kustomization.yaml
 
 - After the first release, make the GHCR package public (package settings, change visibility). New GHCR packages start private.
 - Add a repository ruleset restricting creation, update and deletion of `v*` tags to maintainers.
+- Create the `release` branch at the first release tag (`git push origin 'v0.1.0^{commit}:refs/heads/release'`) and add a branch ruleset for it that restricts updates to maintainers and blocks force pushes and deletions.
 
 ## Changelog
 

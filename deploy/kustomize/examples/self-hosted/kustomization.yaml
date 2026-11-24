@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: doorstep
+resources:
+  - namespace.yaml
+  - ../../base
+images:
+  - name: ghcr.io/sharpintelligence/doorstep
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+configMapGenerator:
+  - name: doorstep-config
+    behavior: replace
+    files:
+      - config.yaml

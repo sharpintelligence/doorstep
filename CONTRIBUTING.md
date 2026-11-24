@@ -42,6 +42,15 @@ docker stop "$container"
 - Log with `log/slog`.
 - Follow the package map and dependency rules in [docs/architecture.md](docs/architecture.md#dependency-rules).
 
+## Database migrations
+
+doorstep deploys its own upgrades, and the previous release must keep running against a migrated database ([docs/self-hosting.md](docs/self-hosting.md)). A pull request that adds a file under `internal/store/migrations`:
+
+- Follows expand/contract: a release adds and dual-writes, and only the next release may remove what the previous one no longer uses.
+- Puts anything that removes or narrows schema in a file named `NNNNN_contract_<description>.sql` that raises the compatibility floor. A test in `just check` rejects destructive statements anywhere else.
+- Goes through the review checklist in [docs/database.md](docs/database.md#compatibility-across-one-release).
+- Carries a `Doorstep-Migration: true` line in its squash-merge commit message, so the self-hosted install flags the release as containing migrations.
+
 ## Decisions
 
 Write an architecture decision record for a decision that is expensive to reverse, such as the datastore, trust boundaries, the shape of the API or configuration, or the security model. See [when to write one and the process](docs/decisions/README.md#process).

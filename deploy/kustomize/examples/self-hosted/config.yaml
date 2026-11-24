@@ -1,0 +1,32 @@
+github:
+  app_id: "123456"
+  private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+  webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret
+
+notifications:
+  - name: ops
+    type: slack
+    webhook_url_file: /etc/doorstep/secrets/slack-webhook-url
+
+apps:
+  - name: doorstep
+    source:
+      repo: sharpintelligence/doorstep
+      branch: release
+      required_checks: [check, lint-manifests, image]
+    image:
+      repository: ghcr.io/sharpintelligence/doorstep
+    gitops:
+      repo: example-user/homelab
+      path: apps/doorstep
+    argocd:
+      sync_timeout: 15m
+    migrations:
+      trailer: true
+    gates:
+      after:
+        - type: health
+        - type: soak
+          duration: 10m
+    auto_rollback: true
+    notify: [ops]

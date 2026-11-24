@@ -187,6 +187,27 @@ func TestSchemaRejectsInvalidIntakeRows(t *testing.T) {
 	}
 }
 
+func TestSchemaRejectsInvalidCompatibilityRows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sql        string
+		constraint string
+	}{
+		{name: "second floor row", sql: "INSERT INTO schema_compatibility (singleton, min_binary_schema) VALUES (false, 12)", constraint: "schema_compatibility_singleton_check"},
+		{name: "duplicate floor row", sql: "INSERT INTO schema_compatibility (min_binary_schema) VALUES (12)", constraint: "schema_compatibility_pkey"},
+		{name: "zero floor", sql: "UPDATE schema_compatibility SET min_binary_schema = 0", constraint: "schema_compatibility_min_binary_schema_check"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			assertConstraint(t, store.ExecSQL(t.Context(), st, tt.sql), tt.constraint)
+		})
+	}
+}
+
 func TestSchemaRejectsInvalidDeployments(t *testing.T) {
 	t.Parallel()
 
