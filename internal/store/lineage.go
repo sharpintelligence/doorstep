@@ -73,13 +73,23 @@ func (s *Store) SetLineage(ctx context.Context, id core.DeploymentID, l core.Lin
 	return updated, nil
 }
 
+const (
+	keyImageDigest      = "image_digest"
+	keyPreviousDigest   = "previous_digest"
+	keyGitOpsRepository = "gitops_repository"
+	keyPinCommitSHA     = "pin_commit_sha"
+	keyArgoCDRevision   = "argocd_revision"
+)
+
+var lineageKeys = []string{keyArgoCDRevision, keyGitOpsRepository, keyImageDigest, keyPinCommitSHA, keyPreviousDigest}
+
 func lineageFields(l core.Lineage) map[string]string {
 	fields := map[string]string{
-		"image_digest":      l.Digest.String(),
-		"previous_digest":   l.PreviousDigest.String(),
-		"gitops_repository": l.GitOpsRepository,
-		"pin_commit_sha":    l.PinCommitSHA,
-		"argocd_revision":   l.ArgoCDRevision,
+		keyImageDigest:      l.Digest.String(),
+		keyPreviousDigest:   l.PreviousDigest.String(),
+		keyGitOpsRepository: l.GitOpsRepository,
+		keyPinCommitSHA:     l.PinCommitSHA,
+		keyArgoCDRevision:   l.ArgoCDRevision,
 	}
 	maps.DeleteFunc(fields, func(_, value string) bool { return value == "" })
 	return fields

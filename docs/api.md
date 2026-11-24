@@ -96,6 +96,7 @@ Lists the deployments of the app named `{app}`, newest first. Without `environme
 | `state` | only these states (`queued`, `resolving`, `pinning`, `syncing`, `verifying`, `succeeded`, `failed`, `cancelled`, `superseded`); repeat the parameter or separate values with commas |
 | `kind` | only these kinds (`deploy`, `rollback`); repeatable or comma-separated |
 | `commit` | only deployments of this app commit (40 lowercase hex characters) |
+| `digest` | only deployments whose resolved image digest is this one (`sha256:` and 64 lowercase hex characters), to find which deployment shipped a digest |
 | `limit` | page size, `1` to `200`, default `50` |
 | `cursor` | the `next_cursor` of the previous page |
 
@@ -155,7 +156,7 @@ Returns one deployment with its timeline. `{id}` must be a positive integer; the
 }
 ```
 
-- `events` are oldest first and capped at 500; `events_truncated` is `true` when older history exists beyond the cap.
+- `events` are the newest 500 events of the deployment, listed oldest first, so the terminal transition and the latest lineage notes are always included; `events_truncated` is `true` when older events were left out.
 - `gates` holds the latest result of each named gate, ordered by name.
 - `rollbacks` are the deployments whose `rollback_of_id` is this deployment ("was it rolled back, and did that work"); `retries` are those whose `parent_id` is this deployment. Both are newest first.
 - The deployment, its events, gates and related deployments are read from one database snapshot, so they always agree with each other.

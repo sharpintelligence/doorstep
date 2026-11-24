@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -41,7 +42,11 @@ const selectDeploymentStateSQL = `SELECT state FROM deployments WHERE id = $1`
 var (
 	errMisplacedFailureReason = errors.New("a failure reason is only recorded on a transition to failed")
 	errMisplacedSupersededBy  = errors.New("superseded by is only recorded on a transition to superseded")
+	errMissingFailureReason   = errors.New("a transition to failed needs a failure reason")
+	errMissingSupersededBy    = errors.New("a transition to superseded needs the deployment that supersedes it")
+	errSupersededBySelf       = errors.New("a deployment cannot supersede itself")
 	errEventDataNotObject     = errors.New("event data must be a JSON object")
+	errEventDataLineageKey    = errors.New("event data must not set lineage keys; pass them as lineage")
 )
 
 func (s *Store) TransitionDeployment(ctx context.Context, t Transition) (core.Deployment, error) {
@@ -103,6 +108,17 @@ func (t Transition) validate() ([]byte, error) {
 	if t.SupersededByID != nil && t.To != core.StateSuperseded {
 		return nil, errMisplacedSupersededBy
 	}
+	if t.To == core.StateFailed && strings.TrimSpace(t.FailureReason) == "" {
+		return nil, errMissingFailureReason
+	}
+	if t.To == core.StateSuperseded {
+		if t.SupersededByID == nil {
+			return nil, errMissingSupersededBy
+		}
+		if *t.SupersededByID == t.ID {
+			return nil, errSupersededBySelf
+		}
+	}
 	if err := t.Lineage.Validate(); err != nil {
 		return nil, err
 	}
@@ -127,6 +143,15 @@ func eventData(data json.RawMessage, l core.Lineage) ([]byte, error) {
 		if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
 			return nil, errEventDataNotObject
 		}
+	}
+	var reserved []string
+	for _, key := range lineageKeys {
+		if _, ok := fields[key]; ok {
+			reserved = append(reserved, key)
+		}
+	}
+	if len(reserved) > 0 {
+		return nil, fmt.Errorf("%w: %s", errEventDataLineageKey, strings.Join(reserved, ", "))
 	}
 	for key, value := range lineageFields(l) {
 		encoded, err := json.Marshal(value)

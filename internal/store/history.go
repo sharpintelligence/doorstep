@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -22,6 +23,7 @@ type DeploymentFilter struct {
 	States      []core.State
 	Kinds       []core.Kind
 	CommitSHA   string
+	Digest      core.Digest
 	Before      core.DeploymentID
 	Limit       int
 }
@@ -46,15 +48,16 @@ WHERE ($1::text = '' OR a.name = $1)
   AND (cardinality($3::text[]) = 0 OR d.state = ANY($3))
   AND (cardinality($4::text[]) = 0 OR d.kind = ANY($4))
   AND ($5::text = '' OR d.commit_sha = $5)
-  AND ($6::bigint = 0 OR d.id < $6)
+  AND ($6::text = '' OR d.image_digest = $6)
+  AND ($7::bigint = 0 OR d.id < $7)
 ORDER BY d.id DESC
-LIMIT $7`
+LIMIT $8`
 
 const selectEventsSQL = `
 SELECT id, type, COALESCE(from_state, ''), COALESCE(to_state, ''), actor, message, data, occurred_at
 FROM deployment_events
 WHERE deployment_id = $1
-ORDER BY id
+ORDER BY id DESC
 LIMIT $2`
 
 const selectGateResultsSQL = `
@@ -72,6 +75,7 @@ WHERE a.name = $1
   AND a.environment = $2
   AND d.state = 'succeeded'
   AND d.finished_at IS NOT NULL
+  AND d.image_digest IS NOT NULL
   AND ($3::text = '' OR d.image_digest IS DISTINCT FROM $3)
 ORDER BY d.finished_at DESC, d.id DESC
 LIMIT 1`
@@ -90,6 +94,9 @@ func (f DeploymentFilter) validate() error {
 	}
 	if f.CommitSHA != "" {
 		errs = append(errs, core.ValidateCommitSHA(f.CommitSHA))
+	}
+	if f.Digest != "" {
+		errs = append(errs, f.Digest.Validate())
 	}
 	if f.Before < 0 {
 		errs = append(errs, fmt.Errorf("cursor must not be negative, got %d", f.Before))
@@ -119,7 +126,7 @@ func (s *Store) ListDeployments(ctx context.Context, f DeploymentFilter) (Deploy
 	}
 
 	items, err := s.queryDeployments(ctx, listDeploymentsSQL,
-		f.App, f.Environment, states, kinds, f.CommitSHA, f.Before, limit+1)
+		f.App, f.Environment, states, kinds, f.CommitSHA, f.Digest, f.Before, limit+1)
 	if err != nil {
 		return DeploymentPage{}, fmt.Errorf("list deployments: %w", err)
 	}
@@ -162,6 +169,7 @@ func (s *Store) readHistory(ctx context.Context, id core.DeploymentID) (Deployme
 		h.Events = h.Events[:MaxHistoryEvents]
 		h.EventsTruncated = true
 	}
+	slices.Reverse(h.Events)
 
 	h.Gates, err = s.gateResults(ctx, id)
 	if err != nil {

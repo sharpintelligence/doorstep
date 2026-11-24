@@ -18,6 +18,7 @@ const (
 	paramState       = "state"
 	paramKind        = "kind"
 	paramCommit      = "commit"
+	paramDigest      = "digest"
 	paramLimit       = "limit"
 	paramCursor      = "cursor"
 )
@@ -34,7 +35,7 @@ func (a *api) registerHistory(mux *http.ServeMux) {
 	mux.HandleFunc(deploymentPath, methodNotAllowed(http.MethodGet, http.MethodHead))
 }
 
-var listParams = []string{paramEnvironment, paramState, paramKind, paramCommit, paramLimit, paramCursor}
+var listParams = []string{paramEnvironment, paramState, paramKind, paramCommit, paramDigest, paramLimit, paramCursor}
 
 func (a *api) listAppDeployments(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseListFilter(r.PathValue("app"), r.URL.Query())
@@ -81,7 +82,7 @@ func parseListFilter(app string, q url.Values) (store.DeploymentFilter, error) {
 			return store.DeploymentFilter{}, fmt.Errorf("unknown query parameter %q", name)
 		}
 	}
-	for _, name := range []string{paramEnvironment, paramCommit, paramLimit, paramCursor} {
+	for _, name := range []string{paramEnvironment, paramCommit, paramDigest, paramLimit, paramCursor} {
 		if len(q[name]) > 1 {
 			return store.DeploymentFilter{}, fmt.Errorf("query parameter %q may only be given once", name)
 		}
@@ -115,6 +116,13 @@ func parseListFilter(app string, q url.Values) (store.DeploymentFilter, error) {
 	if q.Has(paramCommit) {
 		f.CommitSHA = q.Get(paramCommit)
 		if err := core.ValidateCommitSHA(f.CommitSHA); err != nil {
+			return store.DeploymentFilter{}, err
+		}
+	}
+
+	if q.Has(paramDigest) {
+		f.Digest = core.Digest(q.Get(paramDigest))
+		if err := f.Digest.Validate(); err != nil {
 			return store.DeploymentFilter{}, err
 		}
 	}

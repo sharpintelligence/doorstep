@@ -58,12 +58,13 @@ func TestTransitionDeploymentEveryLegalEdge(t *testing.T) {
 			t.Run(string(from)+"->"+string(to), func(t *testing.T) {
 				t.Parallel()
 				d := mustCreateIn(t, st, newDeployment(string(from)+"-"+string(to)), from)
-				events := countEvents(t, st, d.ID)
-
-				got, err := st.TransitionDeployment(t.Context(), store.Transition{
+				tr := withOutcome(t, st, store.Transition{
 					ID: d.ID, From: from, To: to, Actor: "worker-1", Message: "step",
 					Data: json.RawMessage(`{"attempt":2}`),
-				})
+				}, string(from)+"-"+string(to))
+				events := countEvents(t, st, d.ID)
+
+				got, err := st.TransitionDeployment(t.Context(), tr)
 				if err != nil {
 					t.Fatalf("TransitionDeployment: %v", err)
 				}
@@ -130,6 +131,27 @@ func TestTransitionDeploymentRejects(t *testing.T) {
 	}{
 		{name: "failure reason on cancel", mutate: func(tr *store.Transition) { tr.FailureReason = "boom" }, text: "failure reason"},
 		{name: "superseded by on cancel", mutate: func(tr *store.Transition) { tr.SupersededByID = &other }, text: "superseded by"},
+		{name: "failed without reason", mutate: func(tr *store.Transition) {
+			tr.From = core.StateResolving
+			tr.To = core.StateFailed
+		}, text: "needs a failure reason"},
+		{name: "failed with blank reason", mutate: func(tr *store.Transition) {
+			tr.From = core.StateResolving
+			tr.To = core.StateFailed
+			tr.FailureReason = " \t"
+		}, text: "needs a failure reason"},
+		{name: "superseded without successor", mutate: func(tr *store.Transition) { tr.To = core.StateSuperseded }, text: "needs the deployment that supersedes it"},
+		{name: "superseded by itself", mutate: func(tr *store.Transition) {
+			tr.To = core.StateSuperseded
+			tr.SupersededByID = &tr.ID
+		}, text: "cannot supersede itself"},
+		{name: "data sets a lineage key", mutate: func(tr *store.Transition) {
+			tr.Data = json.RawMessage(`{"attempt":1,"pin_commit_sha":"x","image_digest":"y"}`)
+		}, text: "lineage keys; pass them as lineage: image_digest, pin_commit_sha"},
+		{name: "data sets a lineage key the patch leaves empty", mutate: func(tr *store.Transition) {
+			tr.Data = json.RawMessage(`{"argocd_revision":"r"}`)
+			tr.Lineage.PinCommitSHA = otherSHA
+		}, text: "argocd_revision"},
 		{name: "array data", mutate: func(tr *store.Transition) { tr.Data = json.RawMessage(`[1]`) }, text: "JSON object"},
 		{name: "null data", mutate: func(tr *store.Transition) { tr.Data = json.RawMessage(`null`) }, text: "JSON object"},
 		{name: "malformed data", mutate: func(tr *store.Transition) { tr.Data = json.RawMessage(`{"a":`) }, text: "JSON object"},
@@ -236,7 +258,7 @@ func TestTransitionDeploymentRecordsLineage(t *testing.T) {
 	d := mustCreateIn(t, st, newDeployment("web"), core.StatePinning)
 	got, err := st.TransitionDeployment(t.Context(), store.Transition{
 		ID: d.ID, From: core.StatePinning, To: core.StateSyncing, Actor: "worker",
-		Data:    json.RawMessage(`{"attempt":1,"pin_commit_sha":"overridden"}`),
+		Data:    json.RawMessage(`{"attempt":1}`),
 		Lineage: core.Lineage{GitOpsRepository: "acme/gitops", PinCommitSHA: otherSHA},
 	})
 	if err != nil {
@@ -257,6 +279,7 @@ func TestTransitionDeploymentConcurrentWorkers(t *testing.T) {
 
 	st := storetest.Open(t)
 	d := mustCreate(t, st, newDeployment("web"), 0)
+	successor := mustCreate(t, st, newDeployment("web"), 0)
 	const workers = 8
 	targets := []core.State{core.StateResolving, core.StateCancelled, core.StateSuperseded}
 	errs := make([]error, workers)
@@ -265,9 +288,11 @@ func TestTransitionDeploymentConcurrentWorkers(t *testing.T) {
 	for i := range workers {
 		wg.Go(func() {
 			<-start
-			_, errs[i] = st.TransitionDeployment(t.Context(), store.Transition{
-				ID: d.ID, From: core.StateQueued, To: targets[i%len(targets)], Actor: fmt.Sprintf("worker-%d", i),
-			})
+			tr := store.Transition{ID: d.ID, From: core.StateQueued, To: targets[i%len(targets)], Actor: fmt.Sprintf("worker-%d", i)}
+			if tr.To == core.StateSuperseded {
+				tr.SupersededByID = &successor.ID
+			}
+			_, errs[i] = st.TransitionDeployment(t.Context(), tr)
 		})
 	}
 	close(start)

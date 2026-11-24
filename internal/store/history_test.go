@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
@@ -46,6 +48,8 @@ func TestListDeploymentsFilters(t *testing.T) {
 	rb.RollbackOfID = &succeeded.ID
 	rollback := mustCreateIn(t, st, rb, core.StateCancelled)
 	api := mustCreate(t, st, newDeployment("api"), 0)
+	mustExec(t, st, "UPDATE deployments SET image_digest = $2 WHERE id = $1", succeeded.ID, otherDigest)
+	mustExec(t, st, "UPDATE deployments SET image_digest = $2 WHERE id = $1", failed.ID, testDigest)
 
 	all := []core.DeploymentID{api.ID, rollback.ID, failed.ID, succeeded.ID, queued.ID}
 	tests := []struct {
@@ -62,6 +66,9 @@ func TestListDeploymentsFilters(t *testing.T) {
 		{name: "rollbacks", filter: store.DeploymentFilter{Kinds: []core.Kind{core.KindRollback}}, want: []core.DeploymentID{rollback.ID}},
 		{name: "every kind", filter: store.DeploymentFilter{Kinds: core.Kinds()}, want: all},
 		{name: "commit", filter: store.DeploymentFilter{CommitSHA: otherSHA}, want: []core.DeploymentID{succeeded.ID}},
+		{name: "digest", filter: store.DeploymentFilter{Digest: otherDigest}, want: []core.DeploymentID{succeeded.ID}},
+		{name: "app and digest", filter: store.DeploymentFilter{App: "web", Digest: testDigest}, want: []core.DeploymentID{failed.ID}},
+		{name: "unknown digest", filter: store.DeploymentFilter{App: "web", Digest: core.Digest("sha256:" + strings.Repeat("a", 64))}, want: []core.DeploymentID{}},
 		{name: "before cursor", filter: store.DeploymentFilter{Before: failed.ID}, want: []core.DeploymentID{succeeded.ID, queued.ID}},
 		{name: "combined", filter: store.DeploymentFilter{App: "web", States: []core.State{core.StateQueued}, CommitSHA: testSHA}, want: []core.DeploymentID{queued.ID}},
 		{name: "unknown app", filter: store.DeploymentFilter{App: "nope"}, want: []core.DeploymentID{}},
@@ -182,6 +189,7 @@ func TestListDeploymentsRejectsInvalidFilters(t *testing.T) {
 		{name: "unknown state", filter: store.DeploymentFilter{States: []core.State{"paused"}}, want: core.ErrUnknownState},
 		{name: "unknown kind", filter: store.DeploymentFilter{Kinds: []core.Kind{"hotfix"}}, text: "kind"},
 		{name: "short commit", filter: store.DeploymentFilter{CommitSHA: "abc1234"}, want: core.ErrInvalidCommitSHA},
+		{name: "invalid digest", filter: store.DeploymentFilter{Digest: "sha256:abc"}, want: core.ErrInvalidDigest},
 		{name: "negative cursor", filter: store.DeploymentFilter{Before: -1}, text: "cursor"},
 	}
 	for _, tt := range tests {
@@ -314,16 +322,48 @@ func TestGetDeploymentHistoryTruncatesEvents(t *testing.T) {
 		SELECT d.id, d.app_id, 'note', 'note ' || n
 		FROM deployments d, generate_series(1, $2) n
 		WHERE d.id = $1`, d.ID, store.MaxHistoryEvents+20)
+	mustAdvance(t, st, d, core.StateCancelled)
 
 	h, err := st.GetDeploymentHistory(t.Context(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDeploymentHistory: %v", err)
 	}
 	if len(h.Events) != store.MaxHistoryEvents || !h.EventsTruncated {
-		t.Errorf("events = %d, truncated %v; want %d and truncated", len(h.Events), h.EventsTruncated, store.MaxHistoryEvents)
+		t.Fatalf("events = %d, truncated %v; want %d and truncated", len(h.Events), h.EventsTruncated, store.MaxHistoryEvents)
 	}
-	if h.Events[0].To != core.StateQueued || h.Events[1].Message != "note 1" {
-		t.Errorf("history does not start at the oldest event: %+v, %+v", h.Events[0], h.Events[1])
+	if first := h.Events[0]; first.Message != "note 22" {
+		t.Errorf("first kept event = %+v, want note 22, the oldest of the newest %d", first, store.MaxHistoryEvents)
+	}
+	if last := h.Events[len(h.Events)-1]; last.Type != core.EventTransition || last.From != core.StateQueued || last.To != core.StateCancelled {
+		t.Errorf("last event = %+v, want the terminal transition", last)
+	}
+	for i := 1; i < len(h.Events); i++ {
+		if h.Events[i].ID <= h.Events[i-1].ID {
+			t.Fatalf("events are not oldest first: %d then %d", h.Events[i-1].ID, h.Events[i].ID)
+		}
+	}
+}
+
+func TestGetDeploymentHistoryAtTheCap(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	d := mustCreate(t, st, newDeployment("web"), 0)
+	mustExec(t, st, `
+		INSERT INTO deployment_events (deployment_id, app_id, type, message)
+		SELECT d.id, d.app_id, 'note', 'note ' || n
+		FROM deployments d, generate_series(1, $2) n
+		WHERE d.id = $1`, d.ID, store.MaxHistoryEvents-1)
+
+	h, err := st.GetDeploymentHistory(t.Context(), d.ID)
+	if err != nil {
+		t.Fatalf("GetDeploymentHistory: %v", err)
+	}
+	if len(h.Events) != store.MaxHistoryEvents || h.EventsTruncated {
+		t.Fatalf("events = %d, truncated %v; want %d and not truncated", len(h.Events), h.EventsTruncated, store.MaxHistoryEvents)
+	}
+	if h.Events[0].To != core.StateQueued || h.Events[len(h.Events)-1].Message != fmt.Sprintf("note %d", store.MaxHistoryEvents-1) {
+		t.Errorf("events run from %+v to %+v", h.Events[0], h.Events[len(h.Events)-1])
 	}
 }
 
@@ -423,13 +463,19 @@ func TestLastSuccessfulDeployment(t *testing.T) {
 			})
 		}
 	})
-	t.Run("deployment without digest", func(t *testing.T) {
+	t.Run("deployments without digest", func(t *testing.T) {
 		t.Parallel()
 		ref := newDeployment("nodigest")
-		d := mustCreateIn(t, st, ref, core.StateSucceeded)
-		got, err := st.LastSuccessfulDeployment(t.Context(), ref.Target, testDigest)
-		if err != nil || got.ID != d.ID {
-			t.Errorf("deployment without a digest is skipped when excluding a digest: got %d, %v", got.ID, err)
+		pinned := succeed(mustCreate(t, st, ref, 0), testDigest)
+		mustCreateIn(t, st, ref, core.StateSucceeded)
+		for _, exclude := range []core.Digest{"", otherDigest} {
+			got, err := st.LastSuccessfulDeployment(t.Context(), ref.Target, exclude)
+			if err != nil || got.ID != pinned.ID {
+				t.Errorf("exclude %q: got %d, %v; want %d, the latest with a digest", exclude, got.ID, err, pinned.ID)
+			}
+		}
+		if _, err := st.LastSuccessfulDeployment(t.Context(), ref.Target, testDigest); !errors.Is(err, core.ErrNotFound) {
+			t.Errorf("excluding the only digest: error = %v, want ErrNotFound", err)
 		}
 	})
 }

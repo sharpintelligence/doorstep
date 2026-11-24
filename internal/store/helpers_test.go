@@ -118,8 +118,9 @@ func pathTo(to core.State) []core.State {
 func mustAdvance(t *testing.T, st *store.Store, d core.Deployment, to core.State) core.Deployment {
 	t.Helper()
 	for _, next := range pathTo(to)[indexAfter(pathTo(to), d.State):] {
+		tr := withOutcome(t, st, store.Transition{ID: d.ID, From: d.State, To: next, Actor: "worker"}, d.Target.App)
 		var err error
-		d, err = st.TransitionDeployment(t.Context(), store.Transition{ID: d.ID, From: d.State, To: next, Actor: "worker"})
+		d, err = st.TransitionDeployment(t.Context(), tr)
 		if err != nil {
 			t.Fatalf("TransitionDeployment(%d, %s -> %s): %v", d.ID, d.State, next, err)
 		}
@@ -128,6 +129,18 @@ func mustAdvance(t *testing.T, st *store.Store, d core.Deployment, to core.State
 		t.Fatalf("deployment %d is %s after advancing, want %s", d.ID, d.State, to)
 	}
 	return d
+}
+
+func withOutcome(t *testing.T, st *store.Store, tr store.Transition, app string) store.Transition {
+	t.Helper()
+	if tr.To == core.StateFailed {
+		tr.FailureReason = "test failure"
+	}
+	if tr.To == core.StateSuperseded {
+		successor := mustCreate(t, st, newDeployment(app+"-successor"), 0)
+		tr.SupersededByID = &successor.ID
+	}
+	return tr
 }
 
 func indexAfter(path []core.State, current core.State) int {
