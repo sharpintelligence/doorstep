@@ -89,16 +89,90 @@ func TestPinCommitResumeAfterWrite(t *testing.T) {
 func TestPinCommitAlreadyCurrent(t *testing.T) {
 	t.Parallel()
 
-	f := newFixture(t, Options{})
-	seed := f.repo.Seed("main", kustomizationPath, kustomization(digestB))
-
-	got, err := f.writer.Pin(t.Context(), deployRequest())
-	if err != nil {
-		t.Fatalf("Pin() error = %v", err)
+	earlier := deployRequest()
+	earlier.Deployment = 41
+	otherApp := deployRequest()
+	otherApp.Target.App = "api"
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, f *fixture) string
+		wantCommit bool
+	}{
+		{
+			name: "set by hand",
+			setup: func(_ *testing.T, f *fixture) string {
+				f.repo.Seed("main", kustomizationPath, kustomization(digestB))
+				return ""
+			},
+		},
+		{
+			name: "pinned by an earlier deployment of the same digest",
+			setup: func(t *testing.T, f *fixture) string {
+				t.Helper()
+				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+				sha := f.repo.Commit("main", pinMessage(t, earlier, digestA), map[string]string{kustomizationPath: kustomization(digestB)})
+				f.repo.Commit("main", "deploy(api)", map[string]string{kustomizationPath: withAPIDigest(kustomization(digestB), digestD)})
+				return sha
+			},
+			wantCommit: true,
+		},
+		{
+			name: "newest commit belongs to another app",
+			setup: func(t *testing.T, f *fixture) string {
+				t.Helper()
+				f.repo.Seed("main", kustomizationPath, kustomization(digestB))
+				f.repo.Commit("main", pinMessage(t, otherApp, digestC), map[string]string{kustomizationPath: withAPIDigest(kustomization(digestB), digestB)})
+				return ""
+			},
+		},
 	}
-	want := Result{Commit: core.Commit{Repository: "acme/gitops", SHA: seed}}
-	if got.Commit != want.Commit || got.Previous != "" || got.Changed {
-		t.Fatalf("Pin() = %+v, want %+v", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t, Options{})
+			sha := tt.setup(t, f)
+			head := f.mainSHA(t)
+
+			got, err := f.writer.Pin(t.Context(), deployRequest())
+			if err != nil {
+				t.Fatalf("Pin() error = %v", err)
+			}
+			want := Result{}
+			if tt.wantCommit {
+				want.Commit = core.Commit{Repository: "acme/gitops", SHA: sha}
+			}
+			if got != want {
+				t.Fatalf("Pin() = %+v, want %+v", got, want)
+			}
+			if f.mainSHA(t) != head {
+				t.Fatal("Pin() wrote a commit")
+			}
+		})
+	}
+}
+
+func TestPinCommitDoesNotReplayOverwrittenPin(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	if _, err := f.writer.Pin(t.Context(), deployRequest()); err != nil {
+		t.Fatalf("first Pin() error = %v", err)
+	}
+	newer := deployRequest()
+	newer.Deployment = 43
+	newer.Digest = digestD
+	if _, err := f.writer.Pin(t.Context(), newer); err != nil {
+		t.Fatalf("newer Pin() error = %v", err)
+	}
+	head := f.mainSHA(t)
+	puts := f.countPuts("/repos/acme/gitops/contents/")
+
+	if _, err := f.writer.Pin(t.Context(), deployRequest()); !errors.Is(err, ErrPinOverwritten) {
+		t.Fatalf("replayed Pin() error = %v, want ErrPinOverwritten", err)
+	}
+	if puts.count.Load() != 0 || f.mainSHA(t) != head {
+		t.Fatal("replayed Pin() wrote the old digest back")
 	}
 }
 
@@ -160,11 +234,53 @@ func TestPinCommitErrors(t *testing.T) {
 			wantState: http.StatusConflict,
 		},
 		{
-			name: "protected branch keeps the github message",
-			opts: Options{MaxAttempts: 2},
+			name: "protected branch is not retried",
 			setup: func(f *fixture) {
 				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
 				f.repo.RejectPut(http.StatusConflict, "Changes must be made through a pull request.")
+			},
+			wantErr:   ErrBranchProtected,
+			wantNot:   ErrConflict,
+			wantPuts:  1,
+			wantState: http.StatusConflict,
+		},
+		{
+			name: "ruleset violation is not retried",
+			setup: func(f *fixture) {
+				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+				f.repo.RejectPut(http.StatusConflict, "Repository rule violations found\n\nGH013: Cannot update this protected ref.")
+			},
+			wantErr:   ErrBranchProtected,
+			wantNot:   ErrConflict,
+			wantPuts:  1,
+			wantState: http.StatusConflict,
+		},
+		{
+			name: "protected branch validation failure",
+			setup: func(f *fixture) {
+				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+				f.repo.RejectPut(http.StatusUnprocessableEntity, "Invalid request.\n\nbranch is protected")
+			},
+			wantErr:   ErrBranchProtected,
+			wantPuts:  1,
+			wantState: http.StatusUnprocessableEntity,
+		},
+		{
+			name: "unexplained conflict is not retried",
+			setup: func(f *fixture) {
+				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+				f.repo.RejectPut(http.StatusConflict, "Git Repository is empty.")
+			},
+			wantNot:   ErrConflict,
+			wantPuts:  1,
+			wantState: http.StatusConflict,
+		},
+		{
+			name: "stale sha is retried",
+			opts: Options{MaxAttempts: 2},
+			setup: func(f *fixture) {
+				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+				f.repo.RejectPut(http.StatusConflict, "is at 1111 but expected 2222")
 			},
 			wantErr:   ErrConflict,
 			wantPuts:  2,
@@ -184,7 +300,7 @@ func TestPinCommitErrors(t *testing.T) {
 			name: "unrelated validation failure is not retried",
 			setup: func(f *fixture) {
 				f.repo.Seed("main", kustomizationPath, kustomization(digestA))
-				f.repo.RejectPut(http.StatusUnprocessableEntity, "Invalid request.\n\nbranch is protected")
+				f.repo.RejectPut(http.StatusUnprocessableEntity, "Invalid request.\n\nmessage is too long")
 			},
 			wantNot:   ErrConflict,
 			wantPuts:  1,
@@ -199,7 +315,8 @@ func TestPinCommitErrors(t *testing.T) {
 			name:    "branch missing",
 			setup:   func(f *fixture) { f.repo.Seed("main", kustomizationPath, kustomization("")) },
 			mutate:  func(r *Request) { r.Target.Branch = "prod" },
-			wantErr: ErrPinNotFound,
+			wantErr: github.ErrRefNotFound,
+			wantNot: ErrPinNotFound,
 		},
 		{
 			name:    "entry missing",
@@ -314,6 +431,42 @@ func TestPinCommitCancelledDuringBackoff(t *testing.T) {
 	if waits != 1 {
 		t.Fatalf("waits = %d, want 1", waits)
 	}
+}
+
+func TestBackoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 0, want: initialBackoff},
+		{attempt: 1, want: initialBackoff},
+		{attempt: 2, want: 2 * initialBackoff},
+		{attempt: 6, want: 32 * initialBackoff},
+		{attempt: 7, want: maxBackoff},
+		{attempt: 40, want: maxBackoff},
+		{attempt: 100, want: maxBackoff},
+	}
+	for _, tt := range tests {
+		t.Run(strconv.Itoa(tt.attempt), func(t *testing.T) {
+			t.Parallel()
+			for range 20 {
+				if d := backoff(tt.attempt); d < tt.want/2 || d > tt.want {
+					t.Fatalf("backoff(%d) = %s, want between %s and %s", tt.attempt, d, tt.want/2, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func pinMessage(t *testing.T, req Request, previous core.Digest) string {
+	t.Helper()
+	subject, body, err := FormatMessage(req, previous, "")
+	if err != nil {
+		t.Fatalf("FormatMessage() error = %v", err)
+	}
+	return subject + "\n\n" + body
 }
 
 func TestPinCommitYAMLReference(t *testing.T) {

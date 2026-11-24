@@ -122,6 +122,18 @@ func TestFakeRepoRefsAndCommits(t *testing.T) {
 	if err := repo.CreateBranch(ctx, "doorstep/x-2", "0000"); err == nil || errors.Is(err, github.ErrRefExists) {
 		t.Fatalf("CreateBranch(unknown sha) error = %v", err)
 	}
+	if err := repo.ResetBranch(ctx, "doorstep/x-1", first); err != nil {
+		t.Fatalf("ResetBranch() error = %v", err)
+	}
+	if sha, _ := fake.BranchSHA("doorstep/x-1"); sha != first {
+		t.Fatalf("branch after ResetBranch() = %s, want %s", sha, first)
+	}
+	if err := repo.ResetBranch(ctx, "doorstep/x-1", "0000"); err == nil || errors.Is(err, github.ErrRefNotFound) {
+		t.Fatalf("ResetBranch(unknown sha) error = %v", err)
+	}
+	if err := repo.ResetBranch(ctx, "doorstep/x-9", first); !errors.Is(err, github.ErrRefNotFound) {
+		t.Fatalf("ResetBranch(missing branch) error = %v", err)
+	}
 	if err := repo.DeleteBranch(ctx, "doorstep/x-1"); err != nil {
 		t.Fatalf("DeleteBranch() error = %v", err)
 	}

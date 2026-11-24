@@ -20,6 +20,9 @@ func (w *Writer) pinCommit(ctx context.Context, repo *github.Repo, req Request) 
 			result, err = w.alreadyPinned(ctx, repo, req, file.Path)
 			return err
 		}
+		if err := w.checkNotOverwritten(ctx, repo, req, file.Path); err != nil {
+			return err
+		}
 		previous := t.digestOf(current)
 		edited, err := writeValue(editorFor(t), file.Content, desired)
 		if err != nil {

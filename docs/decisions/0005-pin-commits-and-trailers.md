@@ -16,7 +16,7 @@
 
 ### The Contents API writes the pin
 
-A pin is one file. doorstep reads it with `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` and writes it with one `PUT` carrying the blob `sha` and the `branch`. That is one commit per pin with a compare-and-set on the blob: commits to other files never conflict, and a concurrent edit of the same file returns `409`, after which doorstep re-reads, re-edits and retries a bounded number of times. No author is given, so GitHub attributes and signs the commit as the App. The Git Data API (blob, tree, commit, ref) is kept for the one case that needs it, an empty unblock commit.
+A pin is one file. doorstep reads it with `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` and writes it with one `PUT` carrying the blob `sha` and the `branch`. That is one commit per pin with a compare-and-set on the blob: commits to other files never conflict, and a concurrent edit of the same file returns `409` about the stale sha, after which doorstep re-reads, re-edits and retries a bounded number of times. Branch protection and ruleset refusals also come back as `409` or `422`, but are recognised by their message and never retried. No author is given, so GitHub attributes and signs the commit as the App. The Git Data API (blob, tree, commit, ref) is kept for the one case that needs it, an empty unblock commit.
 
 ### Edits splice bytes; the parser only locates
 

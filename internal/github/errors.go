@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -31,10 +32,17 @@ var (
 	ErrFileTooLarge          = errors.New("file is too large")
 	ErrRefNotFound           = errors.New("git ref not found")
 	ErrRefExists             = errors.New("git ref already exists")
+	ErrPullRequestExists     = errors.New("pull request already exists")
 )
 
 func HasStatus(err error, status int) bool {
 	return hasStatus(err, status)
+}
+
+func HasMessage(err error, status int, fragment string) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == status &&
+		strings.Contains(strings.ToLower(apiErr.Message), strings.ToLower(fragment))
 }
 
 type APIError struct {
@@ -61,9 +69,18 @@ func newAPIError(resp *http.Response, body io.Reader) *APIError {
 	}
 	var payload struct {
 		Message string `json:"message"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.NewDecoder(io.LimitReader(body, maxErrorBodyBytes)).Decode(&payload); err == nil {
-		apiErr.Message = truncate(payload.Message, maxErrorMessageBytes)
+		parts := []string{payload.Message}
+		for _, detail := range payload.Errors {
+			if detail.Message != "" {
+				parts = append(parts, detail.Message)
+			}
+		}
+		apiErr.Message = truncate(strings.TrimPrefix(strings.Join(parts, ": "), ": "), maxErrorMessageBytes)
 	}
 	return apiErr
 }

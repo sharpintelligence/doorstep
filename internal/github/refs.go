@@ -2,10 +2,8 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 func (r *Repo) BranchSHA(ctx context.Context, branch string) (string, error) {
@@ -38,7 +36,7 @@ func (r *Repo) CreateBranch(ctx context.Context, branch, sha string) error {
 		SHA string `json:"sha"`
 	}{Ref: "refs/heads/" + branch, SHA: sha}
 	if err := r.do(ctx, http.MethodPost, r.endpoint("git/refs"), nil, body, nil); err != nil {
-		if hasMessage(err, http.StatusUnprocessableEntity, "already exists") {
+		if HasMessage(err, http.StatusUnprocessableEntity, "already exists") {
 			return fmt.Errorf("%w: branch %s in %s: %w", ErrRefExists, branch, r.FullName(), err)
 		}
 		return fmt.Errorf("create branch %s in %s: %w", branch, r.FullName(), err)
@@ -51,7 +49,7 @@ func (r *Repo) DeleteBranch(ctx context.Context, branch string) error {
 		return err
 	}
 	if err := r.do(ctx, http.MethodDelete, r.endpoint("git/refs/heads", branch), nil, nil, nil); err != nil {
-		if HasStatus(err, http.StatusNotFound) || hasMessage(err, http.StatusUnprocessableEntity, "does not exist") {
+		if HasStatus(err, http.StatusNotFound) || HasMessage(err, http.StatusUnprocessableEntity, "reference does not exist") {
 			return fmt.Errorf("%w: branch %s in %s: %w", ErrRefNotFound, branch, r.FullName(), err)
 		}
 		return fmt.Errorf("delete branch %s in %s: %w", branch, r.FullName(), err)
@@ -59,8 +57,19 @@ func (r *Repo) DeleteBranch(ctx context.Context, branch string) error {
 	return nil
 }
 
-func hasMessage(err error, status int, fragment string) bool {
-	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == status &&
-		strings.Contains(strings.ToLower(apiErr.Message), fragment)
+func (r *Repo) ResetBranch(ctx context.Context, branch, sha string) error {
+	if err := validateRef(branch); err != nil {
+		return err
+	}
+	body := struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}{SHA: sha, Force: true}
+	if err := r.do(ctx, http.MethodPatch, r.endpoint("git/refs/heads", branch), nil, body, nil); err != nil {
+		if HasStatus(err, http.StatusNotFound) || HasMessage(err, http.StatusUnprocessableEntity, "reference does not exist") {
+			return fmt.Errorf("%w: branch %s in %s: %w", ErrRefNotFound, branch, r.FullName(), err)
+		}
+		return fmt.Errorf("reset branch %s in %s: %w", branch, r.FullName(), err)
+	}
+	return nil
 }

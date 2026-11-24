@@ -69,10 +69,8 @@ func (r *pullRun) once(ctx context.Context) (Result, error) {
 		return r.alreadyPinned(ctx, existing)
 	}
 	if existing != nil && existing.Merged {
-		return Result{
-			Commit:      core.Commit{Repository: r.repo.FullName(), SHA: existing.MergeCommitSHA},
-			PullRequest: existing.Number,
-		}, nil
+		return Result{}, fmt.Errorf("%w: #%d was merged as %s, but %s no longer holds %s",
+			ErrPinOverwritten, existing.Number, existing.MergeCommitSHA, t.Branch, r.desired)
 	}
 	previous := t.digestOf(current)
 	expected, err := writeValue(editorFor(t), base.Content, r.desired)
@@ -91,19 +89,37 @@ func (r *pullRun) once(ctx context.Context) (Result, error) {
 	if err := r.syncHead(ctx, expected, subject+"\n\n"+body); err != nil {
 		return Result{}, err
 	}
-	number := 0
 	if existing != nil {
-		number = existing.Number
-	} else {
-		pr, err := r.repo.CreatePullRequest(ctx, github.NewPullRequest{Title: subject, Body: body, Head: r.head, Base: t.Branch})
-		if err != nil {
-			return Result{}, err
-		}
-		number = pr.Number
-		r.w.logger.InfoContext(ctx, "pin pull request opened",
-			slog.String("app", t.App), slog.Int("pull_request", number), slog.String("url", pr.HTMLURL))
+		return r.poll(ctx, existing.Number)
+	}
+	number, err := r.open(ctx, subject, body)
+	if err != nil {
+		return Result{}, err
 	}
 	return r.poll(ctx, number)
+}
+
+func (r *pullRun) open(ctx context.Context, subject, body string) (int, error) {
+	t := r.req.Target
+	pr, err := r.repo.CreatePullRequest(ctx, github.NewPullRequest{Title: subject, Body: body, Head: r.head, Base: t.Branch})
+	if errors.Is(err, github.ErrPullRequestExists) {
+		pulls, listErr := r.repo.ListPullRequests(ctx, r.head, t.Branch)
+		if listErr != nil {
+			return 0, listErr
+		}
+		for _, p := range pulls {
+			if p.State == github.PullStateOpen {
+				r.w.logger.InfoContext(ctx, "pin pull request adopted", slog.String("app", t.App), slog.Int("pull_request", p.Number))
+				return p.Number, nil
+			}
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	r.w.logger.InfoContext(ctx, "pin pull request opened",
+		slog.String("app", t.App), slog.Int("pull_request", pr.Number), slog.String("url", pr.HTMLURL))
+	return pr.Number, nil
 }
 
 func (r *pullRun) alreadyPinned(ctx context.Context, existing *github.PullRequest) (Result, error) {
@@ -131,7 +147,7 @@ func (r *pullRun) ensureBranch(ctx context.Context) error {
 	}
 	err = r.repo.CreateBranch(ctx, r.head, sha)
 	if errors.Is(err, github.ErrRefExists) {
-		return nil
+		return r.repo.ResetBranch(ctx, r.head, sha)
 	}
 	return err
 }
@@ -174,8 +190,7 @@ func (r *pullRun) poll(ctx context.Context, number int) (Result, error) {
 			r.supersede(ctx, pr)
 			return Result{}, fmt.Errorf("pull request #%d conflicts with %s: %w", number, r.req.Target.Branch, errRestart)
 		case pr.MergeableState == github.MergeableBehind:
-			err := r.repo.UpdatePullRequestBranch(ctx, number, pr.HeadSHA)
-			if err != nil && !github.HasStatus(err, http.StatusUnprocessableEntity) {
+			if err := r.updateBranch(ctx, pr); err != nil {
 				return Result{}, err
 			}
 		default:
@@ -187,6 +202,24 @@ func (r *pullRun) poll(ctx context.Context, number int) (Result, error) {
 		if err := r.w.opts.Wait(ctx, r.w.opts.PollInterval); err != nil {
 			return Result{}, err
 		}
+	}
+}
+
+func (r *pullRun) updateBranch(ctx context.Context, pr github.PullRequest) error {
+	err := r.repo.UpdatePullRequestBranch(ctx, pr.Number, pr.HeadSHA)
+	switch {
+	case err == nil:
+		return nil
+	case github.HasMessage(err, http.StatusUnprocessableEntity, "merge conflict"):
+		r.supersede(ctx, pr)
+		return fmt.Errorf("pull request #%d conflicts with %s: %w", pr.Number, r.req.Target.Branch, errRestart)
+	case github.HasMessage(err, http.StatusUnprocessableEntity, "expected head sha"),
+		github.HasMessage(err, http.StatusUnprocessableEntity, "no new commits"),
+		github.HasMessage(err, http.StatusUnprocessableEntity, "up to date"):
+		r.w.logger.DebugContext(ctx, "pin pull request branch already moved", slog.Int("pull_request", pr.Number), slog.Any("error", err))
+		return nil
+	default:
+		return err
 	}
 }
 

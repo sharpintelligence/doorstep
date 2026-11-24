@@ -246,6 +246,25 @@ func TestBranchCalls(t *testing.T) {
 			call:    func(ctx context.Context, r *Repo) error { return r.DeleteBranch(ctx, "a/../b") },
 			wantErr: ErrInvalidPath,
 		},
+		{
+			name: "reset", status: http.StatusOK,
+			call: func(ctx context.Context, r *Repo) error { return r.ResetBranch(ctx, "doorstep/blog-1", "abc") },
+		},
+		{
+			name: "reset missing", status: http.StatusUnprocessableEntity, message: "Reference does not exist",
+			call:    func(ctx context.Context, r *Repo) error { return r.ResetBranch(ctx, "doorstep/blog-1", "abc") },
+			wantErr: ErrRefNotFound,
+		},
+		{
+			name: "reset rejected", status: http.StatusUnprocessableEntity, message: "Object does not exist",
+			call:    func(ctx context.Context, r *Repo) error { return r.ResetBranch(ctx, "doorstep/blog-1", "zzz") },
+			wantErr: errPlainAPI,
+		},
+		{
+			name:    "reset invalid name",
+			call:    func(ctx context.Context, r *Repo) error { return r.ResetBranch(ctx, "a/../b", "abc") },
+			wantErr: ErrInvalidPath,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -265,6 +284,17 @@ func TestBranchCalls(t *testing.T) {
 			f.srv.Handle("GET /repos/acme/gitops/git/ref/{ref...}", handler)
 			f.srv.Handle("POST /repos/acme/gitops/git/refs", handler)
 			f.srv.Handle("DELETE /repos/acme/gitops/git/refs/{ref...}", handler)
+			f.srv.Handle("PATCH /repos/acme/gitops/git/refs/{ref...}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					SHA   string `json:"sha"`
+					Force bool   `json:"force"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !body.Force || body.SHA == "" {
+					githubtest.WriteError(w, http.StatusBadRequest, "want a forced update")
+					return
+				}
+				handler(w, r)
+			}))
 			err := tt.call(t.Context(), f.repo(t))
 			var apiErr *APIError
 			switch {
@@ -398,5 +428,43 @@ func TestPullRequestCalls(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(requests, wantRequests) {
 		t.Fatalf("requests = %v\nwant %v", requests, wantRequests)
+	}
+}
+
+func TestCreatePullRequestAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		body    string
+		wantErr error
+	}{
+		{
+			name:    "already exists",
+			body:    `{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for acme:doorstep/blog-1."}]}`,
+			wantErr: ErrPullRequestExists,
+		},
+		{
+			name: "no commits",
+			body: `{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between main and doorstep/blog-1"}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.srv.Handle("POST /repos/acme/gitops/pulls", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			_, err := f.repo(t).CreatePullRequest(t.Context(), NewPullRequest{Title: "t", Head: "doorstep/blog-1", Base: "main"})
+			if !HasStatus(err, http.StatusUnprocessableEntity) {
+				t.Fatalf("CreatePullRequest() error = %v, want a 422", err)
+			}
+			if got := errors.Is(err, ErrPullRequestExists); got != (tt.wantErr != nil) {
+				t.Fatalf("CreatePullRequest() error = %v, ErrPullRequestExists = %t", err, got)
+			}
+		})
 	}
 }

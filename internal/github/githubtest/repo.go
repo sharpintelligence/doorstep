@@ -254,6 +254,7 @@ func (s *Server) routeFakeRepos() {
 		"GET /repos/{owner}/{repo}/git/ref/{ref...}":             (*Repo).handleGetRef,
 		"POST /repos/{owner}/{repo}/git/refs":                    (*Repo).handleCreateRef,
 		"DELETE /repos/{owner}/{repo}/git/refs/{ref...}":         (*Repo).handleDeleteRef,
+		"PATCH /repos/{owner}/{repo}/git/refs/{ref...}":          (*Repo).handleUpdateRef,
 		"GET /repos/{owner}/{repo}/commits":                      (*Repo).handleListCommits,
 		"GET /repos/{owner}/{repo}/pulls":                        (*Repo).handleListPulls,
 		"POST /repos/{owner}/{repo}/pulls":                       (*Repo).handleCreatePull,
@@ -431,6 +432,37 @@ func (r *Repo) handleCreateRef(w http.ResponseWriter, req *http.Request) {
 	r.branches[branch] = body.SHA
 	WriteJSON(w, http.StatusCreated, map[string]any{
 		"ref":    body.Ref,
+		"object": map[string]string{"sha": body.SHA, "type": "commit"},
+	})
+}
+
+func (r *Repo) handleUpdateRef(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		SHA   string `json:"sha"`
+		Force bool   `json:"force"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		WriteError(w, http.StatusBadRequest, "Problems parsing JSON")
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	branch, ok := strings.CutPrefix(req.PathValue("ref"), "heads/")
+	_, exists := r.branches[branch]
+	switch {
+	case !body.Force:
+		WriteError(w, http.StatusUnprocessableEntity, "Update is not a fast forward")
+		return
+	case !ok || !exists:
+		WriteError(w, http.StatusUnprocessableEntity, "Reference does not exist")
+		return
+	case r.commits[body.SHA] == nil:
+		WriteError(w, http.StatusUnprocessableEntity, "Object does not exist")
+		return
+	}
+	r.branches[branch] = body.SHA
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"ref":    "refs/heads/" + branch,
 		"object": map[string]string{"sha": body.SHA, "type": "commit"},
 	})
 }

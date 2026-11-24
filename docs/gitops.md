@@ -110,7 +110,7 @@ These trailers are a durable contract: doorstep reads previous digests and block
 
 ### `commit`
 
-doorstep pushes one commit straight to `gitops.branch`. The write is a compare-and-set on the file's blob: commits to other files never conflict, and only a concurrent change to the same file does. doorstep then re-reads the file, re-applies its edit and tries again, up to five times with a short randomised backoff, so two apps that share a kustomization can deploy at the same moment. If it keeps conflicting, or a branch rule rejects the write, the deployment fails with `ErrConflict` and GitHub's message.
+doorstep pushes one commit straight to `gitops.branch`. The write is a compare-and-set on the file's blob: commits to other files never conflict, and only a concurrent change to the same file does. doorstep then re-reads the file, re-applies its edit and tries again, up to five times with a short randomised backoff (doubling from 200 ms, capped at 10 seconds), so two apps that share a kustomization can deploy at the same moment. Only GitHub's stale-sha answers count as a conflict (`409` or `422` saying the file "does not match" or "is at ... but expected ..."). If the write keeps conflicting the deployment fails with `ErrConflict`. If branch protection or a ruleset rejects it (`GH006`, `GH013`, "Changes must be made through a pull request", "Repository rule violations found") it fails at once with `ErrBranchProtected`, because retrying cannot help. Any other refusal is returned as GitHub's error without a retry.
 
 If the branch is protected, the App must be allowed to push to it (for example through a bypass list), or use `pull_request` mode.
 
@@ -118,13 +118,15 @@ If the branch is protected, the App must be allowed to push to it (for example t
 
 doorstep works on a branch named `doorstep/<app>-<deployment id>`:
 
-1. It creates the branch from `gitops.branch` (or reuses it) and commits the edited file to it.
-2. It opens a pull request against `gitops.branch`, titled with the commit subject and with the trailers in its description, or finds the one it opened before.
+1. It creates the branch from `gitops.branch` and commits the edited file to it. When the branch already exists but no pull request is open from it (a crash, or a branch doorstep failed to delete), doorstep force-resets it to the current `gitops.branch` first, so old history cannot make the new pull request conflict.
+2. It opens a pull request against `gitops.branch`, titled with the commit subject and with the trailers in its description, or finds the one it opened before. If GitHub answers that a pull request already exists (another run for the same deployment opened it a moment earlier), doorstep adopts that one.
 3. It waits for the pull request to become mergeable, checking every 10 seconds, and merges it itself with **squash**, using the commit message above. There is no human step: merging the app change was the approval ([ADR 0001](decisions/0001-go-and-core-design.md)). Required status checks on the GitOps repository are honoured, because GitHub refuses the merge until they pass.
-4. When GitHub reports the branch as behind and the base requires up-to-date branches, doorstep updates the branch. When the pull request conflicts with the base, doorstep closes it (noting why in its description), deletes the branch and starts again from the current base, at most three times.
+4. When GitHub reports the branch as behind and the base requires up-to-date branches, doorstep updates the branch. An update that GitHub refuses because the branch moved or is already up to date is ignored and the next poll looks again; one refused for a merge conflict is treated like a conflicting pull request; any other refusal fails the deployment. When the pull request conflicts with the base, doorstep closes it (noting why in its description), deletes the branch and starts again from the current base, at most three times.
 5. After the merge it deletes the branch. The squash commit on `gitops.branch` is the commit Argo CD syncs.
 
-If the pull request is not merged within 30 minutes the deployment step stops with `ErrMergeTimeout` and the pull request stays open; the next attempt picks it up again. Closing the pull request without merging it fails the deployment with `ErrPullRequestClosed`.
+If the pull request is not merged within 30 minutes the deployment step stops with `ErrMergeTimeout` and the pull request stays open; the next attempt picks it up again. Closing the pull request without merging it fails the deployment with `ErrPullRequestClosed`. If someone else merges the pull request, doorstep accepts it only when `gitops.branch` then holds exactly the desired value; when it holds anything else (someone pushed other content to the branch first, or a newer deployment pinned over it) the deployment fails with `ErrPinOverwritten` rather than reporting a commit that does not pin its digest.
+
+doorstep recognises the pull requests it closed itself by a fixed sentence it appends to their description, and opens a fresh pull request instead of failing with `ErrPullRequestClosed`. Anyone who can edit pull request descriptions in the GitOps repository can add that sentence to a pull request they closed, which makes doorstep start over rather than stop. This is deliberate: people with write access to the GitOps repository can already change what Argo CD deploys, so doorstep trusts them; it never trusts content from forks (see below).
 
 doorstep only merges what it wrote. Before each merge it checks that the pull request's branch lives in the GitOps repository itself, that it changes exactly the pin file, and that this file is byte-for-byte doorstep's edit of the current base; the merge is pinned to the commit it checked. A pull request from a fork or one that touches other files is refused with `ErrPullRequestTampered` and left open for a person to look at. If only the pin file differs (for example because someone pushed to the branch), doorstep commits its own edit again before merging.
 
@@ -137,7 +139,15 @@ doorstep only merges what it wrote. Before each merge it checks that the pull re
 
 ## Restarts
 
-Every step is find-or-create and doorstep keeps no extra state about it. Before writing anything doorstep checks whether `gitops.branch` already holds the desired value. If it does, nothing is written, and doorstep reports the commit among the last 20 touching the file whose `Doorstep-Deployment` trailer names this deployment, together with its `Doorstep-Previous-Digest`, or else the newest commit touching the file. A crash after a commit or merge, or a digest that was already current, therefore never produces a second commit.
+Every step is find-or-create and doorstep keeps no extra state about it. Before writing anything doorstep checks whether `gitops.branch` already holds the desired value. If it does, nothing is written, and among the last 20 commits touching the file doorstep reports:
+
+- the commit whose trailers name this app, digest and deployment, together with its `Doorstep-Previous-Digest`; or else
+- the newest commit whose trailers name this app and digest (an earlier deployment of the same image), without a previous digest; or else
+- no commit at all, when the value was set by hand or by commits doorstep cannot attribute. The deployment then has no pin commit of its own; doorstep never reports a commit that belongs to another app sharing the file.
+
+A crash after a commit or merge, or a digest that was already current, therefore never produces a second commit.
+
+A pin that already landed and was later replaced is never written again. If `gitops.branch` no longer holds the desired value but a commit among the last 20 (commit mode) or a merged pull request (pull request mode) shows that this deployment pinned it before, `Pin` fails with `ErrPinOverwritten` in both modes instead of writing the old digest back. Pins for one app are serialised by doorstep's engine (one active deployment per target), so this only happens when a stale run is replayed.
 
 ## Troubleshooting
 
@@ -146,7 +156,10 @@ Every step is find-or-create and doorstep keeps no extra state about it. Before 
 | `ErrPinNotFound` | No kustomization or YAML file in `gitops.path`, no `images` entry named `pin.kustomize.image`, or nothing at `pin.yaml.path` | Add the entry or value (a placeholder is enough), or fix the configuration |
 | `ErrAmbiguousPin` | Two entries with the same name, a duplicated key, or the path in several documents | Remove the duplicate |
 | `ErrUnsupportedYAML` | The value is written in a form doorstep will not edit (see [What cannot be edited](#what-cannot-be-edited)) | Rewrite that value as a single-line string |
-| `ErrConflict` | The write kept conflicting, or GitHub rejected it with `409` (often branch protection or a ruleset) | Read GitHub's message in the error; allow the App to push or switch to `pull_request` mode |
+| `ErrConflict` | The file kept changing under doorstep's write, or the pull request kept conflicting with the base | Retry later; look for something rewriting the file in a loop |
+| `ErrBranchProtected` | Branch protection or a ruleset refused doorstep's direct commit | Add the App to the bypass list or switch to `pull_request` mode |
+| `ErrPinOverwritten` | This deployment's pin landed, but `gitops.branch` now holds another value (a newer pin, or a merged pull request with other content) | Nothing to repair: deploy again if this digest should be live |
+| `github.ErrRefNotFound` | `gitops.branch` does not exist, or the App cannot see the repository | Fix `gitops.branch` or the installation's repository selection |
 | `ErrPullRequestClosed` | Someone closed doorstep's pull request | Queue the deployment again if it should still ship |
 | `ErrPullRequestTampered` | The pull request comes from a fork or changes other files | Inspect and close the pull request |
 | `ErrMergeTimeout` | The pull request did not become mergeable in 30 minutes | Check required checks and reviews on the GitOps repository |

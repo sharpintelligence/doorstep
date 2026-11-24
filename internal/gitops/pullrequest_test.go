@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/github"
 )
 
 const headBranch = "doorstep/blog-42"
@@ -148,6 +149,25 @@ func TestPinPullRequestResumes(t *testing.T) {
 				t.Fatalf("file =\n%s", content)
 			}
 		})
+	}
+}
+
+func TestPinPullRequestResetsStaleBranch(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	f.repo.CreateBranch(headBranch, "main")
+	f.repo.Commit(headBranch, "stale", map[string]string{kustomizationPath: kustomization(digestD)})
+	f.repo.Commit("main", "deploy(api)", map[string]string{kustomizationPath: withAPIDigest(kustomization(digestA), digestD)})
+
+	got, err := f.writer.Pin(t.Context(), pullRequestRequest())
+	if err != nil {
+		t.Fatalf("Pin() error = %v", err)
+	}
+	f.assertMerged(t, got, 1, digestA)
+	if want := withAPIDigest(kustomization(digestB), digestD); f.mainFile(t, kustomizationPath) != want {
+		t.Fatalf("file =\n%s\nwant\n%s", f.mainFile(t, kustomizationPath), want)
 	}
 }
 
@@ -308,8 +328,8 @@ func TestPinPullRequestMergedElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pin() error = %v", err)
 	}
-	if got.Changed || got.Commit.SHA != f.mainSHA(t) || got.PullRequest != 0 {
-		t.Fatalf("Pin() = %+v", got)
+	if got != (Result{}) {
+		t.Fatalf("Pin() = %+v, want no commit attributed to this deployment", got)
 	}
 	pulls := f.repo.Pulls()
 	if len(pulls) != 1 || pulls[0].State != "closed" || pulls[0].Merged {
@@ -368,5 +388,137 @@ func TestPinPullRequestRespectsCallerDeadline(t *testing.T) {
 	_, err := f.writer.Pin(ctx, pullRequestRequest())
 	if errors.Is(err, ErrMergeTimeout) || ctx.Err() == nil {
 		t.Fatalf("Pin() error = %v, want the caller's deadline", err)
+	}
+}
+
+func TestPinPullRequestMergedWithOtherContent(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	f.repo.BlockMerges(1 << 30)
+	var once atomic.Bool
+	f.hook(func(method, path string) {
+		if method == http.MethodGet && path == "/repos/acme/gitops/pulls/1" && once.CompareAndSwap(false, true) {
+			f.repo.Commit(headBranch, "someone else's digest", map[string]string{kustomizationPath: kustomization(digestD)})
+			f.repo.BlockMerges(0)
+			if err := f.mergeAsSomeoneElse(t.Context(), 1); err != nil {
+				t.Errorf("merge as someone else: %v", err)
+			}
+		}
+	})
+
+	_, err := f.writer.Pin(t.Context(), pullRequestRequest())
+	if !errors.Is(err, ErrPinOverwritten) {
+		t.Fatalf("Pin() error = %v, want ErrPinOverwritten", err)
+	}
+	if content := f.mainFile(t, kustomizationPath); content != kustomization(digestD) {
+		t.Fatalf("file =\n%s", content)
+	}
+	if n := len(f.repo.Pulls()); n != 1 {
+		t.Fatalf("pull requests = %d, want 1", n)
+	}
+}
+
+func TestPinPullRequestDoesNotReplayOverwrittenPin(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	if _, err := f.writer.Pin(t.Context(), pullRequestRequest()); err != nil {
+		t.Fatalf("first Pin() error = %v", err)
+	}
+	newer := pullRequestRequest()
+	newer.Deployment = 43
+	newer.Digest = digestD
+	if _, err := f.writer.Pin(t.Context(), newer); err != nil {
+		t.Fatalf("newer Pin() error = %v", err)
+	}
+	head := f.mainSHA(t)
+
+	if _, err := f.writer.Pin(t.Context(), pullRequestRequest()); !errors.Is(err, ErrPinOverwritten) {
+		t.Fatalf("replayed Pin() error = %v, want ErrPinOverwritten", err)
+	}
+	if f.mainSHA(t) != head || len(f.repo.Pulls()) != 2 {
+		t.Fatalf("replayed Pin() changed the repository: pulls %+v", f.repo.Pulls())
+	}
+}
+
+func TestPinPullRequestAdoptsConcurrentPullRequest(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	var once atomic.Bool
+	f.hook(func(method, path string) {
+		if method == http.MethodPost && path == "/repos/acme/gitops/pulls" && once.CompareAndSwap(false, true) {
+			repo, err := f.app.Repo(t.Context(), "acme", "gitops")
+			if err == nil {
+				_, err = repo.CreatePullRequest(t.Context(), github.NewPullRequest{Title: "concurrent", Head: headBranch, Base: "main"})
+			}
+			if err != nil {
+				t.Errorf("concurrent CreatePullRequest() error = %v", err)
+			}
+		}
+	})
+
+	got, err := f.writer.Pin(t.Context(), pullRequestRequest())
+	if err != nil {
+		t.Fatalf("Pin() error = %v", err)
+	}
+	if got.PullRequest != 1 || !got.Changed || len(f.repo.Pulls()) != 1 {
+		t.Fatalf("Pin() = %+v, pulls %+v", got, f.repo.Pulls())
+	}
+}
+
+func TestPinPullRequestUpdateBranchRefusals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		onUpdate   func(f *fixture)
+		wantPull   int
+		wantPrev   core.Digest
+		wantClosed bool
+	}{
+		{
+			name:     "nothing to update",
+			onUpdate: func(*fixture) {},
+			wantPull: 1,
+			wantPrev: digestA,
+		},
+		{
+			name: "update conflicts",
+			onUpdate: func(f *fixture) {
+				f.repo.Commit("main", "manual pin", map[string]string{kustomizationPath: kustomization(digestD)})
+			},
+			wantPull:   2,
+			wantPrev:   digestD,
+			wantClosed: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t, Options{})
+			f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+			f.repo.SetMergeableState(github.MergeableBehind)
+			var once atomic.Bool
+			f.hook(func(method, path string) {
+				if method == http.MethodPut && strings.HasSuffix(path, "/update-branch") && once.CompareAndSwap(false, true) {
+					tt.onUpdate(f)
+					f.repo.SetMergeableState("")
+				}
+			})
+
+			got, err := f.writer.Pin(t.Context(), pullRequestRequest())
+			if err != nil {
+				t.Fatalf("Pin() error = %v", err)
+			}
+			f.assertMerged(t, got, tt.wantPull, tt.wantPrev)
+			if first := f.repo.Pulls()[0]; tt.wantClosed && (first.Merged || !strings.Contains(first.Body, supersededMarker)) {
+				t.Fatalf("first pull request = %+v", first)
+			}
+		})
 	}
 }

@@ -147,6 +147,9 @@ func (r *Repo) CreatePullRequest(ctx context.Context, req NewPullRequest) (PullR
 	}{Title: req.Title, Body: req.Body, Head: req.Head, Base: req.Base}
 	var out pullResponse
 	if err := r.do(ctx, http.MethodPost, r.endpoint("pulls"), nil, body, &out); err != nil {
+		if HasMessage(err, http.StatusUnprocessableEntity, "already exists") {
+			return PullRequest{}, fmt.Errorf("%w: from %s to %s in %s: %w", ErrPullRequestExists, req.Head, req.Base, r.FullName(), err)
+		}
 		return PullRequest{}, fmt.Errorf("create pull request from %s to %s in %s: %w", req.Head, req.Base, r.FullName(), err)
 	}
 	return out.toPullRequest(), nil

@@ -129,3 +129,16 @@ type requestCounter struct {
 	path  string
 	count atomic.Int64
 }
+
+func (f *fixture) mergeAsSomeoneElse(ctx context.Context, number int) error {
+	repo, err := f.app.Repo(ctx, "acme", "gitops")
+	if err != nil {
+		return err
+	}
+	pr, err := repo.GetPullRequest(ctx, number)
+	if err != nil {
+		return err
+	}
+	_, err = repo.MergePullRequest(ctx, number, github.MergeRequest{SHA: pr.HeadSHA, Method: github.MergeMethodSquash})
+	return err
+}

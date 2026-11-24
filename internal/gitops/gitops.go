@@ -3,7 +3,6 @@ package gitops
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -21,6 +20,7 @@ const (
 	DefaultMaxAttempts  = 5
 
 	initialBackoff = 200 * time.Millisecond
+	maxBackoff     = 10 * time.Second
 	historyDepth   = 20
 )
 
@@ -115,6 +115,9 @@ func (w *Writer) load(ctx context.Context, repo *github.Repo, t Target, ref stri
 		}
 		return file, value, err
 	}
+	if _, err := repo.BranchSHA(ctx, ref); err != nil {
+		return github.File{}, "", err
+	}
 	return github.File{}, "", fmt.Errorf("%w: no %s on %s in %s: %w",
 		ErrPinNotFound, strings.Join(t.candidateFiles(), " or "), ref, repo.FullName(), lastErr)
 }
@@ -132,20 +135,53 @@ func (w *Writer) loadAt(ctx context.Context, repo *github.Repo, t Target, path, 
 }
 
 func (w *Writer) alreadyPinned(ctx context.Context, repo *github.Repo, req Request, path string) (Result, error) {
-	commits, err := repo.ListCommits(ctx, req.Target.Branch, path, historyDepth)
+	commits, err := w.pinCommits(ctx, repo, req, path)
 	if err != nil {
 		return Result{}, err
 	}
-	if len(commits) == 0 {
-		return Result{}, fmt.Errorf("no commit on %s touches %s", req.Target.Branch, path)
-	}
+	var result Result
 	for _, c := range commits {
-		t := ParseMessage(c.Message)
-		if t.Deployment == req.Deployment && t.App == req.Target.App && t.Digest == req.Digest {
-			return Result{Commit: core.Commit{Repository: repo.FullName(), SHA: c.SHA}, Previous: t.PreviousDigest}, nil
+		if c.trailers.Deployment == req.Deployment {
+			return Result{Commit: core.Commit{Repository: repo.FullName(), SHA: c.sha}, Previous: c.trailers.PreviousDigest}, nil
+		}
+		if result.Commit.SHA == "" {
+			result.Commit = core.Commit{Repository: repo.FullName(), SHA: c.sha}
 		}
 	}
-	return Result{Commit: core.Commit{Repository: repo.FullName(), SHA: commits[0].SHA}}, nil
+	return result, nil
+}
+
+func (w *Writer) checkNotOverwritten(ctx context.Context, repo *github.Repo, req Request, path string) error {
+	commits, err := w.pinCommits(ctx, repo, req, path)
+	if err != nil {
+		return err
+	}
+	for _, c := range commits {
+		if c.trailers.Deployment == req.Deployment {
+			return fmt.Errorf("%w: %s pinned %s on %s, and a later commit changed it", ErrPinOverwritten, c.sha, req.Digest, req.Target.Branch)
+		}
+	}
+	return nil
+}
+
+type pinCommit struct {
+	sha      string
+	trailers Trailers
+}
+
+func (w *Writer) pinCommits(ctx context.Context, repo *github.Repo, req Request, path string) ([]pinCommit, error) {
+	commits, err := repo.ListCommits(ctx, req.Target.Branch, path, historyDepth)
+	if err != nil {
+		return nil, err
+	}
+	var out []pinCommit
+	for _, c := range commits {
+		t := ParseMessage(c.Message)
+		if t.App == req.Target.App && t.Digest == req.Digest {
+			out = append(out, pinCommit{sha: c.SHA, trailers: t})
+		}
+	}
+	return out, nil
 }
 
 func (w *Writer) message(req Request, previous core.Digest) (string, string, error) {
@@ -159,10 +195,14 @@ func (w *Writer) message(req Request, previous core.Digest) (string, string, err
 func (w *Writer) retryConflicts(ctx context.Context, what string, attempt func() error) error {
 	for n := 1; ; n++ {
 		err := attempt()
-		if err == nil || !isWriteConflict(err) {
+		switch {
+		case err == nil:
+			return nil
+		case isBranchProtected(err):
+			return fmt.Errorf("%w: %s: %w", ErrBranchProtected, what, err)
+		case !isWriteConflict(err):
 			return err
-		}
-		if n >= w.opts.MaxAttempts {
+		case n >= w.opts.MaxAttempts:
 			return fmt.Errorf("%w: %s after %d attempts: %w", ErrConflict, what, n, err)
 		}
 		delay := backoff(n)
@@ -174,24 +214,35 @@ func (w *Writer) retryConflicts(ctx context.Context, what string, attempt func()
 	}
 }
 
+var (
+	conflictMessages  = []string{"does not match", "but expected", "wasn't supplied"}
+	protectedMessages = []string{"protected branch", "branch is protected", "through a pull request", "rule violation", "gh006", "gh013"}
+)
+
 func isWriteConflict(err error) bool {
-	var apiErr *github.APIError
-	if !errors.As(err, &apiErr) {
-		return false
+	return hasAnyMessage(err, conflictMessages, http.StatusConflict, http.StatusUnprocessableEntity)
+}
+
+func isBranchProtected(err error) bool {
+	return hasAnyMessage(err, protectedMessages, http.StatusForbidden, http.StatusConflict, http.StatusUnprocessableEntity)
+}
+
+func hasAnyMessage(err error, fragments []string, statuses ...int) bool {
+	for _, status := range statuses {
+		for _, fragment := range fragments {
+			if github.HasMessage(err, status, fragment) {
+				return true
+			}
+		}
 	}
-	switch apiErr.StatusCode {
-	case http.StatusConflict:
-		return true
-	case http.StatusUnprocessableEntity:
-		msg := strings.ToLower(apiErr.Message)
-		return strings.Contains(msg, "sha") && (strings.Contains(msg, "match") || strings.Contains(msg, "supplied"))
-	default:
-		return false
-	}
+	return false
 }
 
 func backoff(attempt int) time.Duration {
-	d := initialBackoff << (attempt - 1)
+	d := maxBackoff
+	if shift := attempt - 1; shift < 16 {
+		d = min(initialBackoff<<max(shift, 0), maxBackoff)
+	}
 	jitter, err := rand.Int(rand.Reader, big.NewInt(int64(d/2)+1))
 	if err != nil {
 		return d
