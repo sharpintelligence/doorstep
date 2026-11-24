@@ -162,7 +162,7 @@ Open a pull request in `example-org/blog`, wait for `test` to pass and merge it.
 | GitHub delivers the push | The App's **Advanced** page shows a `push` delivery answered `200`. The commit is tracked but not queued while `test` runs on `main`. |
 | CI turns green | A `check_run` delivery answered `200`; the deploy is queued. |
 | Slack | `blog: deploy #1 started` |
-| GitOps commit | `example-org/homelab` has a new commit on `main` that sets `digest:` in `apps/blog/kustomization.yaml`, with trailers `Doorstep-App: blog`, `Doorstep-Deployment: 1`, `Doorstep-Kind: deploy`, `Doorstep-Image`, `Doorstep-Digest` and `Doorstep-URL` |
+| GitOps commit | `example-org/homelab` has a new commit on `main` that sets `digest:` in `apps/blog/kustomization.yaml`, with trailers `Doorstep-App: blog`, `Doorstep-Deployment: 1`, `Doorstep-Kind: deploy`, `Doorstep-App-Commit`, `Doorstep-Image`, `Doorstep-Digest` and `Doorstep-URL` (later deploys also carry `Doorstep-Previous-Digest`) |
 | Argo CD | The `blog` Application is `Synced` and `Healthy` at that commit |
 | Slack | `blog: deploy #1 succeeded`, linking to the commit in `example-org/blog` and to `https://doorstep.example.com/deployments/1` |
 

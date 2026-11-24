@@ -184,7 +184,7 @@ type engineServe struct {
 	store   *store.Store
 	addr    string
 	stderr  *lockedBuffer
-	viewer  string
+	tokens  map[core.Role]string
 	cancel  context.CancelFunc
 	done    chan int
 }
@@ -213,7 +213,7 @@ func startEngineServeEnv(t *testing.T, f *engineFixture, cfg string, extra map[s
 		"--config", writeConfig(t, f.config(cfg)),
 	}, f.env(env))
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, cancel: cancel, done: make(chan int, 1)}
+	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, tokens: map[core.Role]string{}, cancel: cancel, done: make(chan int, 1)}
 	go func() { s.done <- Run(ctx, args, io.Discard, s.stderr, envFrom(env)) }()
 	s.addr = waitForListening(t, s.stderr, s.done)
 	waitForLog(t, s.stderr, s.done, "engine started")
@@ -309,12 +309,16 @@ func (s *engineServe) transitions(id core.DeploymentID) []core.State {
 
 func (s *engineServe) token(role core.Role) string {
 	s.t.Helper()
+	if token, ok := s.tokens[role]; ok {
+		return token
+	}
 	var out, errOut bytes.Buffer
 	args := []string{"token", "create", "--name", "engine-" + string(role), "--role", string(role)}
 	if code := Run(s.t.Context(), args, &out, &errOut, envFrom(s.env)); code != 0 {
 		s.t.Fatalf("token create = %d: %s", code, errOut.String())
 	}
-	return strings.TrimSpace(out.String())
+	s.tokens[role] = strings.TrimSpace(out.String())
+	return s.tokens[role]
 }
 
 func (s *engineServe) metrics() string {
@@ -736,10 +740,7 @@ func (s *engineServe) getAuthorized(path string) (int, string) {
 	if err != nil {
 		s.t.Fatalf("NewRequest: %v", err)
 	}
-	if s.viewer == "" {
-		s.viewer = s.token(core.RoleViewer)
-	}
-	req.Header.Set("Authorization", "Bearer "+s.viewer)
+	req.Header.Set("Authorization", "Bearer "+s.token(core.RoleViewer))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatalf("GET %s: %v", path, err)

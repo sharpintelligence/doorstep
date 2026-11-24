@@ -284,7 +284,7 @@ func (s *engineServe) assertDeployLineage(d apiDeploymentDetail, id core.Deploym
 	if got.Image.Repository != s.fixture.registry.Repo("example-user/blog") || got.Image.Tag != sha || got.Image.Digest != digest || got.Image.PreviousDigest != previous {
 		t.Errorf("deployment %d image = %+v, want tag %s at %s over %q", id, got.Image, sha, digest, previous)
 	}
-	s.assertPinned(got, id, core.KindDeploy, digest)
+	s.assertPinned(got, id, core.KindDeploy, sha, digest, previous)
 	if got.StartedAt == nil || got.FinishedAt == nil {
 		t.Errorf("deployment %d started_at = %v, finished_at = %v, want both set", id, got.StartedAt, got.FinishedAt)
 	}
@@ -293,7 +293,7 @@ func (s *engineServe) assertDeployLineage(d apiDeploymentDetail, id core.Deploym
 	}
 }
 
-func (s *engineServe) assertPinned(got apiDeployment, id core.DeploymentID, kind core.Kind, digest core.Digest) {
+func (s *engineServe) assertPinned(got apiDeployment, id core.DeploymentID, kind core.Kind, sha string, digest, previous core.Digest) {
 	s.t.Helper()
 	t := s.t
 	if got.GitOps.Repository != "example-user/homelab" || got.GitOps.CommitSHA == "" || got.ArgoCD.Revision != got.GitOps.CommitSHA {
@@ -302,8 +302,10 @@ func (s *engineServe) assertPinned(got apiDeployment, id core.DeploymentID, kind
 	}
 	trailers := s.pinCommit(got.GitOps.CommitSHA)
 	if trailers.App != "blog" || trailers.Deployment != id || trailers.Kind != kind || trailers.Digest != digest ||
+		trailers.PreviousDigest != previous || trailers.Image != got.Image.Repository ||
+		trailers.AppCommit != (core.Commit{Repository: "example-user/blog", SHA: sha}) ||
 		trailers.URL != mvpPublicURL+"/deployments/"+strconv.FormatInt(int64(id), 10) {
-		t.Errorf("pin commit %s trailers = %+v, want %s %d of %s", got.GitOps.CommitSHA, trailers, kind, id, digest)
+		t.Errorf("pin commit %s trailers = %+v, want %s %d of example-user/blog@%s at %s over %q", got.GitOps.CommitSHA, trailers, kind, id, sha, digest, previous)
 	}
 }
 
@@ -394,7 +396,7 @@ func TestMVPDeploysAMergedPullRequestAndRollsBack(t *testing.T) {
 	if rb.Trigger.RequestedBy == "" || rb.Trigger.RequestedBy != rolled.Block.CreatedBy {
 		t.Errorf("rollback requested_by = %q, want the token actor %q", rb.Trigger.RequestedBy, rolled.Block.CreatedBy)
 	}
-	s.assertPinned(rb, rollbackID, core.KindRollback, firstDigest)
+	s.assertPinned(rb, rollbackID, core.KindRollback, firstSHA, firstDigest, secondDigest)
 	if head, _ := f.homelab.BranchSHA("main"); rb.GitOps.CommitSHA != head {
 		t.Errorf("rollback pin commit = %s, want GitOps HEAD %s", rb.GitOps.CommitSHA, head)
 	}
@@ -430,13 +432,17 @@ func TestMVPDeploysAMergedPullRequestAndRollsBack(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &blocks) != nil || len(blocks.Blocks) != 1 || blocks.Blocks[0].Digest != string(secondDigest) || !blocks.Blocks[0].RecordedInGit {
 		t.Errorf("doorstep blocks blog = %d %q %q, want the block of %s recorded in git", code, out, errOut, secondDigest)
 	}
+	code, out, errOut = s.cli(deployer, "deploy", "blog", secondSHA)
+	if code == 0 || !strings.Contains(errOut, "is blocked by "+rolled.Block.CreatedBy+": checkout errors") {
+		t.Errorf("doorstep deploy blog %s = %d %q %q, want it refused by the block", secondSHA, code, out, errOut)
+	}
 	s.webhook("check_run", "check-run-again-"+secondSHA, checkRunPayload(secondSHA))
 	page, err := s.store.ListDeployments(t.Context(), store.DeploymentFilter{App: "blog"})
 	if err != nil || len(page.Items) != 3 {
-		t.Errorf("deployments after redelivering the blocked commit's checks = %d, %v, want 3", len(page.Items), err)
+		t.Errorf("deployments after the blocked deploy and a redelivered check_run = %d, %v, want 3", len(page.Items), err)
 	}
 	if !strings.Contains(s.pinFile(), "digest: "+string(firstDigest)) {
-		t.Errorf("pin file left %s after the blocked commit's checks were redelivered", firstDigest)
+		t.Errorf("pin file left %s after the blocked deploy and a redelivered check_run", firstDigest)
 	}
 
 	s.sink.await(t, first, []string{"deploy.queued", "deploy.started", "deploy.succeeded"})
