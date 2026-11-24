@@ -1,0 +1,27 @@
+{{define "content"}}
+{{$app := .Content.App}}
+<h1>Confirm rollback of {{$app.Name}}</h1>
+<p class="warning" role="alert">Rolling back to <a href="/deployments/{{.Content.To.ID}}">deployment #{{.Content.To.ID}}</a> (commit {{template "link" (commitLink .Content.To.Commit.Repository .Content.To.Commit.SHA)}}{{with .Content.To.Digest}}, <code title="{{.}}">{{shortDigest .}}</code>{{end}}) undoes releases flagged as database migrations. The old version may not work with the migrated schema. Nothing has been changed yet.</p>
+<table>
+<caption>Releases with database migrations that the rollback crosses</caption>
+<thead><tr><th scope="col">Deployment</th><th scope="col">Commit</th><th scope="col">Why it was flagged</th></tr></thead>
+<tbody>
+{{range .Content.Migrations}}
+<tr>
+<th scope="row"><a href="/deployments/{{.ID}}">#{{.ID}}</a></th>
+<td>{{template "link" (commitLink .Commit.Repository .Commit.SHA)}}</td>
+<td>{{.MigrationReason}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/rollback" class="card">
+{{template "csrf" .}}
+<input type="hidden" name="to_deployment_id" value="{{.Content.ToDeploymentID}}">
+<input type="hidden" name="confirm_migration_rollback" value="1">
+<label for="confirm_reason">Reason (optional)</label>
+<input id="confirm_reason" name="reason" maxlength="500" value="{{.Content.Reason}}">
+<button type="submit" class="danger">Roll back across the migrations</button>
+</form>
+<p><a href="/apps/{{pathEscape $app.Name}}">Back to {{$app.Name}} without rolling back</a></p>
+{{end}}

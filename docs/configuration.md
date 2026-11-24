@@ -25,7 +25,7 @@ Apps, notification targets and the `auth` section are only read from the configu
 | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` | `5s` | How long the server keeps serving after `SIGINT`/`SIGTERM` while `/readyz` reports `shutting_down`, before it stops accepting connections. Gives load balancers time to stop routing to the instance. Go duration syntax. `0s` disables it; must not be negative. |
 | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` | `15s` | How long in-flight requests may run once the shutdown delay has passed, before the server is closed. Go duration syntax (`30s`, `1m`). Must be positive. |
 | `--public-url` | `DOORSTEP_PUBLIC_URL` | empty | The external base URL people use to reach doorstep, such as `https://doorstep.example.com`. Notifications link to `<public url>/deployments/<id>` and GitHub deployment statuses use that as their log URL; without it those links are left out. Must be an absolute `http` or `https` URL with a host and without user information, query or fragment; a trailing slash is ignored. See [notifications.md](notifications.md#links). |
-| `--log-level` | `DOORSTEP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (case-insensitive). Health probe and `/metrics` requests are logged at `debug`. |
+| `--log-level` | `DOORSTEP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (case-insensitive). Health probe and `/metrics` requests, web UI assets under `/static/` and the web UI's `GET` polls (requests with `HX-Request: true`) are logged at `debug`. |
 | `--log-format` | `DOORSTEP_LOG_FORMAT` | `json` | `json` or `text`. Logs are written to stderr. |
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
@@ -240,6 +240,16 @@ doorstep unblock blog 0123456789abcdef0123456789abcdef01234567
 ```
 
 Thin clients of the [rollback and block API](rollback.md#api), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above. `rollback` queues a rollback of the app to its previous good version, or to the successful deployment given with `--to`, and blocks the version it replaces; `--reason` is optional and recorded on the block; `--confirm-migration-rollback` confirms a rollback across releases flagged as containing database migrations, which is refused without it ([rollback.md](rollback.md#confirmation)). `block` blocks a digest or a 40-character commit SHA by hand and needs `--reason`; `unblock` clears the matching blocks; `blocks` lists the active ones as a table or, with `-o json`, as JSON. The semantics are described in [rollback.md](rollback.md).
+
+## `doorstep deploy` and `cancel`
+
+```sh
+doorstep deploy blog 3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a392
+doorstep deploy blog 3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a392 --urgent --reason "checkout hotfix" -o json
+doorstep cancel 42 --reason "wrong commit"
+```
+
+Thin clients of the [manual deploy and cancel API](api.md#manual-deploys-and-cancellation), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above and a token with the `deployer` role. `deploy` queues a deploy of a full 40 character commit SHA that is reachable from the branch the app follows; `--urgent` queues it ahead of normal deploys and `--reason` is recorded in the audit log. When a deploy of the commit is already queued or running it prints that deployment instead. `cancel` cancels a deployment that has not finished; `--reason` is added to the deployment's event and the audit row. Both print one line, or the API response with `-o json`.
 
 ## `doorstep version`
 

@@ -12,6 +12,8 @@ doorstep rollback blog --to 41 --reason "checkout errors"
 doorstep rollback blog --to 41 --confirm-migration-rollback
 ```
 
+The [web UI](ui.md) offers the same request: the app page has a Roll back form for the previous good version and a "Roll back to this" button on every successful deployment in the history.
+
 One request does all of the following in one Postgres transaction, under the app's row lock (the lock intake and the queue use for the same app), so it either happens completely or not at all:
 
 1. **Refuse duplicates.** If a rollback of the app is already queued or in flight, the request fails with `409 rollback_in_progress` and names that rollback. Double clicks are safe.
@@ -133,7 +135,7 @@ Without confirmation a crossing rollback fails with `409 migration_confirmation_
 }
 ```
 
-Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollback blog --confirm-migration-rollback`. The `deployer` role is enough. The check runs after the target is chosen, so `rollback_in_progress`, `no_rollback_target` and `blocked` take precedence, and it is part of the same transaction as the rest of the request. A confirmed rollback is stored with `migration: true` and audits `migration_confirmed` and `migration_deployment_ids`.
+Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollback blog --confirm-migration-rollback`. In the web UI the first request answers `409` with a confirmation page that lists the target and every crossed migration deployment with the reason it was flagged; its button re-posts the same target and reason with `confirm_migration_rollback=1`, and going back leaves everything unchanged. The `deployer` role is enough. The check runs after the target is chosen, so `rollback_in_progress`, `no_rollback_target` and `blocked` take precedence, and it is part of the same transaction as the rest of the request. A confirmed rollback is stored with `migration: true` and audits `migration_confirmed` and `migration_deployment_ids`.
 
 ### Automatic rollbacks
 

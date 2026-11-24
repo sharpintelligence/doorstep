@@ -108,15 +108,23 @@ func notificationLinks(cfg config.Config) (notify.Links, error) {
 			return base + "/deployments/" + strconv.FormatInt(int64(id), 10)
 		}
 	}
-	api, err := github.ParseBaseURL(cfg.GitHub.APIURL)
+	commitURL, err := githubCommitURL(cfg)
 	if err != nil {
 		return notify.Links{}, err
 	}
-	web := github.WebBaseURL(api).String()
-	links.CommitURL = func(repository, sha string) string {
-		return web + "/" + repository + "/commit/" + sha
-	}
+	links.CommitURL = commitURL
 	return links, nil
+}
+
+func githubCommitURL(cfg config.Config) (func(repository, sha string) string, error) {
+	api, err := github.ParseBaseURL(cfg.GitHub.APIURL)
+	if err != nil {
+		return nil, err
+	}
+	web := github.WebBaseURL(api).String()
+	return func(repository, sha string) string {
+		return web + "/" + repository + "/commit/" + sha
+	}, nil
 }
 
 func newNotificationSink(n config.Notification, links notify.Links, secrets secretSource, client *http.Client, ua string) (notify.Sink, error) {

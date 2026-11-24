@@ -1,0 +1,143 @@
+{{define "content"}}
+{{$app := .Content.App}}
+<h1>{{$app.Name}}</h1>
+<dl class="facts">
+<dt>Source</dt><dd><code>{{$app.Repository}}</code> branch <code>{{$app.Branch}}</code></dd>
+{{with $app.GitOpsRepository}}<dt>GitOps repository</dt><dd><code>{{.}}</code></dd>{{end}}
+{{with $app.ArgoCDApplication}}<dt>Argo CD Application</dt><dd><code>{{.}}</code></dd>{{end}}
+</dl>
+
+<div id="live"{{template "live" .}}>
+{{with .Content.GlobalLock}}<p class="banner" role="note"><span class="badge bad">frozen</span> All apps are locked by {{template "lock" .}}.</p>{{end}}
+{{with .Content.Lock}}<p class="banner" role="note"><span class="badge bad">locked</span> {{$app.Name}} is locked by {{template "lock" .}}.</p>{{end}}
+
+<h2>Running</h2>
+{{with .Content.Current}}
+<p><a href="/deployments/{{.ID}}">Deployment #{{.ID}}</a> {{template "state" .State}}: commit {{template "link" (commitLink .Commit.Repository .Commit.SHA)}}{{with .Digest}}, digest <code title="{{.}}">{{shortDigest .}}</code>{{end}}{{with .PinCommitSHA}}, pinned in {{template "link" (commitLink $.Content.Current.GitOpsRepository .)}}{{end}}.</p>
+{{else}}
+<p class="muted">Nothing has been deployed yet.</p>
+{{end}}
+
+<h2>Queue</h2>
+{{if .Content.Queue}}
+<table>
+<caption>Deployments waiting or running, in the order they run</caption>
+<thead><tr><th scope="col">#</th><th scope="col">Deployment</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Priority</th><th scope="col">Commit</th><th scope="col">Requested by</th><th scope="col">Queued</th></tr></thead>
+<tbody>
+{{range .Content.Queue}}
+<tr>
+<td>{{.Position}}</td>
+<th scope="row"><a href="/deployments/{{.Deployment.ID}}">#{{.Deployment.ID}}</a>{{if .InFlight}} <span class="badge active">in flight</span>{{end}}</th>
+<td>{{.Deployment.Kind}}</td>
+<td>{{template "state" .Deployment.State}}</td>
+<td>{{.Priority}}</td>
+<td>{{template "link" (commitLink .Deployment.Commit.Repository .Deployment.Commit.SHA)}}</td>
+<td>{{.Deployment.RequestedBy}}</td>
+<td>{{template "time" .EnqueuedAt}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">The queue is empty.</p>
+{{end}}
+
+<h2>Blocked versions</h2>
+{{if .Content.Blocks}}
+<table>
+<caption>Versions that will not be deployed automatically</caption>
+<thead><tr><th scope="col">Version</th><th scope="col">Reason</th><th scope="col">Blocked by</th><th scope="col">Since</th>{{if $.CanOperate}}<th scope="col"><span class="visually-hidden">Actions</span></th>{{end}}</tr></thead>
+<tbody>
+{{range .Content.Blocks}}
+<tr>
+<th scope="row">{{with .Digest}}<code title="{{.}}">{{shortDigest .}}</code>{{end}}{{with .Commit.SHA}} commit <code>{{shortSHA .}}</code>{{end}}</th>
+<td>{{.Reason}}</td>
+<td>{{.CreatedBy}}</td>
+<td>{{template "time" .CreatedAt}}</td>
+{{if $.CanOperate}}<td><form method="post" action="/apps/{{pathEscape $app.Name}}/unblock">{{template "csrf" $}}<input type="hidden" name="ref" value="{{.Ref.String}}"><button type="submit">Unblock</button></form></td>{{end}}
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">No versions are blocked.</p>
+{{end}}
+
+<h2>History</h2>
+{{if .Content.History}}
+<table>
+<caption>Deployments of {{$app.Name}}, newest first</caption>
+<thead><tr><th scope="col">Deployment</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">App commit</th><th scope="col">Digest</th><th scope="col">Pin commit</th><th scope="col">Argo CD revision</th><th scope="col">Requested</th>{{if $.CanOperate}}<th scope="col"><span class="visually-hidden">Actions</span></th>{{end}}</tr></thead>
+<tbody>
+{{range .Content.History}}{{$d := .}}
+<tr>
+<th scope="row"><a href="/deployments/{{.ID}}">#{{.ID}}</a></th>
+<td>{{.Kind}}{{with .RollbackOfID}} of <a href="/deployments/{{.}}">#{{.}}</a>{{end}}{{if .Migration}} <span class="badge warn" title="{{.MigrationReason}}">migration</span>{{end}}</td>
+<td>{{template "state" .State}}{{with .SupersededByID}} by <a href="/deployments/{{.}}">#{{.}}</a>{{end}}</td>
+<td>{{template "link" (commitLink .Commit.Repository .Commit.SHA)}}</td>
+<td>{{with .Digest}}<code title="{{.}}">{{shortDigest .}}</code>{{end}}</td>
+<td>{{with .PinCommitSHA}}{{template "link" (commitLink $d.GitOpsRepository .)}}{{end}}</td>
+<td>{{with .ArgoCDRevision}}{{template "link" (revisionLink $d.GitOpsRepository .)}}{{end}}</td>
+<td>{{.RequestedBy}}, {{template "time" .CreatedAt}}</td>
+{{if $.CanOperate}}<td>{{if and (eq .State "succeeded") .Digest}}<form method="post" action="/apps/{{pathEscape $app.Name}}/rollback">{{template "csrf" $}}<input type="hidden" name="to_deployment_id" value="{{.ID}}"><button type="submit">Roll back to this</button></form>{{end}}</td>{{end}}
+</tr>
+{{end}}
+</tbody>
+</table>
+{{with .Content.Next}}<p><a href="{{$.Content.NextURL}}">Older deployments</a></p>{{end}}
+{{if .Content.Before}}<p><a href="/apps/{{pathEscape $app.Name}}">Newest deployments</a></p>{{end}}
+{{else}}
+<p class="muted">No deployments{{if .Content.Before}} on this page{{end}}.</p>
+{{end}}
+</div>
+
+{{if .CanOperate}}
+<h2>Actions</h2>
+{{if .Content.CanDeploy}}
+<form method="post" action="/apps/{{pathEscape $app.Name}}/deployments" class="card">
+<h3>Deploy a commit</h3>
+{{template "csrf" .}}
+<p class="hint">The commit must be on <code>{{$app.Branch}}</code> of <code>{{$app.Repository}}</code>. Before gates, including required checks, run when the deploy starts.</p>
+<label for="commit_sha">Commit SHA</label>
+<input id="commit_sha" name="commit_sha" required minlength="40" maxlength="40" pattern="[0-9a-fA-F]{40}" autocomplete="off" spellcheck="false" value="{{.Content.Form.CommitSHA}}">
+<label for="deploy_reason">Reason (optional)</label>
+<input id="deploy_reason" name="reason" maxlength="500" value="{{.Content.Form.DeployReason}}">
+<label class="check"><input type="checkbox" name="urgent" value="1"{{if .Content.Form.Urgent}} checked{{end}}> Urgent: run ahead of normal deploys</label>
+<button type="submit">Queue deploy</button>
+</form>
+{{end}}
+
+<details class="card">
+<summary>Roll back {{$app.Name}}</summary>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/rollback">
+{{template "csrf" .}}
+<p class="hint">Re-pins the last successful, unblocked version, cancels the deploy in flight and blocks the version it replaces. To pick an older version use "Roll back to this" in the history.</p>
+<label for="rollback_reason">Reason (optional)</label>
+<input id="rollback_reason" name="reason" maxlength="500" value="{{.Content.Form.RollbackReason}}">
+<button type="submit" class="danger">Roll back</button>
+</form>
+</details>
+
+{{if .Content.Lock}}
+<form method="post" action="/apps/{{pathEscape $app.Name}}/unlock" class="card">
+<h3>Lock</h3>
+{{template "csrf" .}}
+<p>{{$app.Name}} is locked. Unlocking lets queued deploys run again.</p>
+<button type="submit">Unlock {{$app.Name}}</button>
+</form>
+{{else}}
+<details class="card">
+<summary>Lock {{$app.Name}}</summary>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/lock">
+{{template "csrf" .}}
+<p class="hint">A lock stops new deploys of {{$app.Name}}. Rollbacks still run.</p>
+<label for="lock_reason">Reason</label>
+<input id="lock_reason" name="reason" required maxlength="500" value="{{.Content.Form.LockReason}}">
+<label for="lock_expires_in">Expires in (optional, such as 2h)</label>
+<input id="lock_expires_in" name="expires_in" maxlength="20" value="{{.Content.Form.LockExpiresIn}}">
+<button type="submit" class="danger">Lock</button>
+</form>
+</details>
+{{end}}
+{{end}}
+{{end}}

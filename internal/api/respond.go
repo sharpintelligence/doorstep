@@ -32,6 +32,9 @@ const (
 	codeGateNotApplicable             = "gate_not_applicable"
 	codeGateDecided                   = "gate_decided"
 	codeGateNotReady                  = "gate_not_ready"
+	codeCommitNotOnBranch             = "commit_not_on_branch"
+	codeNotCancellable                = "not_cancellable"
+	codeUnavailable                   = "unavailable"
 	codeInternal                      = "internal"
 )
 

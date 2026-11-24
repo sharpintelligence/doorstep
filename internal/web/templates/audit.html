@@ -1,0 +1,38 @@
+{{define "content"}}
+<h1>Audit log</h1>
+<form method="get" action="/audit" class="filters">
+<label for="action">Action</label>
+<select id="action" name="action">
+<option value="">All actions</option>
+{{range .Content.Actions}}<option value="{{.}}"{{if eq . $.Content.Action}} selected{{end}}>{{.}}</option>{{end}}
+</select>
+<label for="app">App</label>
+<select id="app" name="app">
+<option value="">All apps</option>
+{{range .Content.Apps}}<option value="{{.Name}}"{{if eq .Name $.Content.App}} selected{{end}}>{{.Name}}</option>{{end}}
+</select>
+<button type="submit">Filter</button>
+</form>
+{{if .Content.Entries}}
+<table>
+<caption>Who did what, newest first</caption>
+<thead><tr><th scope="col">When</th><th scope="col">Action</th><th scope="col">Actor</th><th scope="col">Role</th><th scope="col">App</th><th scope="col">Deployment</th><th scope="col">Detail</th></tr></thead>
+<tbody>
+{{range .Content.Entries}}
+<tr>
+<td>{{template "time" .OccurredAt}}</td>
+<th scope="row">{{.Action}}</th>
+<td>{{.Actor.String}}{{with .Actor.Name}} <span class="muted">({{.}})</span>{{end}}</td>
+<td>{{.Role}}</td>
+<td>{{with .Target}}{{.App}}{{end}}</td>
+<td>{{with .DeploymentID}}<a href="/deployments/{{.}}">#{{.}}</a>{{end}}</td>
+<td>{{with prettyJSON .Detail}}<details><summary>Detail</summary><pre>{{.}}</pre></details>{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{with .Content.Next}}<p><a href="{{$.Content.NextURL}}">Older entries</a></p>{{end}}
+{{else}}
+<p class="muted">No audit entries match.</p>
+{{end}}
+{{end}}

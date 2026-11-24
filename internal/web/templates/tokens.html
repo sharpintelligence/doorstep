@@ -1,0 +1,38 @@
+{{define "content"}}
+<h1>API tokens</h1>
+{{if .Content.Tokens}}
+<table>
+<caption>Tokens for the API and CLI; only their hashes are stored</caption>
+<thead><tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col">Last used</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+<tbody>
+{{range .Content.Tokens}}
+<tr>
+<th scope="row">{{.Name}}</th>
+<td>{{.Role}}</td>
+<td>{{if .RevokedAt}}<span class="badge muted">revoked</span>{{else if .Expired}}<span class="badge muted">expired</span>{{else}}<span class="badge ok">active</span>{{end}}</td>
+<td>{{.CreatedBy}}, {{template "time" .CreatedAt}}</td>
+<td>{{with .ExpiresAt}}{{template "time" .}}{{else}}never{{end}}</td>
+<td>{{with .LastUsedAt}}{{template "time" .}}{{else}}never{{end}}</td>
+<td>{{if not .RevokedAt}}<form method="post" action="/tokens/{{pathEscape .Name}}/revoke">{{template "csrf" $}}<button type="submit" class="danger">Revoke</button></form>{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">No API tokens yet.</p>
+{{end}}
+
+<form method="post" action="/tokens" class="card">
+<h2>Create a token</h2>
+{{template "csrf" .}}
+<label for="token_name">Name</label>
+<input id="token_name" name="name" required maxlength="63" pattern="[a-z0-9][a-z0-9._-]*" autocomplete="off" value="{{.Content.Form.Name}}">
+<label for="token_role">Role</label>
+<select id="token_role" name="role">
+{{range .Content.Roles}}<option value="{{.}}"{{if eq . $.Content.Form.Role}} selected{{end}}>{{.}}</option>{{end}}
+</select>
+<label for="token_expires_in">Expires in (optional, such as 720h)</label>
+<input id="token_expires_in" name="expires_in" maxlength="20" value="{{.Content.Form.ExpiresIn}}">
+<button type="submit">Create token</button>
+</form>
+{{end}}

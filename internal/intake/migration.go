@@ -267,3 +267,14 @@ func (r *migrationReader) pullRequests(ctx context.Context, repository, sha stri
 	r.pulls[key] = read
 	return read
 }
+
+func (s *Service) MigrationFlag(ctx context.Context, t core.Target, commit core.Commit) (MigrationFlag, error) {
+	app, ok := s.targets[t]
+	if !ok {
+		return MigrationFlag{}, fmt.Errorf("migration flag: intake does not follow %s", t)
+	}
+	if app.Migrations == nil {
+		return MigrationFlag{}, nil
+	}
+	return s.migration(ctx, newMigrationReader(s.migrations), app, commit)
+}

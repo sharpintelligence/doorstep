@@ -4,7 +4,7 @@ A homelab deployment engine for Argo CD: queues and locks deploys, writes image 
 
 ## Status
 
-Early development. The binary currently provides `serve` (HTTP server with health endpoints, OIDC or GitHub sign-in and API tokens, backed by Postgres), `migrate`, `token` and `version`; the deployment engine is being built.
+Early development. `doorstep serve` runs the deployment engine, the JSON API and a server-rendered web UI (apps, queue, locks, deploy history with lineage, gate results, deploy, cancel, rollback, lock and token administration) behind OIDC or GitHub sign-in, backed by Postgres. The CLI talks to the API: `deploy`, `cancel`, `rollback`, `block`, `unblock`, `blocks`, `lock`, `unlock` and `locks`; `migrate`, `token`, `session` and `config validate` work against the database or the configuration file directly.
 
 ## Quickstart
 
@@ -42,6 +42,9 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 - [Authentication and roles](docs/authentication.md)
 - [Database](docs/database.md)
 - [HTTP API](docs/api.md)
+- [Web UI](docs/ui.md)
+- [Deployment engine](docs/engine.md)
+- [Deploy queue](docs/queue.md)
 - [GitHub App](docs/github-app.md)
 - [Locks](docs/locks.md)
 - [Rollback and blocks](docs/rollback.md)

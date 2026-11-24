@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/deploys"
 	"github.com/sharpintelligence/doorstep/internal/gates"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/store"
@@ -50,6 +51,11 @@ type BlockService interface {
 	ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error)
 }
 
+type DeployService interface {
+	Deploy(ctx context.Context, req deploys.Request) (deploys.Result, error)
+	Cancel(ctx context.Context, req deploys.CancelRequest) (core.Deployment, error)
+}
+
 type GateReporter interface {
 	Report(ctx context.Context, req gates.ReportRequest) (gates.ReportResult, error)
 }
@@ -69,6 +75,7 @@ type Options struct {
 	Locks         LockService
 	Rollbacks     RollbackService
 	Blocks        BlockService
+	Deploys       DeployService
 	GateReports   GateReporter
 	KnownApp      KnownApp
 	Authenticator Authenticator
@@ -83,6 +90,7 @@ type api struct {
 	locks     LockService
 	rollbacks RollbackService
 	blocks    BlockService
+	deploys   DeployService
 	reports   GateReporter
 	known     KnownApp
 	auth      Authenticator
@@ -97,6 +105,7 @@ func New(opts Options) http.Handler {
 		locks:     opts.Locks,
 		rollbacks: opts.Rollbacks,
 		blocks:    opts.Blocks,
+		deploys:   opts.Deploys,
 		reports:   opts.GateReports,
 		known:     opts.KnownApp,
 		auth:      opts.Authenticator,
@@ -123,6 +132,9 @@ func New(opts Options) http.Handler {
 	}
 	if a.reports != nil && a.known != nil && a.auth != nil {
 		a.registerGateReports(mux)
+	}
+	if a.deploysEnabled() {
+		a.registerDeploys(mux)
 	}
 	mux.HandleFunc(Prefix, func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such API endpoint")

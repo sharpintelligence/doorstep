@@ -59,7 +59,11 @@ Every change is a `core.LockEvent` with an action, the lock, the actor and the t
 
 Every event is also logged at info level, the default: `locked` and `unlocked` (with scope, owner, reason or actor), `lock expired` and `lock still held` (with scope, owner and reason). `serve` passes the same notifier to the service and the reminder; it turns `locked` into `lock.changed` (acquired), `unlocked` and `expired` into `lock.changed` (released) and `reminded` into `lock.reminder`, and sends a global freeze to every app's targets once ([notifications.md](notifications.md#events)).
 
-Independently of notifications, every change is written to the append-only `lock_events` table in the same transaction as the change itself ([database.md](database.md#lock_events)), so who locked or unlocked what, when and why survives after the lock row is gone. `Store.ListLockEvents` reads it newest first; the history and UI work exposes it.
+Independently of notifications, every change is written to the append-only `lock_events` table in the same transaction as the change itself ([database.md](database.md#lock_events)), so who locked or unlocked what, when and why survives after the lock row is gone. `Store.ListLockEvents` reads it newest first; the web UI's Locks page shows the newest 50 events.
+
+## Web UI
+
+The [web UI](ui.md) shows live locks on the overview, on each app page and on the Locks page. A deployer can lock and unlock an app from its page (reason required, optional expiry such as `2h`), and take or release the global lock from the Locks page. The UI calls the same `locks.Service`, so owners, validation, conflicts and notifications are the same as for the API; the owner is the signed-in user's actor string.
 
 ## API
 

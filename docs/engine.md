@@ -194,7 +194,7 @@ Argo CD's Application does not carry pods, and Argo CD 3 no longer persists reso
 
 `Abandon` closes a deployment's pull request and deletes its branch; it is idempotent and a no-op in commit mode. It is called when:
 
-- a cancelled deployment had already started (from the post-commit announcement below);
+- a cancelled deployment had already started (from the post-commit announcement below), whether a rollback request or a manual cancel cancelled it;
 - a worker's pin step is interrupted by a state conflict or a lost lease and the reloaded deployment is `cancelled` or `superseded` (the worker may open its pull request after the canceller's `Abandon` ran);
 - a deployment fails while `pinning`, unless the failure needs a person (`ErrPullRequestTampered`).
 
@@ -206,13 +206,13 @@ The worker emits each `deploy.*` event right after its own successful transition
 
 | Event | Emitted by | Metric |
 | --- | --- | --- |
-| `deploy.queued` | `Engine.Queued`, called after the enqueue committed: by a decorator around intake's settlement and by a decorator around rollback requests in `cli` | |
+| `deploy.queued` | `Engine.Queued`, called after the enqueue committed: by a decorator around intake's settlement, by a decorator around rollback requests and by `announcingDeploys` around manual deploys (API, web UI, CLI) in `cli`; a manual request that returned an existing deployment is not announced again | |
 | `deploy.started` | the worker, on `queued → resolving` | `doorstep_deployments_started_total` |
 | `deploy.retrying` | the worker, on the first `syncing → syncing` retry only | `doorstep_deployment_retries_total` on every retry |
 | `deploy.succeeded`, `deploy.rolled_back` | the worker, on `verifying → succeeded` (a rollback carries the deployment it reverts; after a retry the message is `succeeded on attempt N of M`) | duration with outcome `succeeded` or `rolled_back` |
 | `deploy.failed` | the worker, on `→ failed`, with the final decision as its message | duration with outcome `failed` or `rollback_failed` |
 | `deploy.superseded` | the worker that claimed the newer deployment, for each deployment the claim superseded | duration with outcome `superseded` |
-| `deploy.cancelled` | `Engine.Cancelled`, after a rollback request cancelled deployments | duration with outcome `cancelled` |
+| `deploy.cancelled` | `Engine.Cancelled`, after a rollback request cancelled deployments and after a manual cancel (`announcingDeploys`) | duration with outcome `cancelled` |
 
 `deploy.queued` is announced after the enqueue transaction commits, so a worker that claims the deployment at once can announce `deploy.started` first. The duration is from `started_at` to `finished_at`, zero when the deployment never started. Gate durations come from the gate evaluator.
 
