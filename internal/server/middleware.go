@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -39,7 +40,7 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		level := slog.LevelInfo
-		if isQuietPath(r.URL.Path) {
+		if isQuiet(r) {
 			level = slog.LevelDebug
 		}
 		logger.LogAttrs(r.Context(), level, "request",
@@ -52,8 +53,15 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-func isQuietPath(path string) bool {
-	return path == "/healthz" || path == "/readyz" || path == "/metrics"
+func isQuiet(r *http.Request) bool {
+	switch path := r.URL.Path; {
+	case path == "/healthz" || path == "/readyz" || path == "/metrics":
+		return true
+	case strings.HasPrefix(path, "/static/"):
+		return true
+	default:
+		return r.Method == http.MethodGet && r.Header.Get("HX-Request") == "true"
+	}
 }
 
 type statusRecorder struct {

@@ -28,8 +28,9 @@ type intakeInput struct {
 }
 
 type intakeWiring struct {
-	routes map[string]http.Handler
-	runs   []func(context.Context) error
+	routes  map[string]http.Handler
+	runs    []func(context.Context) error
+	service *intake.Service
 }
 
 func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
@@ -64,6 +65,7 @@ func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
 	if err != nil {
 		return intakeWiring{}, err
 	}
+	wiring.service = service
 
 	if secret != nil {
 		deliveries := intake.NewPostgresDeliveries(in.store)

@@ -16,13 +16,13 @@ Roles are ordered, and each includes everything the lower ones may do:
 | `viewer` | read the UI and API: queue, locks, history, gate results, audit log |
 | `reporter` | everything a viewer may, plus post results of [`external` gates](gates.md#external); meant for CI jobs and other tools, which then cannot roll back, freeze or cancel |
 | `deployer` | everything a reporter may, plus request a manual deploy or rollback, create or clear any block, cancel a deployment, and take or release a freeze lock |
-| `admin` | everything a deployer may, plus administer API tokens over HTTP |
+| `admin` | everything a deployer may, plus administer API tokens in the web UI |
 
 > **A `reporter` token is not scoped to an app.** By itself the role lets its holder post results for every `external` gate of every app, so a leaked CI token of one repository could pass the production gates of another. List the allowed actors in each external gate's `reporters` ([configuration.md](configuration.md#gates)), give each CI job its own token, and set `--expires-in`. With `reporters` set, a caller outside the list is refused whatever its role.
 
 Roles govern operating doorstep, never what ships. A merge to the deployed branch is still the approval for a deploy ([ADR 0001](decisions/0001-go-and-core-design.md)); no role is needed for a webhook-triggered deploy, and no role can make doorstep deploy a commit that was not merged.
 
-The UI and API beads attach the required role to each route; this bead provides the mechanism and no protected routes yet. Every route that needs identity opts in, and there is no switch that disables authentication.
+The API and the [web UI](ui.md) attach the required role to each route, and their tests check the role of every route. Every route that needs identity opts in, and there is no switch that disables authentication. The web UI needs a sign-in provider: API tokens are for the API and the CLI.
 
 ## API tokens
 
@@ -174,7 +174,7 @@ Requests authenticated by the session cookie with an unsafe method (anything but
 1. The Fetch Metadata and `Origin` check of Go's `http.CrossOriginProtection`, with the public URL's origin trusted. Cross-origin browser requests are rejected.
 2. A per-session CSRF token, sent in the `X-CSRF-Token` header or as the `csrf_token` form field. It is derived from the session token with HMAC-SHA256, so it needs no storage and changes with every session.
 
-A request that fails either check gets `403 {"error":"forbidden"}`. Requests with a bearer token are exempt, since browsers never attach one by themselves.
+A request that fails either check gets `403 {"error":"forbidden"}`, unless its `Accept` header lists `text/html` (a browser form post): then it gets a short HTML `403` page saying that nothing was changed and that the page should be reloaded, since the usual cause is a tab whose form token predates signing in again. The form is read with a 1 MiB limit (`auth.MaxFormBytes`); a larger body fails the check. Requests with a bearer token are exempt, since browsers never attach one by themselves.
 
 UI authors get the token for the current request from `auth.CSRFToken(r.Context())`:
 
@@ -199,7 +199,7 @@ Handlers that need identity opt in by wrapping themselves:
 
 ```go
 deployer := svc.Authenticator().RequireRole(core.RoleDeployer)
-routes["POST /api/v1/apps/{app}/deploy"] = deployer(http.HandlerFunc(api.deploy))
+routes["POST /api/v1/apps/{app}/deployments"] = deployer(http.HandlerFunc(api.deploy))
 
 viewer := svc.Authenticator().RequireRoleOrLogin(core.RoleViewer)
 routes["GET /"] = viewer(http.HandlerFunc(web.index))
@@ -218,15 +218,15 @@ The `audit_log` table records who asked doorstep to do something. It complements
 | Action | Written by |
 | --- | --- |
 | `auth.login`, `auth.logout` | the sign-in handler |
-| `token.create`, `token.revoke` | `doorstep token`, and later the token API |
+| `token.create`, `token.revoke` | `doorstep token`, and the web UI's Tokens page (detail `origin.via` is `ui`) |
 | `session.revoke` | `doorstep session revoke` |
 | `rollback.request` | `POST /api/v1/apps/{app}/rollback` ([rollback.md](rollback.md)), in the same transaction as the rollback deployment and its block |
 | `block.create`, `block.clear` | `POST /api/v1/apps/{app}/blocks` (only when a new block is created) and `DELETE /api/v1/apps/{app}/blocks/{ref}` |
 | `gate.report` | `POST /api/v1/deployments/{id}/gates/{gate}` and `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}` ([api.md](api.md#external-gate-results)), in the same transaction as the report and only when the report changed; details are `{gate, phase, status, message, url}` |
-| `deploy.request`, `deploy.cancel` | the API and UI, when they land |
+| `deploy.request`, `deploy.cancel` | `POST /api/v1/apps/{app}/deployments` and `POST /api/v1/deployments/{id}/cancel`, which the web UI and `doorstep deploy`/`cancel` also use ([api.md](api.md#manual-deploys-and-cancellation)), in the same transaction as the deployment or its cancellation; details are `{commit, urgent, created, reason, migration}` and `{from_state, reason, pin_commit_sha}` |
 | `lock.acquire`, `lock.release` | the locks feature, when it lands |
 
-Gate reports need the `reporter` role; deployers and admins may post too, which gives an audited manual override for a stuck external gate, unless the gate lists `reporters` and the caller is not on the list. Rollback and block requests need the `deployer` role and record the caller's actor and role. Blocks have no owner: any deployer may create a block or clear any active block, including one a rollback or an admin created. That is deliberate, because unblocking is how a team returns a fixed version to automatic deploys and it never deploys anything by itself; the `block.clear` audit row and the block's `cleared_by` record who did it. The `deploy` and `lock` actions are reserved constants only: nothing records them yet. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
+Gate reports need the `reporter` role; deployers and admins may post too, which gives an audited manual override for a stuck external gate, unless the gate lists `reporters` and the caller is not on the list. Deploy, cancel, rollback and block requests need the `deployer` role and record the caller's actor and role. Blocks have no owner: any deployer may create a block or clear any active block, including one a rollback or an admin created. That is deliberate, because unblocking is how a team returns a fixed version to automatic deploys and it never deploys anything by itself; the `block.clear` audit row and the block's `cleared_by` record who did it. The `lock` actions are reserved constants only: lock changes are recorded in `lock_events` ([locks.md](locks.md#notifications-and-audit)). A feature that adds an endpoint owns both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
 
 Each row holds the time, the actor (kind, ID and display name), the actor's role when known, the action, the target app and environment and the deployment ID when they apply, and a JSON object with details. Actions are dot-separated lowercase words; new features add constants to `core` without a schema change.
 
@@ -240,7 +240,7 @@ type AuditRecorder interface {
 }
 ```
 
-`(*store.Store).ListAudit` reads entries newest first, filtered by target, actor or action, with keyset pagination. Until the API exposes it, query the table directly:
+`(*store.Store).ListAudit` reads entries newest first, filtered by target, actor or action, with keyset pagination. The web UI's Audit page shows it to viewers, filtered by action and app, 50 entries a page. To query it directly:
 
 ```sql
 SELECT occurred_at, actor_kind || ':' || actor_id AS actor, actor_role, action, app, environment, deployment_id, detail

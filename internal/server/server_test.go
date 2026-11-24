@@ -513,7 +513,9 @@ func TestLogRequests(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		method    string
 		path      string
+		htmx      bool
 		handler   http.HandlerFunc
 		minLevel  slog.Level
 		wantLog   bool
@@ -595,6 +597,52 @@ func TestLogRequests(t *testing.T) {
 			wantLevel: "DEBUG",
 			wantCode:  http.StatusOK,
 		},
+		{
+			name:     "static asset hidden at info",
+			method:   http.MethodGet,
+			path:     "/static/app.css",
+			handler:  func(http.ResponseWriter, *http.Request) {},
+			minLevel: slog.LevelInfo,
+		},
+		{
+			name:     "htmx poll hidden at info",
+			method:   http.MethodGet,
+			path:     "/apps/blog",
+			htmx:     true,
+			handler:  func(http.ResponseWriter, *http.Request) {},
+			minLevel: slog.LevelInfo,
+		},
+		{
+			name:      "htmx poll logged at debug",
+			method:    http.MethodGet,
+			path:      "/apps/blog",
+			htmx:      true,
+			handler:   func(http.ResponseWriter, *http.Request) {},
+			minLevel:  slog.LevelDebug,
+			wantLog:   true,
+			wantLevel: "DEBUG",
+			wantCode:  http.StatusOK,
+		},
+		{
+			name:      "page load logged at info",
+			method:    http.MethodGet,
+			path:      "/apps/blog",
+			handler:   func(http.ResponseWriter, *http.Request) {},
+			minLevel:  slog.LevelInfo,
+			wantLog:   true,
+			wantLevel: "INFO",
+			wantCode:  http.StatusOK,
+		},
+		{
+			name:      "htmx post logged at info",
+			path:      "/apps/blog/lock",
+			htmx:      true,
+			handler:   func(http.ResponseWriter, *http.Request) {},
+			minLevel:  slog.LevelInfo,
+			wantLog:   true,
+			wantLevel: "INFO",
+			wantCode:  http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
@@ -602,8 +650,15 @@ func TestLogRequests(t *testing.T) {
 			t.Parallel()
 			var logs lockedBuffer
 			logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: tt.minLevel}))
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tt.path, http.NoBody)
+			method := tt.method
+			if method == "" {
+				method = http.MethodPost
+			}
+			req := httptest.NewRequestWithContext(t.Context(), method, tt.path, http.NoBody)
 			req.RemoteAddr = "192.0.2.1:1234"
+			if tt.htmx {
+				req.Header.Set("HX-Request", "true")
+			}
 			logRequests(logger, tt.handler).ServeHTTP(httptest.NewRecorder(), req)
 
 			out := logs.String()
@@ -620,7 +675,7 @@ func TestLogRequests(t *testing.T) {
 			want := map[string]any{
 				"msg":    "request",
 				"level":  tt.wantLevel,
-				"method": http.MethodPost,
+				"method": method,
 				"path":   tt.path,
 				"status": tt.wantCode,
 				"remote": "192.0.2.1:1234",

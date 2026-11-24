@@ -441,3 +441,82 @@ func TestNewRequiresMigrationPorts(t *testing.T) {
 		t.Errorf("New with an empty policy error = %v", err)
 	}
 }
+
+func TestServiceMigrationFlag(t *testing.T) {
+	t.Parallel()
+
+	prod := core.Target{App: "blog-prod", Environment: "prod"}
+	staging := core.Target{App: "blog-staging", Environment: "staging"}
+	commit := core.Commit{Repository: "Example-User/blog", SHA: shaA}
+	tests := []struct {
+		name      string
+		target    core.Target
+		setup     func(h *migrationHarness)
+		wantFlag  intake.MigrationFlag
+		wantErr   string
+		wantReads int
+	}{
+		{
+			name:   "flagged by a trailer since the last deploy",
+			target: prod,
+			setup: func(h *migrationHarness) {
+				h.baselines.commits[prod] = core.Commit{Repository: "example-user/blog", SHA: shaBase}
+				h.source.ranges[shaBase+"..."+shaA] = github.CommitRange{Status: github.ComparisonAhead, Total: 1, Commits: []github.CommitInfo{
+					{SHA: shaA, Message: "Doorstep-Migration: true"},
+				}}
+			},
+			wantFlag:  intake.MigrationFlag{Flagged: true, Reason: "trailer Doorstep-Migration in aaaaaaa"},
+			wantReads: 1,
+		},
+		{
+			name:      "unflagged head without a baseline",
+			target:    prod,
+			wantReads: 1,
+		},
+		{
+			name:   "carries an unreleased migration",
+			target: prod,
+			setup: func(h *migrationHarness) {
+				h.baselines.unreleased[prod] = []core.DeploymentID{12}
+			},
+			wantFlag:  intake.MigrationFlag{Flagged: true, Reason: "unreleased migration in deployment 12"},
+			wantReads: 1,
+		},
+		{name: "app without a migration policy", target: staging},
+		{name: "unknown target", target: core.AppTarget("shop"), wantErr: "does not follow"},
+		{
+			name:      "github failure",
+			target:    prod,
+			setup:     func(h *migrationHarness) { h.source.commitErr = errors.New("502 bad gateway") },
+			wantErr:   "502 bad gateway",
+			wantReads: 1,
+		},
+		{
+			name:    "baseline failure",
+			target:  prod,
+			setup:   func(h *migrationHarness) { h.baselines.unreleasedErr = errors.New("db down") },
+			wantErr: "db down",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newMigrationHarness(t, migratingApp("prod", labelsAndTrailer()), blogApp("staging"))
+			if tt.setup != nil {
+				tt.setup(h)
+			}
+			got, err := h.svc.MigrationFlag(t.Context(), tt.target, commit)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("MigrationFlag error = %v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil || got != tt.wantFlag {
+				t.Fatalf("MigrationFlag = %+v, %v, want %+v", got, err, tt.wantFlag)
+			}
+			ranges, commits, _ := h.source.counts()
+			if ranges+commits != tt.wantReads {
+				t.Errorf("GitHub reads = %d, want %d", ranges+commits, tt.wantReads)
+			}
+		})
+	}
+}

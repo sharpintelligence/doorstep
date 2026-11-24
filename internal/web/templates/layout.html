@@ -1,0 +1,51 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,"includeIndicatorStyles":false,"historyCacheSize":0}'>
+<title>{{.Title}} · doorstep</title>
+<link rel="stylesheet" href="{{asset "app.css"}}">
+<script src="{{asset "htmx.min.js"}}" defer></script>
+<script src="{{asset "app.js"}}" defer></script>
+</head>
+<body{{with .CSRF}} hx-headers="{{csrfHeaders .}}"{{end}}>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+<a class="brand" href="/">doorstep</a>
+{{if .SignedIn}}
+<nav aria-label="Main">
+<ul>
+<li><a href="/"{{if eq .Nav "apps"}} aria-current="page"{{end}}>Apps</a></li>
+<li><a href="/locks"{{if eq .Nav "locks"}} aria-current="page"{{end}}>Locks</a></li>
+<li><a href="/audit"{{if eq .Nav "audit"}} aria-current="page"{{end}}>Audit</a></li>
+{{if .IsAdmin}}<li><a href="/tokens"{{if eq .Nav "tokens"}} aria-current="page"{{end}}>Tokens</a></li>{{end}}
+</ul>
+</nav>
+<div class="who">
+<span>{{.ActorName}}</span> <span class="badge muted">{{.Principal.Role}}</span>
+{{if .Session}}<form method="post" action="/auth/logout" class="inline">{{template "csrf" .}}<button type="submit" class="link">Sign out</button></form>{{end}}
+</div>
+{{end}}
+</header>
+<main id="main" tabindex="-1">
+{{with .Notice}}<p class="notice" role="status">{{.}}</p>{{end}}
+{{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+{{template "content" .}}
+</main>
+<footer><p>doorstep {{.Build.Version}}</p></footer>
+</body>
+</html>
+{{end}}
+
+{{define "csrf"}}<input type="hidden" name="csrf_token" value="{{.CSRF}}">{{end}}
+
+{{define "live"}}{{with .Live}} hx-get="{{.}}" hx-select="#live" hx-swap="outerHTML" hx-trigger="every 5s"{{end}}{{end}}
+
+{{define "time"}}<time datetime="{{isoTime .}}">{{relTime .}}</time>{{end}}
+
+{{define "state"}}<span class="{{stateClass .}}">{{.}}</span>{{end}}
+
+{{define "link"}}{{if .URL}}<a href="{{.URL}}" rel="noopener noreferrer"><code>{{.Text}}</code></a>{{else}}<code>{{.Text}}</code>{{end}}{{end}}
+
+{{define "lock"}}{{.Owner}}{{with .Reason}}: {{.}}{{end}}, since {{template "time" .CreatedAt}}{{with .ExpiresAt}}, expires {{template "time" .}}{{end}}{{end}}

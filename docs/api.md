@@ -2,7 +2,7 @@
 
 doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mounted once by `serve`.
 
-> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Posting an [external gate result](#external-gate-results) needs `reporter`. Taking or releasing a freeze lock, requesting a rollback and adding or clearing a block need `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
+> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Posting an [external gate result](#external-gate-results) needs `reporter`. Requesting a deploy, cancelling a deployment, taking or releasing a freeze lock, requesting a rollback and adding or clearing a block need `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
 
 ## Conventions
 
@@ -24,7 +24,10 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | 409 | `locked` | the app or the global scope is already frozen |
   | 409 | `no_rollback_target` | a rollback has nothing to roll back, or no earlier successful, unblocked version to roll back to |
   | 409 | `rollback_in_progress` | a rollback of the app is already queued or in flight; the body also carries `deployment` |
-  | 409 | `blocked` | the requested rollback target is blocked; the body also carries `block` |
+  | 404 | `not_found` | a manual deploy names a commit that does not exist in the app's source repository |
+  | 409 | `blocked` | the requested rollback target or the commit of a manual deploy is blocked; the body also carries `block` |
+  | 409 | `commit_not_on_branch` | a manual deploy names a commit that is not reachable from the branch the app follows |
+  | 409 | `not_cancellable` | the deployment to cancel has already finished |
   | 409 | `gate_not_external` | the named gate exists but is not of type `external` |
   | 409 | `deployment_finished` | the deployment has reached a terminal state |
   | 409 | `gate_not_applicable` | the deployment is a rollback and the gate does not set `apply_to_rollbacks` |
@@ -34,8 +37,41 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | 415 | `unsupported_media_type` | a request body that is not `application/json` |
   | 500 | `internal` | anything else; details are logged, never returned |
   | 503 | `contended` | a lock or the app's deployments changed while the request ran; retry after `Retry-After` |
+  | 503 | `unavailable` | a manual deploy could not be checked because GitHub or migration detection failed; nothing was queued; retry after `Retry-After` |
 
 The lock endpoints (`/api/v1/apps/{app}/lock`, `/api/v1/lock`, `/api/v1/locks`) are documented in [locks.md](locks.md#api). The rollback and block endpoints (`POST /api/v1/apps/{app}/rollback`, `GET` and `POST /api/v1/apps/{app}/blocks`, `DELETE /api/v1/apps/{app}/blocks/{ref}`) are documented in [rollback.md](rollback.md#api).
+
+## Manual deploys and cancellation
+
+The API, the [web UI](ui.md) and the CLI (`doorstep deploy`, `doorstep cancel`) share one service, `internal/deploys` ([ADR 0019](decisions/0019-manual-deploys-and-cancellation.md)). Both endpoints need the `deployer` role, record `trigger.source` `api` and write an [audit](authentication.md#audit-log) row (`deploy.request`, `deploy.cancel`) in the same transaction as the change.
+
+### `POST /api/v1/apps/{app}/deployments`
+
+Queues a deploy of one commit of the app.
+
+```json
+{"commit_sha": "3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a392", "urgent": true, "reason": "checkout hotfix"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `commit_sha` | required: the full 40 character hex SHA of a commit (either case; doorstep stores it lowercase) reachable from the branch the app follows (`source.branch` of `source.repo`). doorstep asks GitHub, so a commit only on another branch, a fork or an open pull request is refused with `409 commit_not_on_branch`: merging stays the approval ([ADR 0001](decisions/0001-go-and-core-design.md)) |
+| `urgent` | queue at urgent priority, ahead of normal deploys ([queue.md](queue.md#priorities)) |
+| `reason` | optional, recorded in the audit row; whitespace is collapsed and at most 500 characters are accepted |
+
+The request is checked in this order: the commit is on the branch, the release is flagged when it contains database migrations exactly as for a merge ([rollback.md](rollback.md#migration-aware-releases)), then, holding the app's row lock, a block on the commit refuses it (`409 blocked`) and the deployment is queued. If GitHub or migration detection fails nothing is queued and the answer is `503 unavailable` with `Retry-After: 5`. Required checks are not evaluated at request time: the `checks` gate in the `before` phase still applies when the deploy starts.
+
+`201` returns the new deployment and its URL in `Location`. When a deploy of the same commit is already queued or running, no second one is created: the answer is `200` with that deployment and `created: false`, and `urgent` raises its priority if it is still queued.
+
+```json
+{"deployment": {"id": 52, "app": "blog", "kind": "deploy", "state": "queued", "trigger": {"source": "api", "requested_by": "user:oidc:alice"}}, "created": true}
+```
+
+### `POST /api/v1/deployments/{id}/cancel`
+
+Cancels a deployment of either kind that has not finished. The body is optional: `{"reason": "wrong commit"}`. The deployment moves to `cancelled` with the event message `cancelled by <actor>[: reason]`; the worker stops at its next step and the engine closes its pull request, if any. A version that was already pinned in the GitOps repository stays pinned until a rollback or a newer deploy replaces it.
+
+`200` returns `{"deployment": {...}}`. An unknown id is `404`, a finished deployment `409 not_cancellable`, and a deployment that kept changing state during three attempts `503 contended`.
 
 ## `GET /api/v1/apps/{app}/queue`
 

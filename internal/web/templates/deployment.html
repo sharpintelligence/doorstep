@@ -1,0 +1,82 @@
+{{define "content"}}
+{{$d := .Content.Deployment}}
+<h1>Deployment #{{$d.ID}}</h1>
+<p class="crumbs">{{if .Content.Configured}}<a href="/apps/{{pathEscape $d.Target.App}}">{{$d.Target.App}}</a>{{else}}{{$d.Target.App}}{{end}} / {{$d.Target.Environment}}</p>
+
+<div id="live"{{template "live" .}}>
+{{$d := .Content.Deployment}}
+<h2>Summary</h2>
+<dl class="facts">
+<dt>State</dt><dd>{{template "state" $d.State}}</dd>
+<dt>Kind</dt><dd>{{$d.Kind}}{{with $d.RollbackOfID}}, rolling back <a href="/deployments/{{.}}">#{{.}}</a>{{end}}{{with $d.ParentID}}, retry of <a href="/deployments/{{.}}">#{{.}}</a>{{end}}</dd>
+{{with $d.SupersededByID}}<dt>Superseded by</dt><dd><a href="/deployments/{{.}}">#{{.}}</a></dd>{{end}}
+<dt>Requested</dt><dd>{{$d.RequestedBy}} via {{$d.Source}}, {{template "time" $d.CreatedAt}}</dd>
+{{with $d.StartedAt}}<dt>Started</dt><dd>{{template "time" .}}</dd>{{end}}
+{{with $d.FinishedAt}}<dt>Finished</dt><dd>{{template "time" .}}</dd>{{end}}
+{{if $d.Migration}}<dt>Database migration</dt><dd><span class="badge warn">migration</span> {{$d.MigrationReason}}</dd>{{end}}
+{{with $d.FailureReason}}<dt>Failure</dt><dd class="failure">{{.}}</dd>{{end}}
+</dl>
+
+<h2>Lineage</h2>
+<dl class="facts">
+<dt>App commit</dt><dd>{{template "link" (commitLink $d.Commit.Repository $d.Commit.SHA)}} in <code>{{$d.Commit.Repository}}</code></dd>
+<dt>Image</dt><dd><code>{{$d.Image.Repository}}:{{$d.Image.Tag}}</code></dd>
+{{with $d.Digest}}<dt>Digest</dt><dd><code>{{.}}</code></dd>{{end}}
+{{with $d.PreviousDigest}}<dt>Replaced digest</dt><dd><code>{{.}}</code></dd>{{end}}
+{{with $d.PinCommitSHA}}<dt>Pin commit</dt><dd>{{template "link" (commitLink $d.GitOpsRepository .)}} in <code>{{$d.GitOpsRepository}}</code></dd>{{end}}
+{{with $d.ArgoCDRevision}}<dt>Argo CD revision</dt><dd>{{template "link" (revisionLink $d.GitOpsRepository .)}}</dd>{{end}}
+</dl>
+
+<h2>Gates</h2>
+{{range .Content.Phases}}
+<table>
+<caption>{{.Phase}} gates</caption>
+<thead><tr><th scope="col">Gate</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Message</th><th scope="col">Started</th><th scope="col">Finished</th><th scope="col">Evidence</th></tr></thead>
+<tbody>
+{{range .Results}}
+<tr>
+<th scope="row">{{.Name}}</th>
+<td>{{.Type}}</td>
+<td><span class="{{gateClass .Status}}">{{.Status}}</span></td>
+<td>{{.Message}}</td>
+<td>{{template "time" .StartedAt}}</td>
+<td>{{with .FinishedAt}}{{template "time" .}}{{end}}</td>
+<td>{{range evidenceLinks .Evidence}}<a href="{{.URL}}" rel="noopener noreferrer">{{.Text}}</a> {{end}}{{with prettyJSON .Evidence}}<details><summary>Evidence</summary><pre>{{.}}</pre></details>{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">No gate has run for this deployment.</p>
+{{end}}
+
+<h2>Events</h2>
+{{if .Content.EventsTruncated}}<p class="hint">Only the newest events are shown.</p>{{end}}
+<ol class="timeline">
+{{range .Content.Events}}
+<li>{{template "time" .OccurredAt}} <strong>{{.Type}}</strong>{{if .To}} {{with .From}}{{.}} → {{end}}{{.To}}{{end}}{{with .Message}}: {{.}}{{end}}{{with .Actor}} <span class="muted">({{.}})</span>{{end}}</li>
+{{end}}
+</ol>
+
+{{with .Content.Rollbacks}}
+<h2>Rollbacks</h2>
+<ul>{{range .}}<li><a href="/deployments/{{.ID}}">#{{.ID}}</a> {{template "state" .State}} {{template "time" .CreatedAt}}</li>{{end}}</ul>
+{{end}}
+{{with .Content.Retries}}
+<h2>Retries</h2>
+<ul>{{range .}}<li><a href="/deployments/{{.ID}}">#{{.ID}}</a> {{template "state" .State}} {{template "time" .CreatedAt}}</li>{{end}}</ul>
+{{end}}
+{{if .Content.CanCancel}}
+<details class="card"{{if .Content.CancelReason}} open{{end}}>
+<summary>Cancel deployment #{{$d.ID}}</summary>
+<form method="post" action="/deployments/{{$d.ID}}/cancel">
+{{template "csrf" .}}
+{{if $d.PinCommitSHA}}<p class="warning" role="note">This deployment already pinned its version in git. Cancelling stops it, but the version stays pinned until a rollback or a newer deploy replaces it.</p>{{end}}
+<label for="cancel_reason">Reason (optional)</label>
+<input id="cancel_reason" name="reason" maxlength="500" value="{{.Content.CancelReason}}">
+<button type="submit" class="danger">Cancel deployment</button>
+</form>
+</details>
+{{end}}
+</div>
+{{end}}

@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"errors"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -629,6 +631,56 @@ func TestCurrentDeployment(t *testing.T) {
 	st := storetest.Open(t)
 	if _, err := st.CurrentDeployment(t.Context(), core.Target{App: "blog"}); err == nil {
 		t.Error("CurrentDeployment(invalid target) succeeded")
+	}
+}
+
+func TestCurrentAndLatestDeployments(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	ids := func(t *testing.T, got []core.Deployment, err error) map[core.Target]core.DeploymentID {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[core.Target]core.DeploymentID{}
+		for _, d := range got {
+			if _, dup := out[d.Target]; dup {
+				t.Errorf("%s listed twice", d.Target)
+			}
+			out[d.Target] = d.ID
+		}
+		return out
+	}
+	current, err := st.CurrentDeployments(t.Context())
+	if got := ids(t, current, err); len(got) != 0 {
+		t.Errorf("CurrentDeployments on an empty store = %v", got)
+	}
+
+	blogLive := mustCreateIn(t, st, deploymentOf("blog", randomSHA(t)), core.StateSucceeded)
+	blogQueued := mustCreate(t, st, deploymentOf("blog", randomSHA(t)), 0)
+	shopFailed := mustCreateIn(t, st, deploymentOf("shop", randomSHA(t)), core.StateFailed)
+	staging := deploymentOf("blog", randomSHA(t))
+	staging.Target.Environment = "staging"
+	stagingSyncing := mustCreateIn(t, st, staging, core.StateSyncing)
+	shopProd := core.Target{App: "shop", Environment: "prod"}
+
+	current, err = st.CurrentDeployments(t.Context())
+	wantCurrent := map[core.Target]core.DeploymentID{blogProd: blogLive.ID, stagingSyncing.Target: stagingSyncing.ID}
+	if got := ids(t, current, err); !maps.Equal(got, wantCurrent) {
+		t.Errorf("CurrentDeployments = %v, want %v", got, wantCurrent)
+	}
+	for _, d := range current {
+		single, err := st.CurrentDeployment(t.Context(), d.Target)
+		if err != nil || !reflect.DeepEqual(single, d) {
+			t.Errorf("CurrentDeployment(%s) = %+v, %v; want %+v", d.Target, single, err, d)
+		}
+	}
+
+	latest, err := st.LatestDeployments(t.Context())
+	wantLatest := map[core.Target]core.DeploymentID{blogProd: blogQueued.ID, shopProd: shopFailed.ID, stagingSyncing.Target: stagingSyncing.ID}
+	if got := ids(t, latest, err); !maps.Equal(got, wantLatest) {
+		t.Errorf("LatestDeployments = %v, want %v", got, wantLatest)
 	}
 }
 

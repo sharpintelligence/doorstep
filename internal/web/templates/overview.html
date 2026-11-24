@@ -1,0 +1,27 @@
+{{define "content"}}
+<h1>Apps</h1>
+<div id="live"{{template "live" .}}>
+{{with .Content.GlobalLock}}<p class="banner" role="note"><span class="badge bad">frozen</span> All apps are locked by {{template "lock" .}}.</p>{{end}}
+{{if .Content.Apps}}
+<table>
+<caption>Configured apps, what they run and what is waiting</caption>
+<thead>
+<tr><th scope="col">App</th><th scope="col">Running</th><th scope="col">Latest deployment</th><th scope="col">Queue</th><th scope="col">Lock</th></tr>
+</thead>
+<tbody>
+{{range .Content.Apps}}
+<tr>
+<th scope="row"><a href="/apps/{{pathEscape .App.Name}}">{{.App.Name}}</a></th>
+<td>{{with .Current}}{{template "link" (commitLink .Commit.Repository .Commit.SHA)}}{{with .Digest}} <code title="{{.}}">{{shortDigest .}}</code>{{end}} {{template "state" .State}}{{else}}<span class="muted">nothing deployed</span>{{end}}</td>
+<td>{{with .Latest}}<a href="/deployments/{{.ID}}">#{{.ID}}</a> {{.Kind}} {{template "state" .State}} {{template "time" .CreatedAt}}{{else}}<span class="muted">none</span>{{end}}</td>
+<td>{{.QueueDepth}} waiting{{if .InFlight}}, {{.InFlight}} in flight{{end}}</td>
+<td>{{with .Lock}}<span class="badge bad">locked</span> {{template "lock" .}}{{else}}<span class="muted">unlocked</span>{{end}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p>No apps are configured. Add apps to the configuration file and restart doorstep.</p>
+{{end}}
+</div>
+{{end}}

@@ -1,0 +1,6 @@
+{{define "content"}}
+<h1>{{.Content.Heading}}</h1>
+<p class="error" role="alert">{{.Content.Message}}</p>
+{{with .Content.SignIn}}<p><a class="button" href="{{.}}">Sign in</a></p>{{end}}
+{{if .SignedIn}}<p><a href="/">Back to apps</a></p>{{end}}
+{{end}}

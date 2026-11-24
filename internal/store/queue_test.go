@@ -3,6 +3,7 @@ package store_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -607,6 +608,30 @@ func TestQueueEntries(t *testing.T) {
 	none, err := st.QueueEntries(t.Context(), "unknown")
 	if err != nil || len(none) != 0 {
 		t.Errorf("QueueEntries(unknown) = %v, %v; want empty", none, err)
+	}
+
+	all, err := st.QueueEntries(t.Context(), "")
+	if err != nil {
+		t.Fatalf("QueueEntries(all): %v", err)
+	}
+	type placed struct {
+		target   core.Target
+		position int
+	}
+	var got []placed
+	for _, e := range all {
+		got = append(got, placed{e.Deployment.Target, e.Position})
+	}
+	webProd := core.Target{App: "web", Environment: "prod"}
+	wantAll := []placed{
+		{core.Target{App: "api", Environment: "prod"}, 1},
+		{webProd, 1},
+		{webProd, 2},
+		{webProd, 3},
+		{core.Target{App: "web", Environment: "staging"}, 1},
+	}
+	if !slices.Equal(got, wantAll) {
+		t.Errorf("QueueEntries(all) = %+v, want %+v", got, wantAll)
 	}
 }
 

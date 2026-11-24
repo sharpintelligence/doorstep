@@ -231,6 +231,20 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	if err != nil {
 		return fmt.Errorf("intake: %w", err)
 	}
+	var manualDeploys deployService
+	if commitAnnouncer != nil && intakeWiring.service != nil {
+		manualDeploys, err = newDeploys(deploysInput{
+			store:     st,
+			catalog:   in.catalog,
+			githubApp: githubApp,
+			intake:    intakeWiring.service,
+			announcer: commitAnnouncer,
+			logger:    logger,
+		})
+		if err != nil {
+			return fmt.Errorf("deploys: %w", err)
+		}
+	}
 
 	gateReports, err := gates.NewReporter(st, in.catalog)
 	if err != nil {
@@ -246,6 +260,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Locks:         locksService,
 		Rollbacks:     rollbackAPI,
 		Blocks:        rollbacks,
+		Deploys:       manualDeploys,
 		GateReports:   gateReports,
 		KnownApp:      knownApp(in.catalog),
 		Authenticator: principalAuthenticator{},
@@ -257,6 +272,27 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	if h := authService.Handler(); h != nil {
 		maps.Copy(appRoutes, h.Routes())
 	}
+	webRoutes, err := newWeb(webInput{
+		config:        cfg,
+		catalog:       in.catalog,
+		history:       st,
+		queue:         q,
+		locks:         locksService,
+		lockEvents:    st,
+		rollbacks:     rollbackAPI,
+		blocks:        rollbacks,
+		deploys:       manualDeploys,
+		audit:         st,
+		tokens:        authService.Tokens(),
+		authenticator: authenticator,
+		signIn:        authService.Handler() != nil,
+		build:         build,
+		logger:        logger,
+	})
+	if err != nil {
+		return fmt.Errorf("web ui: %w", err)
+	}
+	maps.Copy(appRoutes, webRoutes)
 	mainRoutes := wrapRoutes(appRoutes, authenticator.Middleware)
 	maps.Copy(mainRoutes, intakeWiring.routes)
 	checks := map[string]server.Check{"postgres": st.Ping}

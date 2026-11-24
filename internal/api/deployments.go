@@ -30,7 +30,11 @@ const (
 
 func (a *api) registerHistory(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+appDeploymentsPath, a.listAppDeployments)
-	mux.HandleFunc(appDeploymentsPath, methodNotAllowed(http.MethodGet, http.MethodHead))
+	allowed := []string{http.MethodGet, http.MethodHead}
+	if a.deploysEnabled() {
+		allowed = append(allowed, http.MethodPost)
+	}
+	mux.HandleFunc(appDeploymentsPath, methodNotAllowed(allowed...))
 	mux.HandleFunc("GET "+deploymentPath, a.getDeployment)
 	mux.HandleFunc(deploymentPath, methodNotAllowed(http.MethodGet, http.MethodHead))
 }

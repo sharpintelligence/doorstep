@@ -311,7 +311,7 @@ spec:
                   name: http
 ```
 
-The only path GitHub needs to reach is `POST /webhooks/github`; it authenticates every delivery by its signature, so it is safe to expose without sign-in. To keep the rest of doorstep private, route just that path publicly (`path: /webhooks/github`, `pathType: Exact`) and serve the UI and API on an internal ingress. When GitHub cannot reach doorstep at all, leave the webhook inactive: the poller picks up new commits within `intake.poll_interval` ([configuration.md](configuration.md#intake)).
+The only path GitHub needs to reach is `POST /webhooks/github`; it authenticates every delivery by its signature, so it is safe to expose without sign-in. To keep the rest of doorstep private, route just that path publicly (`path: /webhooks/github`, `pathType: Exact`) and serve the [web UI](ui.md) (`/`, `/apps/...`, `/static/...`), the API and `/auth/...` on an internal ingress. The UI needs `server.public_url` and a sign-in provider ([authentication.md](authentication.md#sign-in)); the public URL must be the origin people type in their browser, because form posts from any other origin are refused. When GitHub cannot reach doorstep at all, leave the webhook inactive: the poller picks up new commits within `intake.poll_interval` ([configuration.md](configuration.md#intake)).
 
 The base ships no Ingress or NetworkPolicy, because both depend on your controller and CNI.
 

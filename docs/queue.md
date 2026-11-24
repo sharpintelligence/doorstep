@@ -9,13 +9,14 @@ Every deploy and rollback waits in a durable, per-app queue in Postgres. Deploys
 | `internal/store` | all SQL: `EnqueueDeployment`, `ExpediteDeployment`, `ClaimBatch` (and the non-batching `Claim`), `HeartbeatQueueEntry`, `ReleaseQueueEntry`, `CompleteQueueEntry`, `QueueEntries`, `QueueDepth`, `ListenQueue` |
 | `internal/queue` | the adapter the engine consumes: priorities, lease length, per-app batch limit (`Queue`), and the worker loop (`Runner`) |
 | `internal/api` | `GET /api/v1/apps/{app}/queue`; see [api.md](api.md) |
+| `internal/deploys` | manual deploy requests and cancellation for the API, the web UI and the CLI; see [api.md](api.md#manual-deploys-and-cancellation) |
 
 ## Priorities
 
 | Priority | Value | Used for |
 | --- | --- | --- |
-| `normal` | 0 | deploys from merges, polls, the API and the CLI |
-| `urgent` | 100 | deploys an operator marks urgent (a hotfix) |
+| `normal` | 0 | deploys from merges, polls, the API, the web UI and the CLI |
+| `urgent` | 100 | deploys an operator marks urgent (a hotfix): `"urgent": true` in `POST /api/v1/apps/{app}/deployments`, `doorstep deploy --urgent`, or the Urgent box of the web UI's deploy form |
 | `rollback` | 200 | rollback deployments ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)) |
 
 `queue.PriorityFor(kind, urgent)` maps a request to its priority: rollbacks are always `rollback`, whatever was asked.
@@ -51,6 +52,8 @@ An urgent redeploy of an older commit supersedes nothing newer than that commit:
 The general rule is one sentence: batch within the head's priority, then supersede older deploys of lower priority. Rollbacks are never superseded and never supersede anything.
 
 An urgent deploy does not interrupt a deployment that is already in flight; it runs as soon as that one finishes.
+
+A queued or running deployment can be cancelled with `POST /api/v1/deployments/{id}/cancel`, `doorstep cancel` or the web UI. Cancelling deletes its queue entry in the same transaction, so the next entry of the app becomes the head.
 
 ## Enqueueing and deduplication
 

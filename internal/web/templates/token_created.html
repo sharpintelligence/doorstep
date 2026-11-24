@@ -1,0 +1,8 @@
+{{define "content"}}
+<h1>Token created</h1>
+<p role="status">Token <strong>{{.Content.Token.Name}}</strong> with role {{.Content.Token.Role}} was created{{with .Content.Token.ExpiresAt}} and expires {{template "time" .}}{{end}}.</p>
+<p class="warning" role="note">Copy it now. doorstep stores only its hash and cannot show it again.</p>
+<label for="token_value">Token</label>
+<input id="token_value" class="secret" readonly value="{{.Content.Raw}}" autocomplete="off" spellcheck="false">
+<p><a href="/tokens">Back to tokens</a></p>
+{{end}}

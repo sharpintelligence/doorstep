@@ -1,0 +1,79 @@
+{{define "content"}}
+<h1>Locks</h1>
+<div id="live"{{template "live" .}}>
+<h2>Global lock</h2>
+{{with .Content.Global}}
+<p class="banner" role="note"><span class="badge bad">frozen</span> All apps are locked by {{template "lock" .}}.</p>
+{{if $.CanOperate}}
+<details class="card">
+<summary>Release the global lock</summary>
+<form method="post" action="/locks/global/release">
+{{template "csrf" $}}
+<p class="hint">Releasing lets queued deploys of every app that is not locked on its own run again.</p>
+<button type="submit" class="danger">Release the global lock</button>
+</form>
+</details>
+{{end}}
+{{else}}
+<p class="muted">No global lock.</p>
+{{if $.CanOperate}}
+<details class="card"{{if or $.Content.Form.Reason $.Content.Form.ExpiresIn}} open{{end}}>
+<summary>Lock all apps</summary>
+<form method="post" action="/locks/global">
+{{template "csrf" $}}
+<p class="hint">A global lock stops new deploys of every app. Rollbacks still run.</p>
+<label for="global_reason">Reason</label>
+<input id="global_reason" name="reason" required maxlength="500" value="{{$.Content.Form.Reason}}">
+<label for="global_expires_in">Expires in (optional, such as 2h)</label>
+<input id="global_expires_in" name="expires_in" maxlength="20" value="{{$.Content.Form.ExpiresIn}}">
+<button type="submit" class="danger">Lock all apps</button>
+</form>
+</details>
+{{end}}
+{{end}}
+
+<h2>App locks</h2>
+{{if .Content.Apps}}
+<table>
+<caption>Apps locked against new deploys</caption>
+<thead><tr><th scope="col">App</th><th scope="col">Owner</th><th scope="col">Reason</th><th scope="col">Since</th><th scope="col">Expires</th>{{if .CanOperate}}<th scope="col"><span class="visually-hidden">Actions</span></th>{{end}}</tr></thead>
+<tbody>
+{{range .Content.Apps}}
+<tr>
+<th scope="row"><a href="/apps/{{pathEscape .Target.App}}">{{.Target.App}}</a></th>
+<td>{{.Owner}}</td>
+<td>{{.Reason}}</td>
+<td>{{template "time" .CreatedAt}}</td>
+<td>{{with .ExpiresAt}}{{template "time" .}}{{else}}never{{end}}</td>
+{{if $.CanOperate}}<td><details class="row-action"><summary>Unlock</summary><form method="post" action="/apps/{{pathEscape .Target.App}}/unlock">{{template "csrf" $}}<p class="hint">Lets queued deploys of {{.Target.App}} run again.</p><button type="submit" class="danger">Unlock {{.Target.App}}</button></form></details></td>{{end}}
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">No app is locked.</p>
+{{end}}
+
+<h2>Recent lock events</h2>
+{{if .Content.Events}}
+<table>
+<caption>Locks taken, released, expired and reminded, newest first</caption>
+<thead><tr><th scope="col">When</th><th scope="col">Event</th><th scope="col">Scope</th><th scope="col">Owner</th><th scope="col">By</th><th scope="col">Reason</th></tr></thead>
+<tbody>
+{{range .Content.Events}}
+<tr>
+<td>{{template "time" .OccurredAt}}</td>
+<th scope="row">{{.Action}}</th>
+<td>{{.Lock.Scope}}</td>
+<td>{{.Lock.Owner}}</td>
+<td>{{.Actor}}</td>
+<td>{{.Lock.Reason}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted">No lock events yet.</p>
+{{end}}
+</div>
+{{end}}
