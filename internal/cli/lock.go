@@ -18,10 +18,6 @@ const (
 	flagReason = "reason"
 	flagFor    = "for"
 	flagUntil  = "until"
-	flagOutput = "output"
-
-	outputTable = "table"
-	outputJSON  = "json"
 )
 
 type lockBody struct {
@@ -211,7 +207,7 @@ func writeLockTable(out io.Writer, locks []lockInfo) error {
 		if l.ExpiresAt != nil {
 			expires = l.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", l.name(), l.Owner, l.CreatedAt.UTC().Format(time.RFC3339), expires, l.Reason)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", l.name(), printable(l.Owner), l.CreatedAt.UTC().Format(time.RFC3339), expires, printable(l.Reason))
 	}
 	return w.Flush()
 }

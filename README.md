@@ -38,7 +38,7 @@ flowchart TD
 - Manual and opt-in automatic [rollback and blocks](docs/rollback.md), with [migration-aware releases](docs/rollback.md#migration-aware-releases).
 - [Notifications](docs/notifications.md) through Slack, webhooks and GitHub deployments.
 - [OIDC or GitHub sign-in, API tokens, roles and an audit log](docs/authentication.md).
-- A [JSON API](docs/api.md), a CLI and a [server-rendered web UI](docs/ui.md).
+- A [JSON API](docs/api.md), a [CLI](docs/configuration.md#doorstep-deployments-and-deployment) for deploys, history, rollbacks, blocks and locks, and a [server-rendered web UI](docs/ui.md).
 - [Prometheus metrics](docs/metrics.md).
 - A [kustomize install](docs/install.md) and [signed, attested multi-arch images](docs/releasing.md#verifying-an-image).
 

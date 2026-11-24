@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,29 +17,12 @@ import (
 const (
 	flagTo                       = "to"
 	flagConfirmMigrationRollback = "confirm-migration-rollback"
-	shortDigestLength            = len("sha256:") + 12
 )
 
 type rollbackBody struct {
 	ToDeploymentID           *int64 `json:"to_deployment_id,omitempty"`
 	Reason                   string `json:"reason,omitempty"`
 	ConfirmMigrationRollback bool   `json:"confirm_migration_rollback,omitempty"`
-}
-
-type deploymentImage struct {
-	Repository string `json:"repository"`
-	Tag        string `json:"tag"`
-	Digest     string `json:"digest"`
-}
-
-type deploymentInfo struct {
-	ID              int64           `json:"id"`
-	App             string          `json:"app"`
-	Kind            string          `json:"kind"`
-	State           string          `json:"state"`
-	Image           deploymentImage `json:"image"`
-	Migration       bool            `json:"migration"`
-	MigrationReason string          `json:"migration_reason"`
 }
 
 type blockCommitInfo struct {
@@ -78,27 +60,6 @@ func (b blockInfo) subject() string {
 	default:
 		return "block " + strconv.FormatInt(b.ID, 10)
 	}
-}
-
-func shortDigest(d string) string {
-	return d[:min(len(d), shortDigestLength)]
-}
-
-func validateOutput(output string) error {
-	if output != outputTable && output != outputJSON {
-		return fmt.Errorf("--%s: must be %s or %s, got %q", flagOutput, outputTable, outputJSON, output)
-	}
-	return nil
-}
-
-func writeIndentedJSON(out io.Writer, raw json.RawMessage) error {
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, raw, "", "  "); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-	buf.WriteByte('\n')
-	_, err := buf.WriteTo(out)
-	return err
 }
 
 func newRollbackCommand(lookupEnv LookupEnv) *cobra.Command {

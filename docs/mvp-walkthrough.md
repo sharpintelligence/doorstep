@@ -169,10 +169,18 @@ Open a pull request in `example-org/blog`, wait for `test` to pass and merge it.
 Read the lineage:
 
 ```sh
+doorstep deployment 1
+```
+
+The same response is available from the API:
+
+```sh
 curl -fsS -H "Authorization: Bearer $VIEWER" https://doorstep.example.com/api/v1/deployments/1
 ```
 
 The `deployment` object shows `state: succeeded`, `trigger.source: webhook` with the GitHub user who merged in `requested_by`, `commit.sha` of the merge commit, `image.tag` equal to that SHA and the resolved `image.digest`, `gitops.commit_sha` of the pin commit and `argocd.revision` equal to it. `events` lists the transitions `queued`, `resolving`, `pinning`, `syncing`, `verifying` and `succeeded`. The [API reference](api.md) describes every field.
+
+`doorstep deployments blog` lists every deployment of the app, newest first.
 
 Merge a second pull request and wait for `deploy #2 succeeded`. Its `image.previous_digest` is the first deploy's digest.
 

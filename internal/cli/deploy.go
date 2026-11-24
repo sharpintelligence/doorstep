@@ -14,10 +14,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
-const (
-	flagUrgent     = "urgent"
-	shortSHALength = 12
-)
+const flagUrgent = "urgent"
 
 type deployBody struct {
 	CommitSHA string `json:"commit_sha"`
@@ -29,26 +26,13 @@ type cancelBody struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-type deployCommit struct {
-	SHA string `json:"sha"`
-}
-
-type deployedDeployment struct {
-	ID              int64        `json:"id"`
-	App             string       `json:"app"`
-	State           string       `json:"state"`
-	Commit          deployCommit `json:"commit"`
-	Migration       bool         `json:"migration"`
-	MigrationReason string       `json:"migration_reason"`
-}
-
 type deployInfo struct {
-	Deployment deployedDeployment `json:"deployment"`
-	Created    bool               `json:"created"`
+	Deployment deploymentInfo `json:"deployment"`
+	Created    bool           `json:"created"`
 }
 
 type cancelInfo struct {
-	Deployment deployedDeployment `json:"deployment"`
+	Deployment deploymentInfo `json:"deployment"`
 }
 
 func newDeployCommand(lookupEnv LookupEnv) *cobra.Command {
@@ -104,7 +88,7 @@ func newDeployCommand(lookupEnv LookupEnv) *cobra.Command {
 
 func writeDeploy(out io.Writer, app string, urgent bool, r deployInfo) error {
 	d := r.Deployment
-	sha := d.Commit.SHA[:min(len(d.Commit.SHA), shortSHALength)]
+	sha := shortSHA(d.Commit.SHA)
 	line := fmt.Sprintf("deployment %d queued for %s: commit %s", d.ID, app, sha)
 	if urgent {
 		line += " (urgent)"
@@ -133,9 +117,9 @@ func newCancelCommand(lookupEnv LookupEnv) *cobra.Command {
 			"  doorstep cancel 42 --reason \"wrong commit\"",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			id, err := strconv.ParseInt(args[0], 10, 64)
-			if err != nil || id <= 0 {
-				return fmt.Errorf("deployment id: must be a positive integer, got %q", args[0])
+			id, err := parseDeploymentID(args[0])
+			if err != nil {
+				return err
 			}
 			if err := validateOutput(output); err != nil {
 				return err

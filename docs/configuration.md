@@ -287,6 +287,34 @@ doorstep cancel 42 --reason "wrong commit"
 
 Thin clients of the [manual deploy and cancel API](api.md#manual-deploys-and-cancellation), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above and a token with the `deployer` role. `deploy` queues a deploy of a full 40 character commit SHA that is reachable from the branch the app follows; `--urgent` queues it ahead of normal deploys and `--reason` is recorded in the audit log. When a deploy of the commit is already queued or running it prints that deployment instead. `cancel` cancels a deployment that has not finished; `--reason` is added to the deployment's event and the audit row. Both print one line, or the API response with `-o json`.
 
+## `doorstep deployments` and `deployment`
+
+```sh
+doorstep deployments blog
+doorstep deployments blog --environment prod --state succeeded --limit 1
+doorstep deployments blog --kind rollback -o json
+doorstep deployments blog --digest sha256:3b7f0c1d5e9a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c
+doorstep deployments blog --cursor 42
+doorstep deployment 42
+```
+
+Thin clients of the [deploy history API](api.md#deploy-history), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above and a token with the `viewer` role. `deployments` lists the deployments of an app, deploys and rollbacks alike, newest first. `deployment` shows one deployment with its lineage.
+
+| Flag (`deployments`) | Meaning |
+| --- | --- |
+| `--environment` | only deployments to this environment |
+| `--state` | only deployments in this state; repeat the flag or separate states with commas |
+| `--kind` | only deployments of this kind (`deploy` or `rollback`); repeat or separate with commas |
+| `--commit` | only deployments of this full 40 character commit SHA (upper case is accepted) |
+| `--digest` | only deployments of this image digest (`sha256:` and 64 hex characters) |
+| `--limit` | deployments per page, 1 to 200; defaults to 50 |
+| `--cursor` | continue after the `next_cursor` of the previous page |
+| `-o`, `--output` | `table` (default) or `json` |
+
+The table has the columns `ID`, `ENVIRONMENT`, `KIND`, `STATE`, `COMMIT` (12 characters), `DIGEST` (shortened), `SOURCE` (what triggered the deployment), `BY` (who requested it), `CREATED` and `FINISHED` (RFC 3339, UTC); a dash marks a value that is not set. One page is printed per invocation. When more deployments exist, `more deployments: rerun with --cursor <n>` is printed on stderr so that stdout stays clean for pipes; scripts can loop on `next_cursor` with `-o json`. Filters are checked before the request is sent, so a malformed `--commit`, `--digest`, `--state`, `--kind` or `--cursor` fails immediately and names the flag.
+
+`deployment <id>` prints a header line such as `deployment 42: deploy of blog (prod) succeeded` and then the lineage: trigger source and requester, the full commit as `repository@sha`, the image, the full digest and the previous digest (both can be pasted into `doorstep block` or `doorstep deploy`), the GitOps repository and commit, the Argo CD revision, the deployment it is a rollback or retry of, the deployment that superseded it, the migration flag and reason, the failure reason and the created, started and finished times. Sections follow for `GATES`, `EVENTS` (older events are noted as omitted when the API truncated them), `ROLLBACKS` and `RETRIES`; unset fields and empty sections are left out. A retry event without a message shows `retry <attempt>/<max_attempts>: <summary>`. Text that other systems supply, such as gate messages and failure reasons, has control characters replaced with spaces before it is printed. Event data and gate evidence are only in the JSON output: `-o json` prints the API response unchanged.
+
 ## `doorstep version`
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.
