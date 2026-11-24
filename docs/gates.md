@@ -109,7 +109,7 @@ err := gates.RegisterBuiltins(registry, gates.Builtins{
 	Applications: argoApplications,                        // adapter over the argocd package
 })
 err = registerPrometheusGate(registry, catalog, secretSource{lookupEnv: lookupEnv, readFile: config.ReadSecretFile})
-err = registerJobGate(registry, kubeClient)                // internal/cli/jobs.go, only when a gate has type job
+err = registerJobGate(registry, kubeClient, argoApplications) // internal/cli/jobs.go, only when a gate has type job
 err = gates.RegisterExternal(registry, st)                // *store.Store reads gate_reports
 plans, err := registry.Plans(catalog)
 ```
@@ -130,7 +130,7 @@ The ports are small interfaces in `internal/gates`:
 | `ExternalReports` | `GetGateReport(ctx, deploymentID, gate) (core.GateReport, error)` | `*store.Store` |
 | `JobReader` | `Job(ctx, namespace, name) (gates.Job, error)` | `cli.jobReader`, an adapter over `internal/jobs` (one `GET` of a `batch/v1` Job through `internal/kube`) |
 
-`gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
+`gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports, and the start of its latest operation (`status.operationState.startedAt`, zero when there is none); the phase and start time describe `status.operationState` as Argo CD reports it, whichever revision that operation synced; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
 
 The `backup` type needs an HTTP client, a secret reader and a signer, which `gates` may not take from `notify` itself. It is registered separately so `RegisterBuiltins` keeps its signature. `internal/cli` has the helper the composition root calls next to `RegisterBuiltins`:
 
@@ -143,7 +143,7 @@ err := registerBackupGate(registry, lookupEnv, userAgent(), time.Now)
 // })
 ```
 
-The `job` type is registered separately with `gates.RegisterJobGate(registry, gates.JobGateDeps{Jobs: reader})`, so `gates.Builtins` gains no required field. `gates.Job` carries the Job's UID, creation time, whether it is being deleted, its annotations, `suspend`, `backoffLimit`, the active, succeeded and failed pod counts, start and completion times, and whether its `Complete` or `Failed` condition is `True` (with the `Failed` condition's reason and message); the adapter returns an error wrapping `gates.ErrJobNotFound` when the Job does not exist. If `serve` does not register the type, a configuration using `type: job` fails at startup with `unknown gate type "job"`, never a silently passing gate.
+The `job` type is registered separately with `gates.RegisterJobGate(registry, gates.JobGateDeps{Jobs: reader, Applications: argoApplications})`, both required, so `gates.Builtins` gains no required field. `gates.Job` carries the Job's UID, creation time, whether it is being deleted, its annotations, `suspend`, `backoffLimit`, the active, succeeded and failed pod counts, start and completion times, and whether its `Complete` or `Failed` condition is `True` (with the `Failed` condition's reason and message); the adapter returns an error wrapping `gates.ErrJobNotFound` when the Job does not exist. If `serve` does not register the type, a configuration using `type: job` fails at startup with `unknown gate type "job"`, never a silently passing gate.
 
 ### checks
 
@@ -334,21 +334,34 @@ spec:
           args: ["--base-url", "http://web.web-prod.svc"]
 ```
 
-Argo CD runs PostSync hooks once every resource of the sync is synced and healthy, and keeps the sync operation `Running` until they finish. The engine's syncing step waits for the operation to end, so when after gates start, the Job present was created by the pin's sync or a later one. The verdict:
+Argo CD runs PostSync hooks once every resource of the sync is synced and healthy, and keeps the sync operation `Running` until they finish. The engine's syncing step waits for the operation to end. That alone does not prove the Job present ran for this deploy: a sync that fails in its Sync phase after applying the changes, or a selective sync (which runs no hooks), leaves the previous deploy's Job in place. So the gate reads the Application as well and only judges a Job created at or after the start of the Application's latest operation (`status.operationState.startedAt`); see [Freshness](#freshness). The verdict, in order:
 
 | Job | Verdict | Message |
 | --- | --- | --- |
+| Application not found | `pending` | `Argo CD Application <ns>/<name> not found` |
 | being deleted (`deletionTimestamp` set: Argo CD is replacing it) | `pending` | `Job <ns>/<name> is being replaced; waiting for Argo CD to recreate it` |
 | not an Argo CD PostSync hook | `failed` | `Job <ns>/<name> is not an Argo CD PostSync hook, so it does not rerun on each deploy` |
+| the Application reports no operation | `pending` | `Argo CD reports no sync operation for Application <ns>/<name>, so Job <ns>/<name> cannot be tied to this deploy` |
+| not found or older than the latest operation, which ended `Failed` or `Error` | `failed` | `the latest Argo CD sync of Application <ns>/<name> ended Failed before Job <ns>/<name> ran for it` |
+| not found | `pending` | `Job <ns>/<name> not found; waiting for Argo CD to create it` |
+| older than the latest operation, otherwise | `pending` | `Job <ns>/<name> was created at <time>, before the latest Argo CD sync started at <time>; waiting for Argo CD to rerun it` |
 | condition `Complete=True` | `passed` | `Job <ns>/<name> succeeded in <runtime>` (the runtime is left out when a timestamp is missing) |
 | condition `Failed=True` | `failed` | `Job <ns>/<name> failed: <reason>: <message>`, for example `BackoffLimitExceeded` or `DeadlineExceeded` |
 | suspended | `pending` | `Job <ns>/<name> is suspended` |
 | otherwise (created, running, retrying) | `pending` | `Job <ns>/<name> is running: 1 active, 2 failed of backoff limit 6` |
-| not found | `pending` | `Job <ns>/<name> not found; waiting for Argo CD to create it` |
 
-Only the Job's terminal conditions decide. Retries belong to the Job's `backoffLimit`, so failed pods within the limit keep the gate `pending`. A Job that is missing, suspended or still running when the gate's `timeout` (default `10m`) runs out fails the gate. Errors reading the Job other than not found, including `401` and `403` when the RBAC component is missing, are evaluation errors ([Errors](#errors)): visible, `pending`, and bounded by the timeout.
+Only the terminal conditions of a fresh Job decide. Retries belong to the Job's `backoffLimit`, so failed pods within the limit keep the gate `pending`. A Job that is missing, suspended or still running when the gate's `timeout` (default `10m`) runs out fails the gate. Errors reading the Application or the Job other than not found, including `401` and `403` when the RBAC component is missing, are evaluation errors ([Errors](#errors)): visible, `pending`, and bounded by the timeout.
 
-A Job counts as a PostSync hook when its `argocd.argoproj.io/hook` annotation lists `PostSync` (comma-separated, so `PostSync,SyncFail` qualifies), or, when that annotation is absent or empty, when its `helm.sh/hook` annotation lists `post-install` or `post-upgrade`, which Argo CD maps to PostSync. The check is what ties the verdict to this deployment: a plain Job is not rerun by a sync, so its old success would otherwise pass every later deploy. The Job's `created_at` and `uid` are recorded but not compared with the deployment, because Argo CD rightly does not resync an unchanged pin.
+A Job counts as a PostSync hook when its `argocd.argoproj.io/hook` annotation lists `PostSync` (comma-separated, so `PostSync,SyncFail` qualifies), or, when that annotation is absent or empty, when its `helm.sh/hook` annotation lists `post-install` or `post-upgrade`, which Argo CD maps to PostSync. A plain Job is not rerun by a sync, so it is rejected at once rather than left to the freshness check.
+
+#### Freshness
+
+A Job is fresh when its `creationTimestamp` is at or after the `startedAt` of the Application's latest operation, whichever revision that operation synced. Every full sync, automated or manual, runs PostSync hooks and, with `BeforeHookCreation`, recreates the Job after the operation started, so a fresh Job is the one the latest sync ran. A Job older than the latest operation was left over by an earlier sync: the latest one failed before its PostSync phase, was a selective sync, or is still running. When that operation ended `Failed` or `Error` the hook will not run for it and the gate fails; otherwise it stays `pending` until Argo CD reruns the hook or the timeout fails it.
+
+- An unchanged pin still works: Argo CD does not start a new operation for a commit that changes nothing in the Application, so the latest operation is the one whose hook produced the Job.
+- Both timestamps are set in the cluster (the API server's creation time and the Argo CD controller's operation start), never by doorstep, and they are compared at whole seconds, so a Job created in the second its sync started is fresh.
+- A failed PostSync hook ends the operation `Failed` too, but its Job is fresh, so the gate fails with the Job's own reason. A fresh success passes even when another hook failed the operation; the `health` gate judges the workload.
+- The deployment's own start time is not compared: it is a Postgres reading, and an unchanged pin has no newer Job.
 
 **Requirements on the Job.**
 
@@ -359,14 +372,14 @@ A Job counts as a PostSync hook when its `argocd.argoproj.io/hook` annotation li
 
 Hook Jobs do not count towards the Application's health, so a failed validation does not leave the Application `Degraded`, and the rollback that follows is judged on the workload alone.
 
-**Logs.** doorstep reads no Pods and no pod logs. `job.logs_url` is an optional link template whose rendered value is stored as `logs_url` in the evidence, which the API returns and the UI and status mirror can link to. Its placeholders are replaced with path-escaped values:
+**Logs.** doorstep reads no Pods and no pod logs. `job.logs_url` is an optional, recommended link template whose rendered value is stored as `logs_url` in the evidence, which the API returns with the gate result; there is no UI, notification or GitHub mirror rendering yet, and they are expected to show it as a link. Its placeholders are replaced with path-escaped values before the first `?` or `#` of the template and query-escaped values after it, so `&`, `=`, `+` and `@` in a value cannot change the query. When a placeholder has no value, such as `{uid}` while the Job does not exist, no link is recorded rather than a broken one:
 
 | Placeholder | Value |
 | --- | --- |
 | `{app}` | the doorstep app name |
 | `{namespace}` | `job.namespace` |
 | `{job}` | `job.name` |
-| `{uid}` | the Job's UID (empty when the Job was not found) |
+| `{uid}` | the Job's UID (no link while the Job is not found) |
 | `{deployment}` | the deployment ID |
 | `{argocd_namespace}` | `argocd.namespace` |
 | `{argocd_application}` | `argocd.application` |
@@ -377,7 +390,7 @@ Besides the Argo CD UI link above, Grafana with Loki works too: `https://grafana
 
 **RBAC.** The gate needs `get` on `batch/v1` Jobs, which the base install does not grant. Add the `components/job-gate` component, or bind the same ClusterRole per namespace ([install.md](install.md#validation-jobs)).
 
-Evidence: `{"job", "found", "uid", "created_at", "hook", "state", "active", "succeeded", "failed", "backoff_limit", "started_at", "completed_at", "reason", "message", "logs_url"}`, where `state` is one of `not_found`, `terminating`, `not_a_hook`, `succeeded`, `failed`, `suspended` and `active`, and the pod counts are `0` when the Job was not found. The gate keeps no state between polls.
+Evidence: `{"job", "found", "uid", "created_at", "hook", "state", "active", "succeeded", "failed", "backoff_limit", "started_at", "completed_at", "reason", "message", "application", "operation_phase", "operation_started_at", "logs_url"}`, where `state` is one of `no_application`, `terminating`, `not_a_hook`, `no_operation`, `sync_failed`, `not_found`, `stale`, `succeeded`, `failed`, `suspended` and `active`, and the pod counts are `0` when the Job was not found. The gate keeps no state between polls.
 
 ### external
 

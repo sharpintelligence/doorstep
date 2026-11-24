@@ -23,8 +23,6 @@ type Reader struct {
 }
 
 type Job struct {
-	Namespace    string
-	Name         string
 	UID          string
 	CreatedAt    time.Time
 	Deleting     bool
@@ -78,8 +76,6 @@ func jobPath(namespace, name string) string {
 
 type jobObject struct {
 	Metadata struct {
-		Name              string            `json:"name"`
-		Namespace         string            `json:"namespace"`
 		UID               string            `json:"uid"`
 		CreationTimestamp string            `json:"creationTimestamp"`
 		DeletionTimestamp string            `json:"deletionTimestamp"`
@@ -106,8 +102,6 @@ type jobObject struct {
 
 func (o jobObject) job() Job {
 	j := Job{
-		Namespace:    o.Metadata.Namespace,
-		Name:         o.Metadata.Name,
 		UID:          o.Metadata.UID,
 		CreatedAt:    parseTime(o.Metadata.CreationTimestamp),
 		Deleting:     o.Metadata.DeletionTimestamp != "",

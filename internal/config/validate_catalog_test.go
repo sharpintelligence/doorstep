@@ -1180,6 +1180,23 @@ func TestCatalogValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "job gate name of 63 characters",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job.Name = strings.Repeat("a", 63)
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+		},
+		{
+			name: "job gate name longer than a label value",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job.Name = strings.Repeat("a", 30) + "." + strings.Repeat("b", 33)
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{"gates.after[1].job.name: must be at most 63 characters, because Kubernetes puts it in the job-name label"},
+		},
+		{
 			name: "job gate timeout zero",
 			mutate: func(c *Catalog) {
 				g := jobGate()

@@ -16,9 +16,9 @@ Other constraints: the engine's syncing step finishes only once the Application 
 - **The validation Job is a user-declared Argo CD PostSync hook.** The app's GitOps manifests contain a Job with a fixed `metadata.name` and `argocd.argoproj.io/hook: PostSync` (or Helm's `post-install`/`post-upgrade`, which Argo CD maps to PostSync). Argo CD creates it after every sync once the synced resources are healthy, and with the default `BeforeHookCreation` delete policy replaces the previous run. doorstep writes no manifests and creates nothing.
 - **doorstep reads the `batch/v1` Job with one `GET` per evaluation** (`/apis/batch/v1/namespaces/{ns}/jobs/{name}`) through a new adapter, `internal/jobs`, which imports only `internal/kube`. `internal/kube` is unchanged and still has no write methods. `gates` owns the `JobReader` port and the `gates.Job` type; `cli` adapts one to the other, and `gates.RegisterJobGate` registers the type separately from `RegisterBuiltins`.
 - **A new gate type `job`**, after phase only, metrics kind `job`, default timeout `10m`, configured with `job: {namespace, name, logs_url}`.
-- **Verdict rules.** `Complete=True` passes. `Failed=True` fails with the condition's reason and message. A Job that is not a PostSync hook fails at once. Not found, being deleted, suspended or still active is `pending` with a message, until the evaluator's timeout fails it. Other read errors, including `401` and `403`, are evaluation errors.
-- **The hook annotation is the staleness defence.** Argo CD keeps the sync operation `Running` until PostSync hooks finish, and the syncing step waits for that, so when after gates start the Job present was created by the pin's sync or a later one. A plain Job is not rerun by a sync and is the only way to read a stale success, so it is rejected deterministically. `created_at` and `uid` are recorded but not compared.
-- **Logs are linked by a URL template** (`job.logs_url`, with `{app}`, `{namespace}`, `{job}`, `{uid}`, `{deployment}`, `{argocd_namespace}` and `{argocd_application}` replaced by path-escaped values), stored as evidence `logs_url`. doorstep reads no Pods and no pod logs.
+- **Verdict rules.** A Job that is not a PostSync hook fails at once. A Job that is not fresh (below) never passes. `Complete=True` on a fresh Job passes; `Failed=True` fails with the condition's reason and message. Not found, being deleted, stale, suspended or still active is `pending` with a message, until the evaluator's timeout fails it. Other read errors, including `401` and `403`, are evaluation errors.
+- **Staleness is checked against the Application's latest operation.** The hook annotation alone is not enough: the syncing step treats a `Failed` operation as done once the Application is synced and healthy, so a sync that fails in its Sync phase after applying the changes, or a selective sync (which runs no hooks), leaves the previous deploy's successful Job in place. The gate therefore also reads the Application through the existing `ApplicationReader` port and judges the Job only when its `creationTimestamp` is at or after `status.operationState.startedAt`, whichever revision that operation synced. A full sync always recreates a `BeforeHookCreation` hook after its operation starts, so a fresh Job is the latest sync's. An older Job is `pending` while the operation can still rerun it and `failed` once the operation ended `Failed` or `Error`; no operation at all is `pending`. Both timestamps come from the cluster (API server and Argo CD controller), and an unchanged pin keeps working because Argo CD starts no new operation for it. A plain Job is still rejected outright, since it never reruns.
+- **Logs are linked by a URL template** (`job.logs_url`, with `{app}`, `{namespace}`, `{job}`, `{uid}`, `{deployment}`, `{argocd_namespace}` and `{argocd_application}` replaced by path-escaped values, query-escaped after the first `?` or `#`, and no link while a placeholder has no value), stored as evidence `logs_url`. doorstep reads no Pods and no pod logs.
 - **Skipped on rollbacks** (`SkipOnRollback`), with no per-gate opt-in.
 - **RBAC is opt-in.** A kustomize component, `components/job-gate`, adds the ClusterRole `doorstep-jobs-reader` (`get` on `jobs` in `batch`) and its ClusterRoleBinding; the base is unchanged. A per-namespace RoleBinding is documented as the narrower alternative. ADR 0001's list of what doorstep reads is extended by "`get` on `batch/v1` Jobs, opt-in".
 
@@ -42,7 +42,15 @@ Needs no new RBAC, but yields only a hook phase and message, is overwritten by t
 
 ### A `creationTimestamp >= deployment.StartedAt` freshness guard
 
-Looks like a direct staleness check, but falsely fails, and so rolls back, a deploy whose pin is unchanged, where Argo CD rightly does not resync, and it compares the Postgres clock with the Kubernetes clock. The hook annotation check covers the real risk deterministically.
+Looks like a direct staleness check, but falsely fails, and so rolls back, a deploy whose pin is unchanged, where Argo CD rightly does not resync, and it compares the Postgres clock with the Kubernetes clock. Comparing with the Application's latest operation start (chosen) has neither problem.
+
+### The hook annotation as the only staleness defence
+
+The first version of this decision relied on Argo CD recreating the hook on every sync and on the syncing step waiting for the operation. Review showed it can pass on old results: a `Failed` operation counts as done once the Application is synced and healthy, and a failure in the Sync phase or a selective sync runs no PostSync hook, so the previous deploy's `Complete` Job is still there.
+
+### Matching the Job against `operationState.syncResult.resources`
+
+Requiring a hook entry for the Job in the latest operation's sync result would also catch the bypass, but the result is replaced by the next operation, needs the adapter to expose a resource list rather than one timestamp, and adds nothing the timestamp comparison misses.
 
 ### Reading Pods or pod logs for the link
 
@@ -53,7 +61,8 @@ A Kubernetes API pod log URL is not usable in a browser, reading `pods` or `pods
 - `argocd.sync_timeout` must cover the rollout plus the Job's runtime, because the syncing step waits for the running hook. The gate's own timeout covers only a missing, replaced or still running Job after the sync. doorstep cannot know a Job's runtime, so this is documented rather than validated.
 - Users must give the Job a fixed name, keep `BeforeHookCreation`, and avoid `HookSucceeded` and short `ttlSecondsAfterFinished`; violations show as a pending gate with an explanatory message and then a timeout, never a silent pass. Retries belong to `backoffLimit`, since the first terminal failure is sticky.
 - A failed PostSync hook now fails the deploy when the app has a `job` gate; without one it still does not, as before.
-- There is no logs link without `logs_url`.
+- There is no logs link without `logs_url`, so the docs recommend setting it. The link is evidence returned by the API; rendering it in the UI, notifications and the GitHub mirror belongs to those surfaces, none of which renders gate evidence yet.
 - Installs that do not use the gate grant nothing new. A cluster-wide `get` on Jobs can expose inline environment values in Job specs, so the namespaced RoleBinding is documented.
 - No new Go modules, no migration, no store change; `internal/kube` is unchanged.
+- The `job` gate reads the Argo CD Application once per evaluation in addition to the Job, through the port the `health` and `soak` gates already use, so it needs no new RBAC for it. The `gates.Application` port type gains the latest operation's start time.
 - If `serve` does not register the type, a configuration using `type: job` fails at startup with `unknown gate type`, never a silently passing gate.

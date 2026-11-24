@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,7 +25,7 @@ func TestGatesJob(t *testing.T) {
 
 	started := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
 	base := jobs.Job{
-		Namespace: "web", Name: "smoke", UID: "u-1", CreatedAt: started.Add(-time.Second),
+		UID: "u-1", CreatedAt: started.Add(-time.Second),
 		Annotations: map[string]string{"argocd.argoproj.io/hook": "PostSync"}, BackoffLimit: 3,
 		Active: 1, Succeeded: 2, Failed: 1, StartedAt: started, CompletedAt: started.Add(time.Minute),
 	}
@@ -131,6 +132,19 @@ func jobObject(annotations map[string]string, status map[string]any) map[string]
 	}
 }
 
+type syncedApplication struct {
+	startedAt time.Time
+}
+
+func (a syncedApplication) Application(context.Context, string, string) (gates.Application, error) {
+	return gates.Application{
+		SyncStatus: gates.SyncSynced, Health: gates.HealthHealthy,
+		OperationPhase: gates.OperationSucceeded, OperationStartedAt: a.startedAt,
+	}, nil
+}
+
+var syncStarted = syncedApplication{startedAt: time.Date(2026, 11, 24, 9, 59, 50, 0, time.UTC)}
+
 const jobGateServeConfig = `
 apps:
   - name: web
@@ -156,6 +170,7 @@ func TestRegisterJobGateEndToEnd(t *testing.T) {
 	tests := []struct {
 		name        string
 		api         jobsAPI
+		app         *syncedApplication
 		wantStatus  core.GateStatus
 		wantMessage string
 		wantErr     error
@@ -168,6 +183,15 @@ func TestRegisterJobGateEndToEnd(t *testing.T) {
 			})},
 			wantStatus:  core.GatePassed,
 			wantMessage: "Job web-prod/smoke-test succeeded in 30s",
+		},
+		{
+			name: "succeeded before the latest sync",
+			api: jobsAPI{body: jobObject(hook, map[string]any{
+				"succeeded": 1, "conditions": []map[string]any{{"type": "Complete", "status": "True"}},
+			})},
+			app:         &syncedApplication{startedAt: time.Date(2026, 11, 24, 10, 5, 0, 0, time.UTC)},
+			wantStatus:  core.GatePending,
+			wantMessage: "Job web-prod/smoke-test was created at 2026-11-24T10:00:00Z, before the latest Argo CD sync started at 2026-11-24T10:05:00Z",
 		},
 		{
 			name: "failed",
@@ -216,7 +240,11 @@ func TestRegisterJobGateEndToEnd(t *testing.T) {
 				t.Fatalf("Validate: %v", err)
 			}
 			registry := gates.NewRegistry()
-			if err := registerJobGate(registry, tt.api.serve(t)); err != nil {
+			app := syncStarted
+			if tt.app != nil {
+				app = *tt.app
+			}
+			if err := registerJobGate(registry, tt.api.serve(t), app); err != nil {
 				t.Fatalf("registerJobGate: %v", err)
 			}
 			plan, err := registry.Plan(catalog.Apps[0])
@@ -252,18 +280,21 @@ func TestRegisterJobGateEndToEnd(t *testing.T) {
 func TestRegisterJobGateErrors(t *testing.T) {
 	t.Parallel()
 
-	if err := registerJobGate(gates.NewRegistry(), nil); err == nil {
+	if err := registerJobGate(gates.NewRegistry(), nil, syncStarted); err == nil {
 		t.Error("registerJobGate accepted a nil client")
 	}
 	client := jobsAPI{}.serve(t)
-	if err := registerJobGate(nil, client); err == nil {
+	if err := registerJobGate(nil, client, syncStarted); err == nil {
 		t.Error("registerJobGate accepted a nil registry")
 	}
+	if err := registerJobGate(gates.NewRegistry(), client, nil); err == nil {
+		t.Error("registerJobGate accepted a nil application reader")
+	}
 	registry := gates.NewRegistry()
-	if err := registerJobGate(registry, client); err != nil {
+	if err := registerJobGate(registry, client, syncStarted); err != nil {
 		t.Fatalf("registerJobGate: %v", err)
 	}
-	if err := registerJobGate(registry, client); !errors.Is(err, gates.ErrDuplicateGateType) {
+	if err := registerJobGate(registry, client, syncStarted); !errors.Is(err, gates.ErrDuplicateGateType) {
 		t.Errorf("second registerJobGate = %v, want ErrDuplicateGateType", err)
 	}
 }

@@ -77,7 +77,7 @@ func registerJobGateFromDeps(r *gates.Registry, deps gateDeps) error {
 	if err != nil {
 		return err
 	}
-	return registerJobGate(r, client)
+	return registerJobGate(r, client, newArgoApplications(deps.watcher, deps.catalog))
 }
 
 func catalogUsesGate(catalog config.Catalog, gateType config.GateType) bool {

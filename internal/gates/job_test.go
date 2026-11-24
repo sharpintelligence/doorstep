@@ -48,7 +48,18 @@ var (
 	jobStarted   = time.Date(2026, 11, 24, 10, 0, 2, 0, time.UTC)
 	jobCompleted = jobStarted.Add(95 * time.Second)
 	postSync     = map[string]string{"argocd.argoproj.io/hook": "PostSync", "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation"}
+	syncStarted  = jobStarted.Add(-10 * time.Second)
+	syncedApp    = gates.Application{
+		SyncStatus: gates.SyncSynced, Health: gates.HealthHealthy, Revision: "abc123",
+		OperationPhase: gates.OperationSucceeded, OperationStartedAt: syncStarted,
+	}
 )
+
+func syncedApps() *fakeApplications {
+	apps := &fakeApplications{}
+	apps.set(syncedApp, nil)
+	return apps
+}
 
 func hookJob(mutate func(*gates.Job)) gates.Job {
 	j := gates.Job{
@@ -70,8 +81,13 @@ func jobConfig(logsURL string) config.Gate {
 
 func jobGate(t *testing.T, reader gates.JobReader, g config.Gate) gates.Gate {
 	t.Helper()
+	return jobGateWith(t, reader, syncedApps(), g)
+}
+
+func jobGateWith(t *testing.T, reader gates.JobReader, apps gates.ApplicationReader, g config.Gate) gates.Gate {
+	t.Helper()
 	r := gates.NewRegistry()
-	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: reader}); err != nil {
+	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: reader, Applications: apps}); err != nil {
 		t.Fatalf("RegisterJobGate: %v", err)
 	}
 	app := webApp()
@@ -103,6 +119,7 @@ func TestJobGateVerdicts(t *testing.T) {
 			wantMessage: "Job web-prod/smoke-test succeeded in 1m35s",
 			wantFields: map[string]any{
 				"job": "web-prod/smoke-test", "found": true, "hook": true, "state": "succeeded",
+				"application": "argocd/web-prod", "operation_phase": "Succeeded", "operation_started_at": "2026-11-24T09:59:52Z",
 				"uid": "0b6c7f4e-1a2b-4c3d-9e8f-001122334455", "created_at": "2026-11-24T10:00:00Z",
 				"started_at": "2026-11-24T10:00:02Z", "completed_at": "2026-11-24T10:01:37Z",
 				"succeeded": 1, "active": 0, "failed": 0, "backoff_limit": 6,
@@ -293,10 +310,22 @@ func TestJobGateLogsURL(t *testing.T) {
 			want:     "https://logs.example.com/a%2Fb%3Fc%23d",
 		},
 		{
-			name:     "not found renders with an empty uid",
+			name:     "query values are query escaped",
+			template: "https://logs.example.com/search?uid={uid}",
+			job:      hookJob(func(j *gates.Job) { j.UID = "a&b=c+d" }),
+			want:     "https://logs.example.com/search?uid=a%26b%3Dc%2Bd",
+		},
+		{
+			name:     "not found leaves out a link that needs the uid",
 			template: "https://logs.example.com/{job}/{uid}",
 			err:      gates.ErrJobNotFound,
-			want:     "https://logs.example.com/smoke-test/",
+			want:     "",
+		},
+		{
+			name:     "not found keeps a link without the uid",
+			template: "https://logs.example.com/{job}",
+			err:      gates.ErrJobNotFound,
+			want:     "https://logs.example.com/smoke-test",
 		},
 	}
 	for _, tt := range tests {
@@ -305,7 +334,11 @@ func TestJobGateLogsURL(t *testing.T) {
 			reader := &fakeJobs{}
 			reader.set(tt.job, tt.err)
 			ev := evaluateGate(t, jobGate(t, reader, jobConfig(tt.template)), deployment(core.KindDeploy), nil)
-			if got := evidenceMap(t, ev)["logs_url"]; got != tt.want {
+			got, ok := evidenceMap(t, ev)["logs_url"]
+			if tt.want == "" && ok {
+				t.Errorf("logs_url = %v, want none", got)
+			}
+			if tt.want != "" && got != tt.want {
 				t.Errorf("logs_url = %v, want %q", got, tt.want)
 			}
 		})
@@ -373,17 +406,20 @@ func TestJobGateIsStateless(t *testing.T) {
 func TestRegisterJobGate(t *testing.T) {
 	t.Parallel()
 
-	if err := gates.RegisterJobGate(nil, gates.JobGateDeps{Jobs: &fakeJobs{}}); err == nil || !strings.Contains(err.Error(), "no registry") {
+	if err := gates.RegisterJobGate(nil, gates.JobGateDeps{Jobs: &fakeJobs{}, Applications: &fakeApplications{}}); err == nil || !strings.Contains(err.Error(), "no registry") {
 		t.Errorf("RegisterJobGate(nil) = %v", err)
 	}
-	if err := gates.RegisterJobGate(gates.NewRegistry(), gates.JobGateDeps{}); err == nil || !strings.Contains(err.Error(), "needs a job reader") {
+	if err := gates.RegisterJobGate(gates.NewRegistry(), gates.JobGateDeps{Applications: &fakeApplications{}}); err == nil || !strings.Contains(err.Error(), "needs a job reader") {
 		t.Errorf("RegisterJobGate without a reader = %v", err)
 	}
+	if err := gates.RegisterJobGate(gates.NewRegistry(), gates.JobGateDeps{Jobs: &fakeJobs{}}); err == nil || !strings.Contains(err.Error(), "needs an Argo CD application reader") {
+		t.Errorf("RegisterJobGate without an application reader = %v", err)
+	}
 	r := gates.NewRegistry()
-	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}}); err != nil {
+	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}, Applications: &fakeApplications{}}); err != nil {
 		t.Fatalf("RegisterJobGate: %v", err)
 	}
-	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}}); !errors.Is(err, gates.ErrDuplicateGateType) {
+	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}, Applications: &fakeApplications{}}); !errors.Is(err, gates.ErrDuplicateGateType) {
 		t.Errorf("second RegisterJobGate = %v, want ErrDuplicateGateType", err)
 	}
 	if err := gates.RegisterBuiltins(r, newBuiltinFakes().deps()); err != nil {
@@ -395,7 +431,7 @@ func TestJobGateFactoryNeedsSettings(t *testing.T) {
 	t.Parallel()
 
 	r := gates.NewRegistry()
-	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}}); err != nil {
+	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: &fakeJobs{}, Applications: &fakeApplications{}}); err != nil {
 		t.Fatalf("RegisterJobGate: %v", err)
 	}
 	app := webApp()
@@ -430,7 +466,7 @@ func jobPlan(t *testing.T, reader gates.JobReader, f *builtinFakes) gates.Plan {
 	if err := gates.RegisterBuiltins(r, f.deps()); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
-	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: reader}); err != nil {
+	if err := gates.RegisterJobGate(r, gates.JobGateDeps{Jobs: reader, Applications: f.apps}); err != nil {
 		t.Fatalf("RegisterJobGate: %v", err)
 	}
 	plans, err := r.Plans(catalog)
@@ -458,7 +494,7 @@ func TestJobGateSkippedOnRollback(t *testing.T) {
 	t.Parallel()
 
 	f := newBuiltinFakes()
-	f.apps.set(healthyApp, nil)
+	f.apps.set(syncedApp, nil)
 	reader := &fakeJobs{}
 	reader.set(hookJob(func(j *gates.Job) { j.FailedCondition = true }), nil)
 	h := newHarness(t, jobPlan(t, reader, f), func(o *gates.Options) { o.Now = f.clock.Now })
@@ -479,7 +515,7 @@ func TestJobGateTimesOutWhilePending(t *testing.T) {
 	t.Parallel()
 
 	f := newBuiltinFakes()
-	f.apps.set(healthyApp, nil)
+	f.apps.set(syncedApp, nil)
 	reader := &fakeJobs{}
 	reader.set(hookJob(func(j *gates.Job) { j.Active = 1 }), nil)
 	h := newHarness(t, jobPlan(t, reader, f))
@@ -511,7 +547,7 @@ func TestJobGateEvaluationErrorStaysPending(t *testing.T) {
 	t.Parallel()
 
 	f := newBuiltinFakes()
-	f.apps.set(healthyApp, nil)
+	f.apps.set(syncedApp, nil)
 	reader := &fakeJobs{}
 	reader.set(gates.Job{}, errors.New("kube api: 403 Forbidden"))
 	h := newHarness(t, jobPlan(t, reader, f))
@@ -520,5 +556,186 @@ func TestJobGateEvaluationErrorStaysPending(t *testing.T) {
 	res := out.Results[1]
 	if res.Status != core.GatePending || !strings.Contains(res.Message, "evaluation error: read Job web-prod/smoke-test: kube api: 403 Forbidden") {
 		t.Errorf("job gate = %s %q, want pending with the evaluation error", res.Status, res.Message)
+	}
+}
+
+func TestJobGateFreshness(t *testing.T) {
+	t.Parallel()
+
+	operation := func(phase string, startedAt time.Time) gates.Application {
+		app := syncedApp
+		app.OperationPhase, app.OperationStartedAt = phase, startedAt
+		return app
+	}
+	afterJob := jobStarted.Add(time.Minute)
+	succeeded := hookJob(func(j *gates.Job) { j.Complete, j.Succeeded = true, 1 })
+	tests := []struct {
+		name        string
+		app         gates.Application
+		appErr      error
+		job         gates.Job
+		jobErr      error
+		wantStatus  core.GateStatus
+		wantState   string
+		wantMessage string
+	}{
+		{
+			name:        "created in the second the sync started passes",
+			app:         operation(gates.OperationSucceeded, succeeded.CreatedAt),
+			job:         succeeded,
+			wantStatus:  core.GatePassed,
+			wantState:   "succeeded",
+			wantMessage: "Job web-prod/smoke-test succeeded",
+		},
+		{
+			name:        "a success older than a selective sync is pending",
+			app:         operation(gates.OperationSucceeded, afterJob),
+			job:         succeeded,
+			wantStatus:  core.GatePending,
+			wantState:   "stale",
+			wantMessage: "Job web-prod/smoke-test was created at 2026-11-24T10:00:00Z, before the latest Argo CD sync started at 2026-11-24T10:01:02Z; waiting for Argo CD to rerun it",
+		},
+		{
+			name:        "a success older than a running sync is pending",
+			app:         operation(gates.OperationRunning, afterJob),
+			job:         succeeded,
+			wantStatus:  core.GatePending,
+			wantState:   "stale",
+			wantMessage: "before the latest Argo CD sync started",
+		},
+		{
+			name:        "a success older than a failed sync fails",
+			app:         operation(gates.OperationFailed, afterJob),
+			job:         succeeded,
+			wantStatus:  core.GateFailed,
+			wantState:   "sync_failed",
+			wantMessage: "the latest Argo CD sync of Application argocd/web-prod ended Failed before Job web-prod/smoke-test ran for it",
+		},
+		{
+			name:        "a success older than an errored sync fails",
+			app:         operation(gates.OperationError, afterJob),
+			job:         succeeded,
+			wantStatus:  core.GateFailed,
+			wantState:   "sync_failed",
+			wantMessage: "ended Error before Job web-prod/smoke-test ran",
+		},
+		{
+			name:        "a running Job older than a failed sync fails",
+			app:         operation(gates.OperationFailed, afterJob),
+			job:         hookJob(func(j *gates.Job) { j.Active = 1 }),
+			wantStatus:  core.GateFailed,
+			wantState:   "sync_failed",
+			wantMessage: "ended Failed",
+		},
+		{
+			name:        "a Job without a creation time is stale",
+			app:         syncedApp,
+			job:         hookJob(func(j *gates.Job) { j.Complete, j.CreatedAt = true, time.Time{} }),
+			wantStatus:  core.GatePending,
+			wantState:   "stale",
+			wantMessage: "before the latest Argo CD sync",
+		},
+		{
+			name:        "a missing Job after a failed sync fails",
+			app:         operation(gates.OperationFailed, syncStarted),
+			jobErr:      gates.ErrJobNotFound,
+			wantStatus:  core.GateFailed,
+			wantState:   "sync_failed",
+			wantMessage: "ended Failed before Job web-prod/smoke-test ran",
+		},
+		{
+			name:        "a missing Job during a running sync is pending",
+			app:         operation(gates.OperationRunning, syncStarted),
+			jobErr:      gates.ErrJobNotFound,
+			wantStatus:  core.GatePending,
+			wantState:   "not_found",
+			wantMessage: "Job web-prod/smoke-test not found; waiting for Argo CD to create it",
+		},
+		{
+			name:        "no sync operation is pending",
+			app:         operation("", time.Time{}),
+			job:         succeeded,
+			wantStatus:  core.GatePending,
+			wantState:   "no_operation",
+			wantMessage: "Argo CD reports no sync operation for Application argocd/web-prod, so Job web-prod/smoke-test cannot be tied to this deploy",
+		},
+		{
+			name:        "the hook that failed the sync fails with its reason",
+			app:         operation(gates.OperationFailed, syncStarted),
+			job:         hookJob(func(j *gates.Job) { j.FailedCondition, j.Reason = true, "BackoffLimitExceeded" }),
+			wantStatus:  core.GateFailed,
+			wantState:   "failed",
+			wantMessage: "Job web-prod/smoke-test failed: BackoffLimitExceeded",
+		},
+		{
+			name:        "a fresh success passes when another hook failed the sync",
+			app:         operation(gates.OperationFailed, syncStarted),
+			job:         succeeded,
+			wantStatus:  core.GatePassed,
+			wantState:   "succeeded",
+			wantMessage: "succeeded",
+		},
+		{
+			name:        "a stale Job that is not a hook still fails as not a hook",
+			app:         operation(gates.OperationSucceeded, afterJob),
+			job:         hookJob(func(j *gates.Job) { j.Annotations, j.Complete = nil, true }),
+			wantStatus:  core.GateFailed,
+			wantState:   "not_a_hook",
+			wantMessage: "is not an Argo CD PostSync hook",
+		},
+		{
+			name:        "a stale Job being replaced is pending",
+			app:         operation(gates.OperationRunning, afterJob),
+			job:         hookJob(func(j *gates.Job) { j.Deleting, j.Complete = true, true }),
+			wantStatus:  core.GatePending,
+			wantState:   "terminating",
+			wantMessage: "is being replaced",
+		},
+		{
+			name:        "a missing Application is pending",
+			appErr:      fmt.Errorf("get: %w", gates.ErrApplicationNotFound),
+			job:         succeeded,
+			wantStatus:  core.GatePending,
+			wantState:   "no_application",
+			wantMessage: "Argo CD Application argocd/web-prod not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &fakeJobs{}
+			reader.set(tt.job, tt.jobErr)
+			apps := &fakeApplications{}
+			apps.set(tt.app, tt.appErr)
+			ev := evaluateGate(t, jobGateWith(t, reader, apps, jobConfig("")), deployment(core.KindDeploy), nil)
+			if ev.Status != tt.wantStatus || !strings.Contains(ev.Message, tt.wantMessage) {
+				t.Fatalf("Evaluate = %s %q, want %s %q", ev.Status, ev.Message, tt.wantStatus, tt.wantMessage)
+			}
+			evidence := evidenceMap(t, ev)
+			if evidence["state"] != tt.wantState || evidence["application"] != "argocd/web-prod" {
+				t.Errorf("evidence = %s, want state %s for argocd/web-prod", ev.Evidence, tt.wantState)
+			}
+			if apps.namespace != "argocd" || apps.name != "web-prod" {
+				t.Errorf("read Application %s/%s, want argocd/web-prod", apps.namespace, apps.name)
+			}
+		})
+	}
+}
+
+func TestJobGateApplicationReadError(t *testing.T) {
+	t.Parallel()
+
+	reader := &fakeJobs{}
+	reader.set(hookJob(func(j *gates.Job) { j.Complete = true }), nil)
+	apps := &fakeApplications{}
+	forbidden := errors.New("kube api: 403 Forbidden")
+	apps.set(gates.Application{}, forbidden)
+	g := jobGateWith(t, reader, apps, jobConfig(""))
+	_, err := g.Evaluate(t.Context(), gates.Request{Deployment: deployment(core.KindDeploy), Phase: core.GatePhaseAfter})
+	if !errors.Is(err, forbidden) || !strings.Contains(err.Error(), "read Argo CD Application argocd/web-prod") {
+		t.Errorf("Evaluate error = %v, want the Application read error", err)
+	}
+	if n := reader.callCount(); n != 0 {
+		t.Errorf("read the Job %d times after the Application read failed", n)
 	}
 }

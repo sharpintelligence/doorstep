@@ -53,11 +53,12 @@ type ApplicationReader interface {
 }
 
 type Application struct {
-	SyncStatus     string
-	Revision       string
-	Health         string
-	HealthMessage  string
-	OperationPhase string
+	SyncStatus         string
+	Revision           string
+	Health             string
+	HealthMessage      string
+	OperationPhase     string
+	OperationStartedAt time.Time
 }
 
 type JobReader interface {

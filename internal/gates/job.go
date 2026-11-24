@@ -17,17 +17,22 @@ const (
 	argoCDHookAnnotation = "argocd.argoproj.io/hook"
 	helmHookAnnotation   = "helm.sh/hook"
 
-	jobStateNotFound    = "not_found"
-	jobStateTerminating = "terminating"
-	jobStateNotAHook    = "not_a_hook"
-	jobStateSucceeded   = "succeeded"
-	jobStateFailed      = "failed"
-	jobStateSuspended   = "suspended"
-	jobStateActive      = "active"
+	jobStateNoApplication = "no_application"
+	jobStateNotFound      = "not_found"
+	jobStateTerminating   = "terminating"
+	jobStateNotAHook      = "not_a_hook"
+	jobStateNoOperation   = "no_operation"
+	jobStateStale         = "stale"
+	jobStateSyncFailed    = "sync_failed"
+	jobStateSucceeded     = "succeeded"
+	jobStateFailed        = "failed"
+	jobStateSuspended     = "suspended"
+	jobStateActive        = "active"
 )
 
 type JobGateDeps struct {
-	Jobs JobReader
+	Jobs         JobReader
+	Applications ApplicationReader
 }
 
 func RegisterJobGate(r *Registry, deps JobGateDeps) error {
@@ -36,6 +41,8 @@ func RegisterJobGate(r *Registry, deps JobGateDeps) error {
 		return errors.New("register job gate: no registry")
 	case deps.Jobs == nil:
 		return errors.New("register job gate: the job gate needs a job reader")
+	case deps.Applications == nil:
+		return errors.New("register job gate: the job gate needs an Argo CD application reader")
 	}
 	if err := r.Register(config.GateJob, Definition{Kind: metrics.GateKindJob, SkipOnRollback: true, New: deps.newJob}); err != nil {
 		return fmt.Errorf("register job gate: %w", err)
@@ -53,28 +60,38 @@ func (j jobRef) String() string {
 }
 
 type jobGate struct {
-	ref         jobRef
-	application applicationRef
-	logs        config.JobGate
-	reader      JobReader
+	ref          jobRef
+	application  applicationRef
+	logs         config.JobGate
+	reader       JobReader
+	applications ApplicationReader
 }
 
 type jobEvidence struct {
-	Job          string `json:"job"`
-	Found        bool   `json:"found"`
-	UID          string `json:"uid,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	Hook         bool   `json:"hook"`
-	State        string `json:"state"`
-	Active       int32  `json:"active"`
-	Succeeded    int32  `json:"succeeded"`
-	Failed       int32  `json:"failed"`
-	BackoffLimit int32  `json:"backoff_limit"`
-	StartedAt    string `json:"started_at,omitempty"`
-	CompletedAt  string `json:"completed_at,omitempty"`
-	Reason       string `json:"reason,omitempty"`
-	Message      string `json:"message,omitempty"`
-	LogsURL      string `json:"logs_url,omitempty"`
+	Job                string `json:"job"`
+	Found              bool   `json:"found"`
+	UID                string `json:"uid,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
+	Hook               bool   `json:"hook"`
+	State              string `json:"state"`
+	Active             int32  `json:"active"`
+	Succeeded          int32  `json:"succeeded"`
+	Failed             int32  `json:"failed"`
+	BackoffLimit       int32  `json:"backoff_limit"`
+	StartedAt          string `json:"started_at,omitempty"`
+	CompletedAt        string `json:"completed_at,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	Application        string `json:"application"`
+	OperationPhase     string `json:"operation_phase,omitempty"`
+	OperationStartedAt string `json:"operation_started_at,omitempty"`
+	LogsURL            string `json:"logs_url,omitempty"`
+}
+
+type jobObservation struct {
+	job   Job
+	found bool
+	app   Application
 }
 
 func (d JobGateDeps) newJob(app config.App, gate config.Gate) (Gate, error) {
@@ -82,14 +99,23 @@ func (d JobGateDeps) newJob(app config.App, gate config.Gate) (Gate, error) {
 		return nil, errors.New("job gate has no job settings")
 	}
 	return jobGate{
-		ref:         jobRef{namespace: gate.Job.Namespace, name: gate.Job.Name},
-		application: applicationOf(app),
-		logs:        *gate.Job,
-		reader:      d.Jobs,
+		ref:          jobRef{namespace: gate.Job.Namespace, name: gate.Job.Name},
+		application:  applicationOf(app),
+		logs:         *gate.Job,
+		reader:       d.Jobs,
+		applications: d.Applications,
 	}, nil
 }
 
 func (g jobGate) Evaluate(ctx context.Context, req Request) (Evaluation, error) {
+	app, err := g.applications.Application(ctx, g.application.namespace, g.application.name)
+	if errors.Is(err, ErrApplicationNotFound) {
+		ev := jobEvidence{Job: g.ref.String(), Application: g.application.String(), State: jobStateNoApplication}
+		return g.evaluation(req, ev, core.GatePending, fmt.Sprintf("Argo CD Application %s not found", g.application))
+	}
+	if err != nil {
+		return Evaluation{}, fmt.Errorf("read Argo CD Application %s: %w", g.application, err)
+	}
 	job, err := g.reader.Job(ctx, g.ref.namespace, g.ref.name)
 	found := true
 	switch {
@@ -98,14 +124,15 @@ func (g jobGate) Evaluate(ctx context.Context, req Request) (Evaluation, error) 
 	case err != nil:
 		return Evaluation{}, fmt.Errorf("read Job %s: %w", g.ref, err)
 	}
-	ev := jobEvidence{Job: g.ref.String(), Found: found, State: jobStateNotFound}
-	status := core.GatePending
-	message := fmt.Sprintf("Job %s not found; waiting for Argo CD to create it", g.ref)
-	if found {
-		ev = g.evidence(job)
-		status, ev.State, message = judgeJob(g.ref, job)
-	}
-	ev.LogsURL = g.logsURL(req.Deployment, job.UID)
+	o := jobObservation{job: job, found: found, app: app}
+	ev := g.evidence(o)
+	status, state, message := g.judge(o)
+	ev.State = state
+	return g.evaluation(req, ev, status, message)
+}
+
+func (g jobGate) evaluation(req Request, ev jobEvidence, status core.GateStatus, message string) (Evaluation, error) {
+	ev.LogsURL = g.logsURL(req.Deployment, ev.UID)
 	evidence, err := marshalEvidence(ev)
 	if err != nil {
 		return Evaluation{}, err
@@ -113,12 +140,15 @@ func (g jobGate) Evaluate(ctx context.Context, req Request) (Evaluation, error) 
 	return Evaluation{Status: status, Message: message, Evidence: evidence}, nil
 }
 
-func judgeJob(ref jobRef, job Job) (core.GateStatus, string, string) {
+func (g jobGate) judge(o jobObservation) (core.GateStatus, string, string) {
+	ref, job := g.ref, o.job
 	switch {
-	case job.Deleting:
+	case o.found && job.Deleting:
 		return core.GatePending, jobStateTerminating, fmt.Sprintf("Job %s is being replaced; waiting for Argo CD to recreate it", ref)
-	case !isPostSyncHook(job.Annotations):
+	case o.found && !isPostSyncHook(job.Annotations):
 		return core.GateFailed, jobStateNotAHook, fmt.Sprintf("Job %s is not an Argo CD PostSync hook, so it does not rerun on each deploy", ref)
+	case !o.found || o.app.OperationStartedAt.IsZero() || job.CreatedAt.Before(o.app.OperationStartedAt):
+		return g.judgeMissingRun(o)
 	case job.Complete:
 		message := fmt.Sprintf("Job %s succeeded", ref)
 		if d, ok := jobRuntime(job); ok {
@@ -131,6 +161,20 @@ func judgeJob(ref jobRef, job Job) (core.GateStatus, string, string) {
 		return core.GatePending, jobStateSuspended, fmt.Sprintf("Job %s is suspended", ref)
 	default:
 		return core.GatePending, jobStateActive, fmt.Sprintf("Job %s is running: %d active, %d failed of backoff limit %d", ref, job.Active, job.Failed, job.BackoffLimit)
+	}
+}
+
+func (g jobGate) judgeMissingRun(o jobObservation) (core.GateStatus, string, string) {
+	switch phase := o.app.OperationPhase; {
+	case o.app.OperationStartedAt.IsZero():
+		return core.GatePending, jobStateNoOperation, fmt.Sprintf("Argo CD reports no sync operation for Application %s, so Job %s cannot be tied to this deploy", g.application, g.ref)
+	case phase == OperationFailed || phase == OperationError:
+		return core.GateFailed, jobStateSyncFailed, fmt.Sprintf("the latest Argo CD sync of Application %s ended %s before Job %s ran for it", g.application, phase, g.ref)
+	case !o.found:
+		return core.GatePending, jobStateNotFound, fmt.Sprintf("Job %s not found; waiting for Argo CD to create it", g.ref)
+	default:
+		return core.GatePending, jobStateStale, fmt.Sprintf("Job %s was created at %s, before the latest Argo CD sync started at %s; waiting for Argo CD to rerun it",
+			g.ref, timestamp(o.job.CreatedAt), timestamp(o.app.OperationStartedAt))
 	}
 }
 
@@ -159,22 +203,27 @@ func hasToken(list string, want ...string) bool {
 	return false
 }
 
-func (g jobGate) evidence(job Job) jobEvidence {
-	return jobEvidence{
-		Job:          g.ref.String(),
-		Found:        true,
-		UID:          clean(job.UID),
-		CreatedAt:    optionalTimestamp(job.CreatedAt),
-		Hook:         isPostSyncHook(job.Annotations),
-		Active:       job.Active,
-		Succeeded:    job.Succeeded,
-		Failed:       job.Failed,
-		BackoffLimit: job.BackoffLimit,
-		StartedAt:    optionalTimestamp(job.StartedAt),
-		CompletedAt:  optionalTimestamp(job.CompletedAt),
-		Reason:       clean(job.Reason),
-		Message:      clean(job.Message),
+func (g jobGate) evidence(o jobObservation) jobEvidence {
+	ev := jobEvidence{
+		Job:                g.ref.String(),
+		Found:              o.found,
+		Application:        g.application.String(),
+		OperationPhase:     clean(o.app.OperationPhase),
+		OperationStartedAt: optionalTimestamp(o.app.OperationStartedAt),
 	}
+	if !o.found {
+		return ev
+	}
+	job := o.job
+	ev.UID = clean(job.UID)
+	ev.CreatedAt = optionalTimestamp(job.CreatedAt)
+	ev.Hook = isPostSyncHook(job.Annotations)
+	ev.Active, ev.Succeeded, ev.Failed, ev.BackoffLimit = job.Active, job.Succeeded, job.Failed, job.BackoffLimit
+	ev.StartedAt = optionalTimestamp(job.StartedAt)
+	ev.CompletedAt = optionalTimestamp(job.CompletedAt)
+	ev.Reason = clean(job.Reason)
+	ev.Message = clean(job.Message)
+	return ev
 }
 
 func (g jobGate) logsURL(d core.Deployment, uid string) string {

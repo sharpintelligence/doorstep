@@ -57,7 +57,7 @@ func gatesJob(job jobs.Job) gates.Job {
 	return out
 }
 
-func registerJobGate(registry *gates.Registry, client *kube.Client) error {
+func registerJobGate(registry *gates.Registry, client *kube.Client, applications gates.ApplicationReader) error {
 	if client == nil {
 		return errors.New("register job gate: no kubernetes client")
 	}
@@ -65,5 +65,5 @@ func registerJobGate(registry *gates.Registry, client *kube.Client) error {
 	if err != nil {
 		return fmt.Errorf("register job gate: %w", err)
 	}
-	return gates.RegisterJobGate(registry, gates.JobGateDeps{Jobs: jobReader{reader: reader}})
+	return gates.RegisterJobGate(registry, gates.JobGateDeps{Jobs: jobReader{reader: reader}, Applications: applications})
 }

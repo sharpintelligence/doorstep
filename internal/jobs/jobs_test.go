@@ -96,7 +96,7 @@ func TestReaderJob(t *testing.T) {
 				}
 			}`,
 			want: jobs.Job{
-				Namespace: "web", Name: "smoke", UID: "u-1", CreatedAt: created,
+				UID: "u-1", CreatedAt: created,
 				Annotations:  map[string]string{"argocd.argoproj.io/hook": "PostSync", "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation"},
 				BackoffLimit: 2, Succeeded: 1, StartedAt: started, CompletedAt: completed,
 				Conditions: []jobs.Condition{
@@ -114,39 +114,39 @@ func TestReaderJob(t *testing.T) {
 					"conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded", "message": "Job has reached the specified backoff limit"}]}
 			}`,
 			want: jobs.Job{
-				Namespace: "web", Name: "smoke", UID: "u-2", BackoffLimit: 1, Failed: 2, StartedAt: started,
+				UID: "u-2", BackoffLimit: 1, Failed: 2, StartedAt: started,
 				Conditions: []jobs.Condition{{Type: "Failed", Status: "True", Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"}},
 			},
 		},
 		{
 			name: "active",
 			body: `{"metadata": {"name": "smoke", "namespace": "web"}, "spec": {"backoffLimit": 6}, "status": {"active": 1, "failed": 2}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", BackoffLimit: 6, Active: 1, Failed: 2},
+			want: jobs.Job{BackoffLimit: 6, Active: 1, Failed: 2},
 		},
 		{
 			name: "suspended",
 			body: `{"metadata": {"name": "smoke", "namespace": "web"}, "spec": {"suspend": true, "backoffLimit": 0}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", Suspended: true},
+			want: jobs.Job{Suspended: true},
 		},
 		{
 			name: "deleting",
 			body: `{"metadata": {"name": "smoke", "namespace": "web", "deletionTimestamp": "2026-11-24T10:05:00Z"}, "spec": {}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", Deleting: true, BackoffLimit: jobs.DefaultBackoffLimit},
+			want: jobs.Job{Deleting: true, BackoffLimit: jobs.DefaultBackoffLimit},
 		},
 		{
 			name: "unset backoff limit defaults to six",
 			body: `{"metadata": {"name": "smoke", "namespace": "web"}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", BackoffLimit: 6},
+			want: jobs.Job{BackoffLimit: 6},
 		},
 		{
 			name: "unparsable timestamps are left zero",
 			body: `{"metadata": {"name": "smoke", "namespace": "web", "creationTimestamp": "yesterday"}, "status": {"startTime": "soon", "completionTime": "2026-13-45T99:00:00Z"}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", BackoffLimit: 6},
+			want: jobs.Job{BackoffLimit: 6},
 		},
 		{
 			name: "offset timestamps are normalised to UTC",
 			body: `{"metadata": {"name": "smoke", "namespace": "web", "creationTimestamp": "2026-11-24T11:00:00+01:00"}}`,
-			want: jobs.Job{Namespace: "web", Name: "smoke", BackoffLimit: 6, CreatedAt: created},
+			want: jobs.Job{BackoffLimit: 6, CreatedAt: created},
 		},
 	}
 	for _, tt := range tests {

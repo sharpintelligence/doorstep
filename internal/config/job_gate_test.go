@@ -97,10 +97,34 @@ func TestJobGateRenderLogsURL(t *testing.T) {
 			want:     "https://logs.example.com/" + url.PathEscape("a/../b?c=d#e f"),
 		},
 		{
-			name:     "missing value renders empty",
+			name:     "values in the query are query escaped",
+			template: "https://logs.example.com/{app}?q={app}&uid={uid}",
+			values:   map[string]string{"app": "a&b=c+d@e f", "uid": "u/1"},
+			want:     "https://logs.example.com/" + url.PathEscape("a&b=c+d@e f") + "?q=a%26b%3Dc%2Bd%40e+f&uid=u%2F1",
+		},
+		{
+			name:     "values in the fragment are query escaped",
+			template: "https://logs.example.com/{job}#{uid}",
+			values:   map[string]string{"job": "smoke", "uid": "a&b"},
+			want:     "https://logs.example.com/smoke#a%26b",
+		},
+		{
+			name:     "an encoded question mark does not start the query",
+			template: "https://logs.example.com/x%3F/{app}",
+			values:   map[string]string{"app": "a+b"},
+			want:     "https://logs.example.com/x%3F/a+b",
+		},
+		{
+			name:     "missing value renders nothing",
 			template: "https://logs.example.com/{job}/{uid}",
 			values:   map[string]string{"job": "smoke"},
-			want:     "https://logs.example.com/smoke/",
+			want:     "",
+		},
+		{
+			name:     "empty value renders nothing",
+			template: "https://logs.example.com/{job}?uid={uid}",
+			values:   map[string]string{"job": "smoke", "uid": ""},
+			want:     "",
 		},
 		{
 			name:     "invalid template renders nothing",
