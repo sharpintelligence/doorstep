@@ -21,7 +21,7 @@ Migrations are plain SQL files embedded in the binary (`internal/store/migration
 - **Transactions.** Each file runs in its own transaction, so a failed migration leaves the schema at the previous version.
 - **When they run.** `doorstep serve` applies pending migrations after connecting and before it opens its listener, so an instance is never ready on an old schema. `doorstep migrate` applies them on demand (for example as a Kubernetes Job before a rollout) and `doorstep migrate status` lists applied and pending versions.
 - **Concurrent starts.** Migration runs hold a Postgres session advisory lock, so several replicas starting together apply each migration exactly once; the others wait (retrying every second, for up to two minutes) and then find nothing pending.
-- **Newer schema.** After migrating, doorstep compares the database version with the newest migration it embeds. If the database is newer (an older binary after a downgrade), startup fails with `database schema is newer than this doorstep binary` instead of running against a schema it does not understand.
+- **Newer schema.** Before applying anything, `doorstep serve` and `doorstep migrate` compare the database version with the newest migration the binary embeds. If the database is newer (an older binary after a downgrade), they fail with `database schema is newer than this doorstep binary` without touching the schema, instead of running against a schema they do not understand. `doorstep migrate status` reports the same error.
 
 ### Adding a migration
 
@@ -36,13 +36,17 @@ Each feature that needs storage adds its own numbered file in `internal/store/mi
 
 All ids are `bigint GENERATED ALWAYS AS IDENTITY`. Timestamps are `timestamptz`.
 
+- **Denormalised `app_id`.** `queue_entries`, `deployment_events` and `locks` carry the target's `app_id` next to `deployment_id`. `deployments` has `UNIQUE (id, app_id)`, and each of those tables references `deployments (id, app_id)` with a composite foreign key, so the copy can never disagree with the deployment it belongs to. Moving a deployment to another app is rejected while anything references it.
+- **Foreign key indexes.** Every foreign key has an index that leads with its first column (partial, `WHERE col IS NOT NULL`, for the nullable lineage columns and `locks.deployment_id`), so cascades and `SET NULL` actions never scan a whole table. A schema test enforces this for every foreign key, including those added by later migrations.
+- **`updated_at`.** A `BEFORE UPDATE` trigger (`set_updated_at()`) sets `updated_at` to `now()` on every update of `deployments` and `gate_results`. Repository code never sets it. Tables added later that have an `updated_at` column attach the same trigger.
+
 ### `apps`
 
 One row per deploy target, `core.Target{App, Environment}`. It holds identity only: `name`, `environment`, `created_at`, with `UNIQUE (name, environment)`. Repository, GitOps path and strategy live in the configuration file. Rows are never deleted, so history survives an app being removed from configuration.
 
 ### `deployments`
 
-One row per deployment request, keyed by a store-assigned `id` (`core.DeploymentID`).
+One row per deployment request, keyed by a store-assigned `id` (`core.DeploymentID`). A rollback is its own row of kind `rollback` that names the deployment it reverts in `rollback_of_id` ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)).
 
 | Column | Notes |
 | --- | --- |
@@ -57,19 +61,19 @@ One row per deployment request, keyed by a store-assigned `id` (`core.Deployment
 | `previous_digest` | digest observed in git before pinning; a recorded observation only, git stays authoritative |
 | `pin_commit_sha` | GitOps commit that pinned the digest |
 | `parent_id`, `rollback_of_id`, `superseded_by_id` | lineage: retry of, rollback of, superseded by; `ON DELETE SET NULL` |
-| `failure_reason` | human-readable reason for `failed` or `rollback_failed` |
-| `created_at`, `updated_at`, `started_at`, `finished_at` | lifecycle timestamps |
+| `failure_reason` | human-readable reason for `failed` |
+| `created_at`, `updated_at`, `started_at`, `finished_at` | lifecycle timestamps; `updated_at` is maintained by a trigger |
 
-The partial unique index `deployments_one_active_per_app` on `app_id`, restricted to the active states (`resolving`, `pinning`, `syncing`, `verifying`, `rolling_back`), enforces at most one active deployment per target regardless of what the queue does.
+The partial unique index `deployments_one_active_per_app` on `app_id`, restricted to the active states (`resolving`, `pinning`, `syncing`, `verifying`), enforces at most one active deployment per target regardless of what the queue does.
 
 ### `queue_entries`
 
-The claim table. A row exists from enqueue until the deployment needs no more work; the queue code removes it then.
+The claim table. A row exists from enqueue until the deployment needs no more work. Every transition to a terminal state must delete the deployment's entry in the same transaction; the claim also ignores entries whose deployment is terminal, so a leftover entry can never be handed out again.
 
 | Column | Notes |
 | --- | --- |
 | `deployment_id` | primary key, `ON DELETE CASCADE` |
-| `app_id` | the target, denormalised for the head-of-line check |
+| `app_id` | the target, denormalised for the head-of-line check and kept equal to the deployment's by the composite foreign key |
 | `priority` | higher runs first; rollbacks are enqueued with a higher priority |
 | `enqueued_at`, `available_at` | `available_at` in the future delays the entry (backoff) |
 | `lease_owner`, `lease_expires_at` | both null, or both set |
@@ -95,16 +99,17 @@ The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transi
 
 `Store.Claim(ctx, workerID, lease)` picks the next deployment and leases it to the worker in one statement (a CTE with `FOR NO KEY UPDATE ... SKIP LOCKED` feeding an `UPDATE ... RETURNING`), then loads the deployment in the same transaction. An entry is eligible when:
 
+- its deployment is `queued` or in an active state (`core.ClaimableStates`);
 - `available_at <= now()`;
 - it has no live lease (`lease_expires_at` is null or in the past);
-- it is the head of its target: no other entry for the same app has a higher priority, or the same priority and a lower id;
-- no other entry for the same app holds a live lease.
+- it is the head of its target: no other claimable entry for the same app has a higher priority, or the same priority and a lower id;
+- no other entry for the same app holds a live lease, even one whose deployment has just become terminal, because its worker may still be finishing a step.
 
 Eligible entries are ordered by `priority DESC, deployment_id`. Claiming sets `lease_owner`, sets `lease_expires_at = now() + lease` and increments `attempts`; the result carries the attempt number and lease expiry.
 
 The head-of-line rule serialises work per target without a second mechanism. The live-lease rule stops a high-priority rollback entry from being claimed while the failing deployment is still leased. An expired lease makes its entry claimable again, so a crashed replica never wedges a target.
 
-`SKIP LOCKED` also locks the target's `apps` row, so concurrent claimers skip a target another worker is claiming. Because a `READ COMMITTED` statement works from a snapshot taken when it starts, a claim can still race with one that committed a moment earlier; after claiming, a second statement (with a fresh snapshot, while the `apps` row is locked) checks that no other entry for the target holds a live lease, and if one does, the claim is rolled back and retried. The partial unique index on active deployments remains the final guard.
+`SKIP LOCKED` also locks the target's `apps` row, so concurrent claimers skip a target another worker is claiming. Because a `READ COMMITTED` statement works from a snapshot taken when it starts, a claim can still race with one that committed a moment earlier; after claiming, a second statement (with a fresh snapshot, while the `apps` row is locked) checks that no other entry for the target holds a live lease, and if one does, the claim is rolled back and retried with that target excluded, so a contended target never makes `Claim` report an empty queue while other targets have work. Each retry excludes one more target, so the loop ends. The partial unique index on active deployments remains the final guard.
 
 Freeze locks do not yet affect claiming; the locks work adds that as another condition.
 

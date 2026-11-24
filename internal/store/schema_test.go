@@ -144,6 +144,10 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{name: "lease expiry without owner", sql: "UPDATE queue_entries SET lease_expires_at = now() WHERE deployment_id = $1", constraint: "queue_entries_lease_check"},
 		{name: "blank lease owner", sql: "UPDATE queue_entries SET lease_owner = '', lease_expires_at = now() WHERE deployment_id = $1", constraint: "queue_entries_lease_check"},
 		{name: "second queue entry", sql: "INSERT INTO queue_entries (deployment_id, app_id) VALUES ($1, $2)", constraint: "queue_entries_pkey"},
+		{name: "queue entry for another app", sql: withOtherApp + "UPDATE queue_entries q SET app_id = other.id FROM other WHERE q.deployment_id = $1", constraint: "queue_entries_deployment_fkey"},
+		{name: "event for another app", sql: withOtherApp + "INSERT INTO deployment_events (deployment_id, app_id, type) SELECT $1, id, 'note' FROM other", constraint: "deployment_events_deployment_fkey"},
+		{name: "lock for another app", sql: withOtherApp + "INSERT INTO locks (app_id, kind, owner, deployment_id) SELECT id, 'deployment', 'w1', $1 FROM other", constraint: "locks_deployment_fkey"},
+		{name: "deployment moved to another app", sql: withOtherApp + "UPDATE deployments d SET app_id = other.id FROM other WHERE d.id = $1", constraint: "queue_entries_deployment_fkey"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,6 +167,71 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 			}
 			err = store.ExecSQL(t.Context(), st, tt.sql, args...)
 			assertConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
+const withOtherApp = "WITH other AS (INSERT INTO apps (name, environment) VALUES ('other', 'prod') RETURNING id) "
+
+func TestSchemaIndexesEveryForeignKey(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	rows, err := store.QueryRowsSQL(t.Context(), st, `
+		SELECT c.conrelid::regclass::text || '.' || c.conname
+		FROM pg_constraint c
+		WHERE c.contype = 'f'
+		  AND c.connamespace = current_schema()::regnamespace
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_index i
+		      WHERE i.indrelid = c.conrelid AND i.indkey[0] = c.conkey[1]
+		  )
+		ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("query foreign keys: %v", err)
+	}
+	for _, fk := range rows {
+		t.Errorf("foreign key %s has no index leading with its first column", fk)
+	}
+}
+
+func TestSchemaMaintainsUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		setup  string
+		update string
+		read   string
+	}{
+		{
+			name:   "deployments",
+			update: "UPDATE deployments SET failure_reason = 'boom', updated_at = '2000-01-01' WHERE id = $1",
+			read:   "SELECT updated_at > created_at AND updated_at > now() - interval '1 minute' FROM deployments WHERE id = $1",
+		},
+		{
+			name:   "gate_results",
+			setup:  "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'pending')",
+			update: "UPDATE gate_results SET status = 'passed', updated_at = '2000-01-01' WHERE deployment_id = $1",
+			read:   "SELECT updated_at > started_at AND updated_at > now() - interval '1 minute' FROM gate_results WHERE deployment_id = $1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			d := mustCreate(t, st, newDeployment("web"), 0)
+			if tt.setup != "" {
+				mustExec(t, st, tt.setup, d.ID)
+			}
+			mustExec(t, st, tt.update, d.ID)
+			var refreshed bool
+			if err := store.QueryRowSQL(t.Context(), st, tt.read, d.ID).Scan(&refreshed); err != nil {
+				t.Fatalf("read updated_at: %v", err)
+			}
+			if !refreshed {
+				t.Errorf("%s.updated_at was not set to the update time", tt.name)
+			}
 		})
 	}
 }

@@ -126,11 +126,47 @@ func TestMigrateConcurrentWithSessionLock(t *testing.T) {
 func TestMigrateRefusesNewerDatabase(t *testing.T) {
 	t.Parallel()
 
-	st := storetest.Open(t)
-	mustExec(t, st, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (99999, true)")
-
-	_, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock())
-	if !errors.Is(err, store.ErrDatabaseNewer) {
-		t.Fatalf("Migrate error = %v, want ErrDatabaseNewer", err)
+	tests := []struct {
+		name     string
+		migrated bool
+	}{
+		{name: "migrated schema", migrated: true},
+		{name: "empty schema", migrated: false},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := openUnmigrated(t, storetest.DatabaseURL(t))
+			if tt.migrated {
+				if _, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock()); err != nil {
+					t.Fatalf("Migrate: %v", err)
+				}
+			} else {
+				mustExec(t, st, "CREATE TABLE goose_db_version (id serial PRIMARY KEY, version_id bigint NOT NULL, is_applied boolean NOT NULL, tstamp timestamp NOT NULL DEFAULT now())")
+			}
+			mustExec(t, st, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (99999, true)")
+
+			applied, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock())
+			if !errors.Is(err, store.ErrDatabaseNewer) {
+				t.Fatalf("Migrate error = %v, want ErrDatabaseNewer", err)
+			}
+			if len(applied) != 0 {
+				t.Errorf("Migrate applied %+v against a newer database", applied)
+			}
+			if exists := queryInt(t, st, "SELECT count(*) FROM pg_tables WHERE schemaname = current_schema() AND tablename = 'apps'"); exists != boolInt(tt.migrated) {
+				t.Errorf("apps table count = %d after refused Migrate, want %d", exists, boolInt(tt.migrated))
+			}
+
+			if _, err := st.MigrationStatus(t.Context()); !errors.Is(err, store.ErrDatabaseNewer) {
+				t.Errorf("MigrationStatus error = %v, want ErrDatabaseNewer", err)
+			}
+		})
+	}
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

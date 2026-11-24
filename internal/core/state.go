@@ -9,18 +9,15 @@ import (
 type State string
 
 const (
-	StateQueued         State = "queued"
-	StateResolving      State = "resolving"
-	StatePinning        State = "pinning"
-	StateSyncing        State = "syncing"
-	StateVerifying      State = "verifying"
-	StateSucceeded      State = "succeeded"
-	StateFailed         State = "failed"
-	StateRollingBack    State = "rolling_back"
-	StateRolledBack     State = "rolled_back"
-	StateRollbackFailed State = "rollback_failed"
-	StateCancelled      State = "cancelled"
-	StateSuperseded     State = "superseded"
+	StateQueued     State = "queued"
+	StateResolving  State = "resolving"
+	StatePinning    State = "pinning"
+	StateSyncing    State = "syncing"
+	StateVerifying  State = "verifying"
+	StateSucceeded  State = "succeeded"
+	StateFailed     State = "failed"
+	StateCancelled  State = "cancelled"
+	StateSuperseded State = "superseded"
 )
 
 var (
@@ -37,9 +34,6 @@ func States() []State {
 		StateVerifying,
 		StateSucceeded,
 		StateFailed,
-		StateRollingBack,
-		StateRolledBack,
-		StateRollbackFailed,
 		StateCancelled,
 		StateSuperseded,
 	}
@@ -61,16 +55,24 @@ func (s State) Terminal() bool {
 	return slices.Contains(terminalStates(), s)
 }
 
+func (s State) Claimable() bool {
+	return slices.Contains(ClaimableStates(), s)
+}
+
 func (s State) Active() bool {
 	return slices.Contains(ActiveStates(), s)
 }
 
 func ActiveStates() []State {
-	return []State{StateResolving, StatePinning, StateSyncing, StateVerifying, StateRollingBack}
+	return []State{StateResolving, StatePinning, StateSyncing, StateVerifying}
+}
+
+func ClaimableStates() []State {
+	return append([]State{StateQueued}, ActiveStates()...)
 }
 
 func terminalStates() []State {
-	return []State{StateSucceeded, StateFailed, StateRolledBack, StateRollbackFailed, StateCancelled, StateSuperseded}
+	return []State{StateSucceeded, StateFailed, StateCancelled, StateSuperseded}
 }
 
 func (s State) CanTransitionTo(to State) bool {
@@ -86,12 +88,10 @@ func (s State) Transition(to State) error {
 
 func transitions() map[State][]State {
 	return map[State][]State{
-		StateQueued:      {StateResolving, StateCancelled, StateSuperseded},
-		StateResolving:   {StatePinning, StateFailed, StateCancelled, StateSuperseded},
-		StatePinning:     {StateSyncing, StateFailed, StateCancelled},
-		StateSyncing:     {StateVerifying, StateFailed, StateCancelled},
-		StateVerifying:   {StateSucceeded, StateFailed, StateCancelled},
-		StateFailed:      {StateRollingBack},
-		StateRollingBack: {StateRolledBack, StateRollbackFailed, StateCancelled},
+		StateQueued:    {StateResolving, StateCancelled, StateSuperseded},
+		StateResolving: {StatePinning, StateFailed, StateCancelled, StateSuperseded},
+		StatePinning:   {StateSyncing, StateFailed, StateCancelled},
+		StateSyncing:   {StateVerifying, StateFailed, StateCancelled},
+		StateVerifying: {StateSucceeded, StateFailed, StateCancelled},
 	}
 }

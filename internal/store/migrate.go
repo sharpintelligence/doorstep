@@ -60,6 +60,9 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 	}
 	defer func() { err = errors.Join(err, closeProvider()) }()
 
+	if err := checkNotNewer(ctx, provider); err != nil {
+		return nil, err
+	}
 	results, err := provider.Up(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("apply migrations: %w", err)
@@ -71,14 +74,6 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 			Duration: r.Duration,
 		})
 	}
-
-	current, err := provider.GetDBVersion(ctx)
-	if err != nil {
-		return applied, fmt.Errorf("read schema version: %w", err)
-	}
-	if latest := latestVersion(provider); current > latest {
-		return applied, fmt.Errorf("%w: database is at version %d, newest known migration is %d", ErrDatabaseNewer, current, latest)
-	}
 	return applied, nil
 }
 
@@ -89,6 +84,9 @@ func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, e
 	}
 	defer func() { err = errors.Join(err, closeProvider()) }()
 
+	if err := checkNotNewer(ctx, provider); err != nil {
+		return nil, err
+	}
 	statuses, err := provider.Status(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read migration status: %w", err)
@@ -133,6 +131,17 @@ func (s *Store) migrationProvider(logger *slog.Logger, sessionLock bool) (*goose
 		return nil, nil, errors.Join(fmt.Errorf("create migration provider: %w", err), db.Close())
 	}
 	return provider, provider.Close, nil
+}
+
+func checkNotNewer(ctx context.Context, provider *goose.Provider) error {
+	current, err := provider.GetDBVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if latest := latestVersion(provider); current > latest {
+		return fmt.Errorf("%w: database is at version %d, newest known migration is %d", ErrDatabaseNewer, current, latest)
+	}
+	return nil
 }
 
 func latestVersion(provider *goose.Provider) int64 {

@@ -72,6 +72,7 @@ const (
 	expireLease   = "UPDATE queue_entries SET lease_expires_at = now() - interval '1 second' WHERE deployment_id = $1"
 	delayEntry    = "UPDATE queue_entries SET available_at = now() + interval '1 hour' WHERE deployment_id = $1"
 	releaseEntry  = "UPDATE queue_entries SET available_at = now() - interval '1 second' WHERE deployment_id = $1"
+	cancelEntry   = "UPDATE deployments SET state = 'cancelled' WHERE id = $1"
 )
 
 func TestClaim(t *testing.T) {
@@ -202,6 +203,40 @@ func TestClaim(t *testing.T) {
 			},
 		},
 		{
+			name: "terminal entry is skipped and does not hold the line",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 10)
+				e.enqueue("web", 0)
+				e.exec(cancelEntry, 0)
+				e.expectClaim("w1", 1, 1)
+				e.expectClaim("w2", none, 0)
+			},
+		},
+		{
+			name: "terminal entry with a live lease still blocks its app",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.expectClaim("w1", 0, 1)
+				e.exec(cancelEntry, 0)
+				e.enqueue("web", 0)
+				e.enqueue("api", 0)
+				e.expectClaim("w2", 2, 1)
+				e.expectClaim("w2", none, 0)
+				e.exec(expireLease, 0)
+				e.expectClaim("w2", 1, 1)
+			},
+		},
+		{
+			name: "expired terminal entry is never reclaimed",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.expectClaim("w1", 0, 1)
+				e.exec(cancelEntry, 0)
+				e.exec(expireLease, 0)
+				e.expectClaim("w2", none, 0)
+			},
+		},
+		{
 			name: "high priority entry claimable once the leased entry completes",
 			run: func(e *claimEnv) {
 				e.enqueue("web", 0)
@@ -218,6 +253,66 @@ func TestClaim(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tt.run(&claimEnv{t: t, st: storetest.Open(t)})
+		})
+	}
+}
+
+func TestClaimTakesOnlyClaimableStates(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range core.States() {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			d := mustCreate(t, st, newDeployment("web"), 0)
+			mustExec(t, st, "UPDATE deployments SET state = $2 WHERE id = $1", d.ID, state)
+			got, _, ok, err := st.Claim(t.Context(), "w1", testLease)
+			if err != nil {
+				t.Fatalf("Claim: %v", err)
+			}
+			if ok != state.Claimable() {
+				t.Fatalf("Claim of a %s deployment = %v, want %v", state, ok, state.Claimable())
+			}
+			if ok && got.ID != d.ID {
+				t.Errorf("Claim returned deployment %d, want %d", got.ID, d.ID)
+			}
+		})
+	}
+}
+
+func TestClaimExcludesContendedApps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		exclude []string
+		want    string
+	}{
+		{name: "nothing excluded", exclude: nil, want: "web"},
+		{name: "head app excluded", exclude: []string{"web"}, want: "api"},
+		{name: "every app excluded", exclude: []string{"web", "api"}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			mustCreate(t, st, newDeployment("web"), 1)
+			mustCreate(t, st, newDeployment("api"), 0)
+			excluded := []store.AppID{}
+			for _, app := range tt.exclude {
+				id, err := st.EnsureApp(t.Context(), core.Target{App: app, Environment: "prod"})
+				if err != nil {
+					t.Fatalf("EnsureApp: %v", err)
+				}
+				excluded = append(excluded, id)
+			}
+			d, ok, err := store.ClaimExcluding(t.Context(), st, "w1", testLease, excluded)
+			if err != nil {
+				t.Fatalf("ClaimExcluding: %v", err)
+			}
+			if ok != (tt.want != "") || d.Target.App != tt.want {
+				t.Errorf("ClaimExcluding = %q, %v; want %q", d.Target.App, ok, tt.want)
+			}
 		})
 	}
 }

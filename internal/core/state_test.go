@@ -13,26 +13,22 @@ func TestStateTransitionMatrix(t *testing.T) {
 	t.Parallel()
 
 	allowed := map[edge]bool{
-		{StateQueued, StateResolving}:           true,
-		{StateQueued, StateCancelled}:           true,
-		{StateQueued, StateSuperseded}:          true,
-		{StateResolving, StatePinning}:          true,
-		{StateResolving, StateFailed}:           true,
-		{StateResolving, StateCancelled}:        true,
-		{StateResolving, StateSuperseded}:       true,
-		{StatePinning, StateSyncing}:            true,
-		{StatePinning, StateFailed}:             true,
-		{StatePinning, StateCancelled}:          true,
-		{StateSyncing, StateVerifying}:          true,
-		{StateSyncing, StateFailed}:             true,
-		{StateSyncing, StateCancelled}:          true,
-		{StateVerifying, StateSucceeded}:        true,
-		{StateVerifying, StateFailed}:           true,
-		{StateVerifying, StateCancelled}:        true,
-		{StateFailed, StateRollingBack}:         true,
-		{StateRollingBack, StateRolledBack}:     true,
-		{StateRollingBack, StateRollbackFailed}: true,
-		{StateRollingBack, StateCancelled}:      true,
+		{StateQueued, StateResolving}:     true,
+		{StateQueued, StateCancelled}:     true,
+		{StateQueued, StateSuperseded}:    true,
+		{StateResolving, StatePinning}:    true,
+		{StateResolving, StateFailed}:     true,
+		{StateResolving, StateCancelled}:  true,
+		{StateResolving, StateSuperseded}: true,
+		{StatePinning, StateSyncing}:      true,
+		{StatePinning, StateFailed}:       true,
+		{StatePinning, StateCancelled}:    true,
+		{StateSyncing, StateVerifying}:    true,
+		{StateSyncing, StateFailed}:       true,
+		{StateSyncing, StateCancelled}:    true,
+		{StateVerifying, StateSucceeded}:  true,
+		{StateVerifying, StateFailed}:     true,
+		{StateVerifying, StateCancelled}:  true,
 	}
 
 	for _, from := range States() {
@@ -81,20 +77,18 @@ func TestStateClassification(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		state    State
-		terminal bool
-		active   bool
+		state     State
+		terminal  bool
+		active    bool
+		claimable bool
 	}{
-		{state: StateQueued},
-		{state: StateResolving, active: true},
-		{state: StatePinning, active: true},
-		{state: StateSyncing, active: true},
-		{state: StateVerifying, active: true},
+		{state: StateQueued, claimable: true},
+		{state: StateResolving, active: true, claimable: true},
+		{state: StatePinning, active: true, claimable: true},
+		{state: StateSyncing, active: true, claimable: true},
+		{state: StateVerifying, active: true, claimable: true},
 		{state: StateSucceeded, terminal: true},
 		{state: StateFailed, terminal: true},
-		{state: StateRollingBack, active: true},
-		{state: StateRolledBack, terminal: true},
-		{state: StateRollbackFailed, terminal: true},
 		{state: StateCancelled, terminal: true},
 		{state: StateSuperseded, terminal: true},
 	}
@@ -110,6 +104,9 @@ func TestStateClassification(t *testing.T) {
 			if got := tt.state.Active(); got != tt.active {
 				t.Errorf("Active() = %v, want %v", got, tt.active)
 			}
+			if got := tt.state.Claimable(); got != tt.claimable {
+				t.Errorf("Claimable() = %v, want %v", got, tt.claimable)
+			}
 			if !tt.state.Valid() {
 				t.Errorf("Valid() = false")
 			}
@@ -120,7 +117,7 @@ func TestStateClassification(t *testing.T) {
 	}
 }
 
-func TestTerminalStatesOnlyLeaveFailedForRollback(t *testing.T) {
+func TestTerminalStatesHaveNoOutgoingTransitions(t *testing.T) {
 	t.Parallel()
 
 	for _, from := range States() {
@@ -128,10 +125,7 @@ func TestTerminalStatesOnlyLeaveFailedForRollback(t *testing.T) {
 			continue
 		}
 		for _, to := range States() {
-			if !from.CanTransitionTo(to) {
-				continue
-			}
-			if from != StateFailed || to != StateRollingBack {
+			if from.CanTransitionTo(to) {
 				t.Errorf("terminal state %s may move to %s", from, to)
 			}
 		}
@@ -158,12 +152,14 @@ func TestParseState(t *testing.T) {
 		wantErr bool
 	}{
 		{in: "queued", want: StateQueued},
-		{in: "rolling_back", want: StateRollingBack},
-		{in: "rollback_failed", want: StateRollbackFailed},
+		{in: "verifying", want: StateVerifying},
+		{in: "failed", want: StateFailed},
+		{in: "rolling_back", wantErr: true},
+		{in: "rolled_back", wantErr: true},
 		{in: "superseded", want: StateSuperseded},
 		{in: "", wantErr: true},
 		{in: "Queued", wantErr: true},
-		{in: "rolling-back", wantErr: true},
+		{in: "Failed", wantErr: true},
 		{in: " queued", wantErr: true},
 	}
 	for _, tt := range tests {
@@ -200,7 +196,7 @@ func TestStatesRoundTrip(t *testing.T) {
 			t.Errorf("ParseState(%q) = %q, %v", s, got, err)
 		}
 	}
-	if len(ActiveStates()) != 5 {
-		t.Errorf("ActiveStates() = %v, want 5 states", ActiveStates())
+	if len(ActiveStates()) != 4 {
+		t.Errorf("ActiveStates() = %v, want 4 states", ActiveStates())
 	}
 }

@@ -36,10 +36,9 @@ doorstep never talks to workloads directly and never mutates Argo CD. Git is the
           │                 │
        pass                fail
           ▼                 ▼
-     succeeded         rollback: re-pin previous digest
-                            │
-                            ▼
-                   rolled_back | rollback_failed
+     succeeded         failed, and a rollback deployment is queued
+                       at high priority: it re-pins the previous
+                       digest through this same path
 
  notify fires on every terminal state; history records every transition.
 ```
@@ -150,19 +149,19 @@ Deployment state is persisted in Postgres:
 ```
 queued → resolving → pinning → syncing → verifying → succeeded
                                               │
-                                              └────► failed → rolling_back → rolled_back
-                                                                     └─────► rollback_failed
+                                              └────► failed
 ```
 
 Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `failed` (an unresolvable tag or a GitHub error fails a deploy before verification). Any non-terminal deployment can become `cancelled` (operator action), and a `queued` or `resolving` deployment can become `superseded` (a newer deployment for the same target was queued before this one started pinning).
 
-- Terminal states: `succeeded`, `failed`, `rolled_back`, `rollback_failed`, `cancelled`, `superseded`. `failed` is terminal (a deployment that pinned nothing ends there) but keeps one outgoing edge, `failed → rolling_back`. The engine can make both transitions in one transaction while it still holds the queue entry and lease.
-- Active states: `resolving`, `pinning`, `syncing`, `verifying`, `rolling_back`. At most one deployment per target is active.
+- Terminal states: `succeeded`, `failed`, `cancelled`, `superseded`. A terminal state has no outgoing transitions.
+- Active states: `resolving`, `pinning`, `syncing`, `verifying`. At most one deployment per target is active.
 - The legal transitions are a table in `core` (`State.CanTransitionTo`), not a switch.
+- A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`.
 
 - Every transition is a compare-and-set on `(id, from_state)` and is recorded in history.
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
-- Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
+- Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - `LISTEN/NOTIFY` is only a wake-up hint; workers also poll, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
 - Manual freeze locks are rows in a `locks` table, visible and removable in the UI and CLI.

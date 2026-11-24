@@ -12,8 +12,6 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
-const claimAttempts = 3
-
 type Claim struct {
 	Attempt        int
 	LeaseExpiresAt time.Time
@@ -23,18 +21,24 @@ const claimSQL = `
 WITH head AS (
     SELECT q.deployment_id
     FROM queue_entries q
+    JOIN deployments d ON d.id = q.deployment_id
     JOIN apps a ON a.id = q.app_id
-    WHERE q.available_at <= now()
+    WHERE d.state = ANY($3::text[])
+      AND NOT q.app_id = ANY($4::bigint[])
+      AND q.available_at <= now()
       AND (q.lease_expires_at IS NULL OR q.lease_expires_at <= now())
       AND NOT EXISTS (
           SELECT 1
           FROM queue_entries o
+          JOIN deployments od ON od.id = o.deployment_id
           WHERE o.app_id = q.app_id
             AND o.deployment_id <> q.deployment_id
             AND (
                 o.lease_expires_at > now()
-                OR o.priority > q.priority
-                OR (o.priority = q.priority AND o.deployment_id < q.deployment_id)
+                OR (
+                    od.state = ANY($3::text[])
+                    AND (o.priority > q.priority OR (o.priority = q.priority AND o.deployment_id < q.deployment_id))
+                )
             )
       )
     ORDER BY q.priority DESC, q.deployment_id
@@ -60,6 +64,13 @@ SELECT EXISTS (
 
 var errLostClaimRace = errors.New("another worker holds a lease on this target")
 
+type claimResult struct {
+	deployment core.Deployment
+	claim      Claim
+	appID      AppID
+	found      bool
+}
+
 func (s *Store) Claim(ctx context.Context, workerID string, lease time.Duration) (core.Deployment, Claim, bool, error) {
 	if strings.TrimSpace(workerID) == "" {
 		return core.Deployment{}, Claim{}, false, errors.New("claim: worker ID must not be empty")
@@ -68,28 +79,23 @@ func (s *Store) Claim(ctx context.Context, workerID string, lease time.Duration)
 		return core.Deployment{}, Claim{}, false, fmt.Errorf("claim: lease must be positive, got %s", lease)
 	}
 
-	for range claimAttempts {
-		d, c, ok, err := s.claimOnce(ctx, workerID, lease)
+	excluded := []AppID{}
+	for {
+		r, err := s.claimOnce(ctx, workerID, lease, excluded)
 		if errors.Is(err, errLostClaimRace) {
+			excluded = append(excluded, r.appID)
 			continue
 		}
-		return d, c, ok, err
+		return r.deployment, r.claim, r.found, err
 	}
-	return core.Deployment{}, Claim{}, false, nil
 }
 
-func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Duration) (core.Deployment, Claim, bool, error) {
-	var (
-		d     core.Deployment
-		claim Claim
-		found bool
-	)
+func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Duration, excluded []AppID) (claimResult, error) {
+	var r claimResult
 	err := s.InTx(ctx, func(tx *Store) error {
-		var (
-			id    core.DeploymentID
-			appID AppID
-		)
-		err := tx.db.QueryRow(ctx, claimSQL, workerID, lease).Scan(&id, &appID, &claim.Attempt, &claim.LeaseExpiresAt)
+		var id core.DeploymentID
+		err := tx.db.QueryRow(ctx, claimSQL, workerID, lease, core.ClaimableStates(), excluded).
+			Scan(&id, &r.appID, &r.claim.Attempt, &r.claim.LeaseExpiresAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -98,22 +104,25 @@ func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Durat
 		}
 
 		var contended bool
-		if err := tx.db.QueryRow(ctx, otherLiveLeaseSQL, appID, id).Scan(&contended); err != nil {
+		if err := tx.db.QueryRow(ctx, otherLiveLeaseSQL, r.appID, id).Scan(&contended); err != nil {
 			return fmt.Errorf("check leases for deployment %d: %w", id, err)
 		}
 		if contended {
 			return errLostClaimRace
 		}
 
-		d, err = tx.GetDeployment(ctx, id)
+		r.deployment, err = tx.GetDeployment(ctx, id)
 		if err != nil {
 			return err
 		}
-		found = true
+		r.found = true
 		return nil
 	})
-	if err != nil {
-		return core.Deployment{}, Claim{}, false, err
+	if errors.Is(err, errLostClaimRace) {
+		return claimResult{appID: r.appID}, err
 	}
-	return d, claim, found, nil
+	if err != nil {
+		return claimResult{}, err
+	}
+	return r, nil
 }
