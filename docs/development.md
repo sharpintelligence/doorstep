@@ -2,7 +2,7 @@
 
 ## Toolchain
 
-Tool versions are pinned in `mise.toml` (Go, golangci-lint, just, actionlint, git-cliff) and locked with checksums in `mise.lock`. CI uses the same files, so local and CI runs match.
+Tool versions are pinned in `mise.toml` (Go, golangci-lint, just, actionlint, git-cliff, kustomize, kubeconform) and locked with checksums in `mise.lock`. CI uses the same files, so local and CI runs match.
 
 ```sh
 mise install
@@ -26,12 +26,15 @@ Recipes live in the `justfile`; `just` with no arguments lists them.
 | `just image` | build the container image as `doorstep:<version>` (override with `DOORSTEP_IMAGE`), stamping version, commit and commit time; needs a container engine |
 | `just vuln` | `govulncheck` (pinned in the `justfile`) over all packages; needs network access and is not part of `check` |
 | `just lint-actions` | `actionlint` over `.github/workflows` |
+| `just lint-manifests` | `kustomize build` of `deploy/kustomize/base` and every example overlay, validated with `kubeconform -strict` against the Kubernetes version pinned in the `justfile`; kubeconform downloads schemas, so it needs network access and is not part of `check`; CI runs it as a separate step |
 | `just changelog [args]` | `git-cliff` with `cliff.toml`; `just changelog --unreleased` previews the next release notes |
 | `just run [args]` | `go run ./cmd/doorstep serve [args]` |
 | `just clean` | remove `bin/` and `coverage.out` |
 | `just check` | `fmt-check`, `vet`, `lint`, `lint-actions`, `tidy-check` and `test`; this is what CI runs |
 
 Run `just check` before pushing.
+
+The manifests under `deploy/kustomize` are also covered by a hermetic Go test (`deploy/kustomize/manifests_test.go`, part of `just test`). It needs no kustomize binary or network and checks that environment variables are settings known to `internal/config`, that ports match the defaults, that the security context, RBAC and digest pinning have not been weakened, and that every `config.yaml` there validates. When a change renames a setting or alters a default, it fails until the manifests follow.
 
 ## Integration tests
 

@@ -78,30 +78,20 @@ The App ID can be the numeric **App ID** or the **Client ID** shown on the App's
 
 ### Kubernetes
 
-Store the key in a Secret and mount it as a file:
+Store the key under the key `github-app-private-key.pem` in the Secret `doorstep` that the [kustomize install base](install.md#secret-keys) mounts at `/etc/doorstep/secrets`:
 
 ```sh
-kubectl -n doorstep create secret generic doorstep-github-app \
-  --from-file=private-key.pem=./doorstep.2026-01-01.private-key.pem
+kubectl -n doorstep create secret generic doorstep \
+  --from-file=github-app-private-key.pem=./doorstep.2026-01-01.private-key.pem \
+  --from-literal=database-url="$DATABASE_URL"
 ```
 
-```yaml
-spec:
-  containers:
-    - name: doorstep
-      env:
-        - name: DOORSTEP_GITHUB_APP_ID
-          value: "Iv23liAbCdEf"
-        - name: DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE
-          value: /var/run/secrets/github/private-key.pem
-      volumeMounts:
-        - name: github-app
-          mountPath: /var/run/secrets/github
-          readOnly: true
-  volumes:
-    - name: github-app
-      secret:
-        secretName: doorstep-github-app
+Then set the App ID and the key path in the configuration file:
+
+```yaml kubernetes
+github:
+  app_id: "Iv23liAbCdEf"
+  private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
 ```
 
 ### Docker Compose

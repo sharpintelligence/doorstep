@@ -80,6 +80,10 @@ gh attestation verify oci://ghcr.io/sharpintelligence/doorstep@sha256:<platform-
   --predicate-type https://spdx.dev/Document/v2.3
 ```
 
+## After a release
+
+Update the image digest in `deploy/kustomize/examples/homelab/kustomization.yaml` to the new release, so the example installs what was just published. The base keeps its placeholder digest; users override it in their own overlay (see [install.md](install.md#pinning-the-image)).
+
 ## One-time setup
 
 - After the first release, make the GHCR package public (package settings, change visibility). New GHCR packages start private.

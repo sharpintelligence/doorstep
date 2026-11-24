@@ -20,6 +20,10 @@ bin/doorstep serve
 curl localhost:8080/readyz
 ```
 
+## Install
+
+To run doorstep on Kubernetes, use the kustomize base and example overlay described in [docs/install.md](docs/install.md).
+
 ## Container image
 
 Release images are published to `ghcr.io/sharpintelligence/doorstep` for `linux/amd64` and `linux/arm64`. Pull and deploy by digest, which each GitHub Release lists, rather than by tag:
@@ -33,6 +37,7 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Installing on Kubernetes](docs/install.md)
 - [Configuration](docs/configuration.md)
 - [Database](docs/database.md)
 - [HTTP API](docs/api.md)

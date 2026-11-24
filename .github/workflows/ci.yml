@@ -43,6 +43,7 @@ jobs:
         with:
           version: 2026.10.10
       - run: just check
+      - run: just lint-manifests
       - run: just build
 
   govulncheck:

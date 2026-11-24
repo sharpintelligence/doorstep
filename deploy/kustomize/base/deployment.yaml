@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doorstep
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    spec:
+      serviceAccountName: doorstep
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: doorstep
+          image: ghcr.io/sharpintelligence/doorstep
+          imagePullPolicy: IfNotPresent
+          args: [serve]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: DOORSTEP_CONFIG
+              value: /etc/doorstep/config/config.yaml
+            - name: DOORSTEP_DATABASE_URL_FILE
+              value: /etc/doorstep/secrets/database-url
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/doorstep/config
+              readOnly: true
+            - name: secrets
+              mountPath: /etc/doorstep/secrets
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: doorstep-config
+        - name: secrets
+          secret:
+            secretName: doorstep
+            defaultMode: 0440
