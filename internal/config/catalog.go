@@ -19,6 +19,7 @@ const (
 type Catalog struct {
 	Apps          []App
 	Notifications []Notification
+	Prometheus    []PrometheusServer
 	Auth          Auth
 }
 
@@ -48,6 +49,14 @@ func (c Catalog) SecretRefs() []SecretRef {
 		}
 		if secret, ok := n.SigningSecret(); ok {
 			refs = append(refs, secret)
+		}
+	}
+	for _, s := range c.Prometheus {
+		if token, ok := s.BearerToken(); ok {
+			refs = append(refs, token)
+		}
+		if password, ok := s.Password(); ok {
+			refs = append(refs, password)
 		}
 	}
 	if secret, ok := c.Auth.ClientSecret(); ok {
@@ -183,14 +192,15 @@ func (a ArgoCD) Timeout() time.Duration {
 type GateType string
 
 const (
-	GateChecks   GateType = "checks"
-	GateLock     GateType = "lock"
-	GateSchedule GateType = "schedule"
-	GateHealth   GateType = "health"
-	GateSoak     GateType = "soak"
+	GateChecks     GateType = "checks"
+	GateLock       GateType = "lock"
+	GateSchedule   GateType = "schedule"
+	GateHealth     GateType = "health"
+	GateSoak       GateType = "soak"
+	GatePrometheus GateType = "prometheus"
 )
 
-const DefaultSoakTimeoutAllowance = 10 * time.Minute
+const DefaultTimeoutAllowance = 10 * time.Minute
 
 type GatePhase string
 
@@ -205,13 +215,22 @@ type Gates struct {
 }
 
 type Gate struct {
-	Type             GateType  `yaml:"type"`
-	Name             string    `yaml:"name"`
-	Timeout          *Duration `yaml:"timeout"`
-	Duration         Duration  `yaml:"duration"`
-	Timezone         string    `yaml:"timezone"`
-	ApplyToRollbacks bool      `yaml:"apply_to_rollbacks"`
-	Windows          []Window  `yaml:"windows"`
+	Type             GateType     `yaml:"type"`
+	Name             string       `yaml:"name"`
+	Timeout          *Duration    `yaml:"timeout"`
+	Duration         Duration     `yaml:"duration"`
+	Timezone         string       `yaml:"timezone"`
+	ApplyToRollbacks bool         `yaml:"apply_to_rollbacks"`
+	Windows          []Window     `yaml:"windows"`
+	Server           string       `yaml:"server"`
+	Query            string       `yaml:"query"`
+	Condition        string       `yaml:"condition"`
+	Interval         *Duration    `yaml:"interval"`
+	InitialDelay     Duration     `yaml:"initial_delay"`
+	SuccessThreshold *int         `yaml:"success_threshold"`
+	FailureThreshold *int         `yaml:"failure_threshold"`
+	NoData           NoDataPolicy `yaml:"no_data"`
+	Baseline         *Baseline    `yaml:"baseline"`
 }
 
 type WindowEffect string
@@ -235,15 +254,17 @@ type gateSpec struct {
 	defaultTimeout   func(Gate) time.Duration
 	requiresDuration bool
 	requiresWindows  bool
+	prometheus       bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
 	return map[GateType]gateSpec{
-		GateChecks:   {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: fixedTimeout(30 * time.Minute)},
-		GateLock:     {phase: PhaseBefore},
-		GateSchedule: {phase: PhaseBefore, requiresWindows: true},
-		GateHealth:   {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute)},
-		GateSoak:     {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
+		GateChecks:     {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: fixedTimeout(30 * time.Minute)},
+		GateLock:       {phase: PhaseBefore},
+		GateSchedule:   {phase: PhaseBefore, requiresWindows: true},
+		GateHealth:     {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute)},
+		GateSoak:       {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
+		GatePrometheus: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: prometheusTimeout, prometheus: true},
 	}
 }
 
@@ -252,7 +273,7 @@ func fixedTimeout(d time.Duration) func(Gate) time.Duration {
 }
 
 func soakTimeout(g Gate) time.Duration {
-	return g.Duration.Std() + DefaultSoakTimeoutAllowance
+	return g.Duration.Std() + DefaultTimeoutAllowance
 }
 
 type NotificationType string
@@ -353,6 +374,11 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 	for _, g := range gates {
 		g.Name = orDefault(g.Name, string(g.Type))
 		spec, known := specs[g.Type]
+		if known && spec.prometheus {
+			g = g.withPrometheusDefaults()
+		} else {
+			g = g.withCopiedPointers()
+		}
 		if known && spec.allowsTimeout && g.Timeout == nil {
 			timeout := Duration(spec.defaultTimeout(g))
 			g.Timeout = &timeout

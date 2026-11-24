@@ -72,6 +72,19 @@ func (c Catalog) Validate() error {
 		validateNotification(r, n)
 	}
 
+	servers := make([]string, 0, len(c.Prometheus))
+	firstServer := make(map[string]int, len(c.Prometheus))
+	for i, s := range c.Prometheus {
+		r := newReporter(&errs, prometheusServerList, i, s.Name)
+		if first, dup := firstServer[s.Name]; dup && s.Name != "" {
+			r.addf("name", "duplicate of %s[%d]", prometheusServerList, first)
+		} else {
+			firstServer[s.Name] = i
+			servers = append(servers, s.Name)
+		}
+		validatePrometheusServer(r, s)
+	}
+
 	kustomizePins := make(map[string]int, len(c.Apps))
 	for i, a := range c.Apps {
 		if dir, ok := a.kustomizationDir(); ok && a.Pin.Strategy() == PinKustomize {
@@ -90,7 +103,7 @@ func (c Catalog) Validate() error {
 		} else {
 			firstApp[a.Name] = i
 		}
-		validateApp(r, a, notifications)
+		validateApp(r, a, notifications, servers)
 		if target, ok := a.Pin.target(a.GitOps); ok {
 			if first, dup := pinOwners[target]; dup {
 				other := c.Apps[first]
@@ -134,7 +147,7 @@ func validateNotification(r reporter, n Notification) {
 		}
 		forbidFields(r, n.Type, []field{{"webhook_url_env", n.WebhookURLEnv}, {"webhook_url_file", n.WebhookURLFile}})
 		if n.URL != "" {
-			r.check("url", validateURL(n.URL))
+			r.check("url", validateURL(n.URL, "url_env or url_file"))
 		}
 	case "":
 		r.addf("type", "is required (want slack or webhook)")
@@ -198,7 +211,7 @@ func forbidFields(r reporter, t NotificationType, fields []field) {
 	}
 }
 
-func validateApp(r reporter, a App, notifications map[string]bool) {
+func validateApp(r reporter, a App, notifications map[string]bool, servers []string) {
 	r.check("name", validateName(a.Name))
 
 	r.check("source.repo", validateRepo(a.Source.Repo))
@@ -242,7 +255,7 @@ func validateApp(r reporter, a App, notifications map[string]bool) {
 		r.addf("argocd.sync_timeout", "must be positive")
 	}
 
-	validateGates(r, a.Gates)
+	validateGates(r, a.Gates, servers)
 
 	seen := make(map[string]bool, len(a.Notify))
 	for i, name := range a.Notify {
@@ -290,7 +303,7 @@ func isBlankOrPadded(segment string) bool {
 	return segment == "" || strings.TrimSpace(segment) != segment
 }
 
-func validateGates(r reporter, g Gates) {
+func validateGates(r reporter, g Gates, servers []string) {
 	specs := gateSpecs()
 	known := slices.Sorted(maps.Keys(specs))
 	names := make(map[string]string)
@@ -339,6 +352,11 @@ func validateGates(r reporter, g Gates) {
 				validateScheduleGate(r, field, gate)
 			} else {
 				forbidScheduleFields(r, field, gate)
+			}
+			if spec.prometheus {
+				validatePrometheusGate(r, field, gate, servers)
+			} else {
+				forbidPrometheusFields(r, field, gate)
 			}
 		}
 	}

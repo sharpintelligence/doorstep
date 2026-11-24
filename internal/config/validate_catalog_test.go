@@ -626,7 +626,7 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name:    "gate type required",
 			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Type = "" },
-			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, health, lock, schedule, soak)"},
+			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, health, lock, prometheus, schedule, soak)"},
 		},
 		{
 			name:    "gate type unknown",

@@ -245,7 +245,7 @@ Prints the release version, VCS commit, commit time and Go version. `--json` pri
 
 ## Configuration file
 
-`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, sign-in settings, notification targets and apps. `doorstep migrate`, `doorstep token` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep. On Kubernetes, the [kustomize base](install.md#configuration) generates the ConfigMap with a content hash in its name, so changing the file rolls the Deployment automatically.
+`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, sign-in settings, notification targets, Prometheus servers and apps. `doorstep migrate`, `doorstep token` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep. On Kubernetes, the [kustomize base](install.md#configuration) generates the ConfigMap with a content hash in its name, so changing the file rolls the Deployment automatically.
 
 Parsing is strict:
 
@@ -372,6 +372,43 @@ Named notification targets. Apps refer to them by name in `notify`.
 
 Keys that belong to the other type are rejected. Environment variable names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and file paths must be absolute. See [Secrets](#secrets) for how they are read, [notifications.md](notifications.md) for message contents, the webhook payload and delivery, and [`doorstep notify test`](#doorstep-notify-test) to try a target.
 
+### `prometheus[]`
+
+Named Prometheus servers that [`prometheus` gates](#prometheus-gates) query. Any server that serves the Prometheus HTTP query API works, including Thanos, Mimir and VictoriaMetrics.
+
+```yaml
+prometheus:
+  - name: main
+    url: http://prometheus-operated.monitoring.svc:9090
+    bearer_token_file: /var/run/secrets/doorstep/prometheus-token
+apps:
+  - name: api
+    source:
+      repo: example-org/api
+    image:
+      repository: ghcr.io/example-org/api
+    gitops:
+      repo: example-org/platform
+      path: apps/api
+    gates:
+      after:
+        - type: health
+        - type: prometheus
+          name: error-rate
+          query: sum(rate(http_requests_total{app="api",code=~"5.."}[5m])) / sum(rate(http_requests_total{app="api"}[5m]))
+          condition: "< 0.05"
+```
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `name` | yes | Unique name; a DNS label. Gates refer to it with `server`. |
+| `url` | yes | Base URL of the server, `http` or `https`, with a host and optionally a path prefix (`https://mimir.example.com/prometheus`); without `user:password@`, a query string or a fragment. doorstep appends `/api/v1/query` and `/api/v1/query_range`. |
+| `bearer_token_env` / `bearer_token_file` | no, at most one | Environment variable or absolute file path holding a bearer token, sent as `Authorization: Bearer <token>`. A projected service account token file works, because the file is read on every request. |
+| `username` | with a password | User name for HTTP basic authentication; must not contain `:` or control characters. |
+| `password_env` / `password_file` | with `username`, exactly one | Environment variable or absolute file path holding the basic authentication password. |
+
+A server uses a bearer token, basic authentication or neither, never both. Credentials are bound to the server they are configured on: a gate names a server, never a URL, so a token can only ever be sent to its own `url`. Redirects are not followed. `http` is allowed because in-cluster Prometheus is usually plain HTTP; use `https` for anything that crosses a network you do not trust. `https` servers are verified against the system trust store; for a private certificate authority, mount its certificate and point `SSL_CERT_FILE` (or `SSL_CERT_DIR`) at it. See [Secrets](#secrets) for how credentials are read.
+
 ### `apps[]`
 
 One app is one deploy target: one image, one place in a GitOps repository and one Argo CD Application. Model environments as separate apps (`blog-staging`, `blog-prod`).
@@ -440,12 +477,36 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `schedule` | `before` | `windows`, required; `timezone`, default `UTC`; `apply_to_rollbacks`, default `false` | No deny window is active and, if the gate has allow windows, one of them is; see [Deploy windows](#deploy-windows). |
 | `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced and healthy, and not degraded for a minute or more. |
 | `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy; a `Degraded` observation restarts the clock. |
+| `prometheus` | `after` | `query`, required; `condition` and/or `baseline`; see [Prometheus gates](#prometheus-gates) | A PromQL query meets its condition, and stays within a margin of its pre-deploy baseline, for `success_threshold` samples in a row. |
 
-The default gates are `checks` before and `health` after; `lock`, `schedule` and `soak` run only when listed. Rollbacks skip `checks`, `lock` and `soak`, and skip `schedule` unless it sets `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
+The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak` and `prometheus` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule` unless it sets `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
-A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`.
+A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`, and a `prometheus` timeout longer than `initial_delay` + (`success_threshold` - 1) × `interval`.
 
-A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks` or `health`, `windows`, `timezone` or `apply_to_rollbacks` on anything but `schedule`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
+A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health` or `prometheus`, `windows`, `timezone` or `apply_to_rollbacks` on anything but `schedule`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
+
+#### Prometheus gates
+
+A `prometheus` gate samples a PromQL query after the deploy; [gates.md](gates.md#prometheus) describes the verdicts, the baseline and the evidence.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `server` | the only server | Name of a [`prometheus[]`](#prometheus) server. Required when more than one server is configured. |
+| `query` | required | PromQL expression that returns a scalar or a single series; aggregate with `sum`, `max` or `min`. At most 4096 bytes, valid UTF-8, no NUL. It is not checked until Prometheus runs it: a bad query keeps the gate pending with Prometheus's error. |
+| `condition` | none | An operator (`<`, `<=`, `>`, `>=`, `==`, `!=`) and a finite number, such as `"< 0.05"`; always quote it, because YAML reads a leading `>` or `!` as syntax. |
+| `interval` | `1m` | Time between samples, `10s` to `1h`. |
+| `initial_delay` | `0s` | Wait before the first sample, measured from the gate's first evaluation; at least `0s`. |
+| `success_threshold` | `5` | Consecutive successful samples that pass the gate, 1 to 1000. |
+| `failure_threshold` | `3` | Consecutive failing samples that fail the gate, 1 to 100. |
+| `no_data` | `pending` | What an empty result or NaN means: `pending` (count neither way) or `fail` (a failing sample). |
+| `baseline.direction` | `increase` | `increase` when higher is worse (errors, latency), `decrease` when lower is worse (throughput, success rate). |
+| `baseline.ratio` | `0` | Allowed change relative to the baseline, such as `0.2` for 20%; finite and at least 0. |
+| `baseline.absolute` | `0` | Allowed change in the query's unit, added to the ratio; finite and at least 0. At least one of `ratio` and `absolute` must be above 0. |
+| `baseline.window` | `30m` | How far back from the deployment's start the baseline is averaged; at least `interval` and at most 1000 intervals. |
+| `baseline.no_data` | `ignore` | When the baseline window has no data: `ignore` (compare with `condition` only) or `fail`. |
+| `timeout` | `initial_delay` + `success_threshold` × `interval` + `10m` | See [Timeouts](gates.md#timeouts). |
+
+At least one of `condition` and `baseline` is required; with both, a sample must satisfy both. Leave `baseline` out for a fixed threshold only. A sample passes the baseline when it is at most *baseline* + \|*baseline*\| × `ratio` + `absolute` (`increase`), or at least *baseline* - \|*baseline*\| × `ratio` - `absolute` (`decrease`). For an error-rate query, `or vector(0)` turns "no errors recorded" into 0 instead of no data ([gates.md](gates.md#prometheus)).
 
 #### Deploy windows
 
@@ -520,7 +581,7 @@ A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{ef
 
 ### Full example
 
-Two owners, both pin strategies, both deploy modes, freeze and soak gates and both notification types:
+Two owners, both pin strategies, both deploy modes, freeze, soak and Prometheus gates and both notification types:
 
 ```yaml
 server:
@@ -553,6 +614,11 @@ notifications:
     url: https://hooks.example.com/doorstep
     secret_env: DOORSTEP_HOOKS_SECRET
     events: [deploy.succeeded, deploy.failed, deploy.rolled_back]
+
+prometheus:
+  - name: main
+    url: http://prometheus-operated.monitoring.svc:9090
+    bearer_token_file: /var/run/secrets/doorstep/prometheus-token
 
 apps:
   - name: blog
@@ -621,6 +687,14 @@ apps:
         - type: health
         - type: soak
           duration: 30m
+        - type: prometheus
+          name: error-rate
+          query: (sum(rate(http_requests_total{app="api",code=~"5.."}[5m])) or vector(0)) / sum(rate(http_requests_total{app="api"}[5m]))
+          condition: "< 0.05"
+          initial_delay: 2m
+          baseline:
+            ratio: 0.2
+            absolute: 0.001
     notify: [ops, hooks]
 ```
 
@@ -718,11 +792,11 @@ Sends one synthetic `deploy.succeeded` notification to the named `notifications[
 
 ## Secrets
 
-Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file.
+Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens, Prometheus credentials) are never written inline in the configuration file.
 
-Notification secrets and the sign-in client secret (`auth.oidc.client_secret_*` or `auth.github.client_secret_*`) are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
+Notification secrets, Prometheus credentials (`prometheus[].bearer_token_*`, `prometheus[].password_*`) and the sign-in client secret (`auth.oidc.client_secret_*` or `auth.github.client_secret_*`) are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
 
-`doorstep serve` checks every referenced notification and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
+`doorstep serve` checks every referenced notification secret, Prometheus credential and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
 The database URL, the GitHub App private key, the GitHub webhook secret and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `github.webhook_secret_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections. The private key and webhook secret are read once at startup, so rotating them needs a restart.
 
