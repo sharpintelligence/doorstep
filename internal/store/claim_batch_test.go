@@ -17,6 +17,8 @@ type batchEnv struct {
 	st    *store.Store
 	ids   map[string]core.DeploymentID
 	names map[core.DeploymentID]string
+	shas  map[string]string
+	apps  map[string]string
 	limit int
 }
 
@@ -27,6 +29,8 @@ func newBatchEnv(t *testing.T, limit int) *batchEnv {
 		st:    storetest.Open(t),
 		ids:   map[string]core.DeploymentID{},
 		names: map[core.DeploymentID]string{},
+		shas:  map[string]string{},
+		apps:  map[string]string{},
 		limit: limit,
 	}
 }
@@ -38,11 +42,29 @@ func (e *batchEnv) record(name string, d core.Deployment) {
 
 func (e *batchEnv) deploy(name, app string, priority core.Priority) {
 	e.t.Helper()
-	d, created, err := e.st.EnqueueDeployment(e.t.Context(), deploymentOf(app, randomSHA(e.t)), priority)
+	e.enqueue(name, app, randomSHA(e.t), priority)
+}
+
+func (e *batchEnv) redeploy(name, of string, priority core.Priority) {
+	e.t.Helper()
+	e.enqueue(name, e.apps[of], e.shas[of], priority)
+}
+
+func (e *batchEnv) enqueue(name, app, sha string, priority core.Priority) {
+	e.t.Helper()
+	d, created, err := e.st.EnqueueDeployment(e.t.Context(), deploymentOf(app, sha), priority)
 	if err != nil || !created {
 		e.t.Fatalf("EnqueueDeployment(%s) = %v, %v", name, created, err)
 	}
+	e.shas[name] = sha
+	e.apps[name] = app
 	e.record(name, d)
+}
+
+func (e *batchEnv) finish(name string) {
+	e.t.Helper()
+	e.exec(succeedDeployment, name)
+	e.exec(completeEntry, name)
 }
 
 func (e *batchEnv) rollback(name, app, of string) {
@@ -225,6 +247,53 @@ func TestClaimBatch(t *testing.T) {
 				e.assertState("c5", core.StateQueued)
 				e.exec(completeEntry, "hotfix")
 				e.claim("c5")
+			},
+		},
+		{
+			name:  "urgent redeploy of an older commit leaves newer deploys queued",
+			limit: 1,
+			run: func(e *batchEnv) {
+				e.deploy("c8", "web", normal)
+				e.claim("c8")
+				e.finish("c8")
+				e.deploy("c9", "web", normal)
+				e.deploy("c10", "web", normal)
+				e.redeploy("c8 again", "c8", urgent)
+				e.claim("c8 again")
+				e.assertState("c9", core.StateQueued)
+				e.assertState("c10", core.StateQueued)
+				e.finish("c8 again")
+				e.claim("c9")
+				e.finish("c9")
+				e.claim("c10")
+			},
+		},
+		{
+			name:  "urgent redeploy of an older commit still supersedes commits seen before it",
+			limit: 10,
+			run: func(e *batchEnv) {
+				e.deploy("c7", "web", normal)
+				e.deploy("c8", "web", normal)
+				e.claim("c8", "c7")
+				e.finish("c8")
+				e.redeploy("c7 again", "c7", normal)
+				e.deploy("c9", "web", normal)
+				e.redeploy("c8 again", "c8", urgent)
+				e.claim("c8 again", "c7 again")
+				e.assertState("c9", core.StateQueued)
+			},
+		},
+		{
+			name:  "batch deploys the newest commit, not the latest request",
+			limit: 10,
+			run: func(e *batchEnv) {
+				e.deploy("c8", "web", normal)
+				e.claim("c8")
+				e.finish("c8")
+				e.deploy("c9", "web", normal)
+				e.deploy("c10", "web", normal)
+				e.redeploy("c8 again", "c8", normal)
+				e.claim("c10", "c9", "c8 again")
 			},
 		},
 		{

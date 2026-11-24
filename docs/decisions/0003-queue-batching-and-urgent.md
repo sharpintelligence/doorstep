@@ -9,9 +9,9 @@ Deploys of one app run one at a time. A burst of merges should not turn into a b
 
 ## Decision
 
-1. **Batching happens at claim time.** When a worker claims a `queued` deploy, it takes the first `max_batch` queued deploys of that app at the head's priority, ordered by deployment id. The newest of them runs; the rest become `superseded` (with `superseded_by_id`, `finished_at`, a transition event, and their queue entries deleted) in the same transaction. `max_batch` is per app, default 10, 1 to 100; 1 disables batching. Enqueue order is commit order.
-2. **Urgent is a priority.** Priorities are `normal` (0), `urgent` (100) and `rollback` (200). When an urgent deploy is claimed it also supersedes every queued lower-priority deploy of the app with a lower deployment id, not bounded by `max_batch`. Newer deploys stay queued.
-3. **One rule for both:** batch within the head's priority, then supersede older deploys of lower priority. Rollbacks never batch, are never superseded and never supersede.
+1. **Batching happens at claim time.** When a worker claims a `queued` deploy, it takes the first `max_batch` queued deploys of that app at the head's priority, ordered by deployment id. The one with the newest commit runs; the rest become `superseded` (with `superseded_by_id`, `finished_at`, a transition event, and their queue entries deleted) in the same transaction. `max_batch` is per app, default 10, 1 to 100; 1 disables batching within a priority. Commit order is the order in which commits were first enqueued for the app (the lowest deployment id with that SHA), so a redeploy of an older commit keeps its original place.
+2. **Urgent is a priority.** Priorities are `normal` (0), `urgent` (100) and `rollback` (200). When an urgent deploy is claimed it also supersedes every queued lower-priority deploy of the app with a lower deployment id whose commit was first seen before the urgent commit, not bounded by `max_batch` (so `max_batch: 1` does not disable it). Newer deploys, and deploys of newer commits, stay queued.
+3. **One rule for both:** batch within the head's priority, then supersede older deploys of lower priority. Nothing ever supersedes a deploy of a commit first seen after the winner's. Rollbacks never batch, are never superseded and never supersede.
 4. **No preemption.** A deployment in an active state always outranks queued entries of its app, even after its lease expired. Urgent means next, not now.
 5. **Enqueue is idempotent per app and commit.** A second request for a commit that already has a queued or in-flight deploy returns that deploy; an urgent request raises a queued one to urgent.
 
@@ -38,5 +38,6 @@ Asking GitHub whether one commit contains another would make batching exact when
 - A merge burst produces at most one deploy per `max_batch` commits, and the newest commit always deploys eventually.
 - Superseded deploys are terminal and visible in history with the deployment that replaced them; notifications can name them from the claim result.
 - An urgent deploy ships everything older than it, which is what "deploy this commit now" means on a linear branch. Operators who need to skip work in between should cancel it.
+- An urgent redeploy of an older commit (one enqueued before) runs first and leaves newer queued commits to run after it, so the newest commit is never dropped.
 - The claim transaction does more work when it batches (a window select and a supersede update), all on rows of one app that it already holds locked.
-- Out-of-order enqueues (an older commit enqueued after a newer one) are treated as newer. Intake should enqueue in merge order.
+- Out-of-order enqueues of commits doorstep has never seen (a webhook for an older commit delivered after the one for a newer commit) are treated as newer. Intake should enqueue in merge order; recording commit time or ancestry is a possible follow-up.

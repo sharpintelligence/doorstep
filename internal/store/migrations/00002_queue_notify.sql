@@ -1,4 +1,6 @@
 -- +goose Up
+CREATE INDEX deployments_app_id_commit_sha_idx ON deployments (app_id, commit_sha, id);
+
 -- +goose StatementBegin
 CREATE FUNCTION notify_queue_change() RETURNS trigger
 LANGUAGE plpgsql AS $$

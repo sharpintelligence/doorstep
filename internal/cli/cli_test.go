@@ -1051,17 +1051,21 @@ func TestRunServe(t *testing.T) {
 			if code, body := get(t, "http://"+addr+"/readyz"); code != http.StatusOK || !strings.Contains(body, `"postgres":"ok"`) {
 				t.Errorf("GET /readyz = %d %q", code, body)
 			}
+			internalAddr := waitForLogAddr(t, &stderr, done, "metrics listening")
 			wantQueue := http.StatusNotFound
 			if tt.wantApps > 0 {
 				wantQueue = http.StatusOK
 			}
-			if code, body := get(t, "http://"+addr+"/api/v1/apps/blog/queue"); code != wantQueue {
+			if code, body := get(t, "http://"+internalAddr+"/api/v1/apps/blog/queue"); code != wantQueue {
 				t.Errorf("GET /api/v1/apps/blog/queue = %d %q, want %d", code, body, wantQueue)
 			} else if code == http.StatusOK && body != `{"app":"blog","depth":0,"entries":[]}`+"\n" {
 				t.Errorf("GET /api/v1/apps/blog/queue body = %q", body)
 			}
-			if code, body := get(t, "http://"+addr+"/api/v1/apps/unknown/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
+			if code, body := get(t, "http://"+internalAddr+"/api/v1/apps/unknown/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
 				t.Errorf("GET /api/v1/apps/unknown/queue = %d %q", code, body)
+			}
+			if code, body := get(t, "http://"+addr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("main listener serves the API: GET /api/v1/apps/blog/queue = %d %q", code, body)
 			}
 
 			cancel()
@@ -1191,13 +1195,19 @@ func TestRunServeMetrics(t *testing.T) {
 			if !strings.Contains(body, "\ndoorstep_queue_depth 0\n") {
 				t.Errorf("GET /metrics does not report an empty queue: %.2000q", body)
 			}
-			if code, body := get(t, "http://"+mainAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
-				t.Errorf("main GET /api/v1/apps/blog/queue = %d %q, want a JSON 404", code, body)
+			if code, body := get(t, "http://"+mainAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("main GET /api/v1/apps/blog/queue = %d %q, want the API unmounted", code, body)
 			}
+			apiLogged := hasMessage(parseLogs(t, stderr.String()), "API disabled; it is served only on the metrics listener until API authentication exists")
 			if tt.wantSeparate {
-				if code, _ := get(t, "http://"+metricsAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound {
-					t.Errorf("metrics listener serves the API: %d", code)
+				if code, body := get(t, "http://"+metricsAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
+					t.Errorf("metrics GET /api/v1/apps/blog/queue = %d %q, want a JSON 404 from the API", code, body)
 				}
+				if apiLogged {
+					t.Errorf("logs report the API disabled with a separate metrics listener: %s", stderr.String())
+				}
+			} else if !apiLogged {
+				t.Errorf("logs do not report the API disabled: %s", stderr.String())
 			}
 
 			cancel()

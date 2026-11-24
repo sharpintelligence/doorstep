@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -24,7 +25,8 @@ type ClaimedBatch struct {
 const headPrioritySQL = `SELECT priority FROM queue_entries WHERE deployment_id = $1`
 
 const batchWindowSQL = `
-SELECT q.deployment_id
+SELECT q.deployment_id,
+    (SELECT min(f.id) FROM deployments f WHERE f.app_id = q.app_id AND f.commit_sha = d.commit_sha)
 FROM queue_entries q
 JOIN deployments d ON d.id = q.deployment_id
 WHERE q.app_id = $1
@@ -47,6 +49,21 @@ WHERE q.app_id = $1
   AND d.kind = 'deploy'
 ORDER BY q.deployment_id
 FOR NO KEY UPDATE OF q`
+
+const commitsSeenBeforeSQL = `
+WITH first_seen AS (
+    SELECT commit_sha, min(id) AS id
+    FROM deployments
+    WHERE app_id = $1
+      AND commit_sha IN (SELECT commit_sha FROM deployments WHERE id = ANY($2::bigint[]) OR id = $3)
+    GROUP BY commit_sha
+)
+SELECT d.id
+FROM deployments d
+JOIN first_seen c ON c.commit_sha = d.commit_sha
+WHERE d.id = ANY($2::bigint[])
+  AND c.id < (SELECT f.id FROM first_seen f JOIN deployments w ON w.commit_sha = f.commit_sha WHERE w.id = $3)
+ORDER BY d.id`
 
 const supersedeSQL = `
 UPDATE deployments
@@ -95,21 +112,27 @@ func (s *Store) batch(ctx context.Context, r *claimResult, workerID string, leas
 		return fmt.Errorf("read priority of deployment %d: %w", head.ID, err)
 	}
 
-	window, err := s.deploymentIDs(ctx, batchWindowSQL, r.appID, priority, head.ID, max(limit(head.Target), 1))
+	window, err := s.batchWindow(ctx, r.appID, priority, head.ID, max(limit(head.Target), 1))
 	if err != nil {
 		return fmt.Errorf("select batch for deployment %d: %w", head.ID, err)
 	}
 	if len(window) == 0 {
 		return nil
 	}
-	winner := window[len(window)-1]
+	newest := slices.MaxFunc(window, func(a, b windowEntry) int {
+		return cmp.Or(cmp.Compare(a.firstSeen, b.firstSeen), cmp.Compare(a.id, b.id))
+	})
+	winner := newest.id
 	older, err := s.deploymentIDs(ctx, olderLowerPrioritySQL, r.appID, priority, winner)
 	if err != nil {
 		return fmt.Errorf("select deploys older than deployment %d: %w", winner, err)
 	}
-	candidates := slices.Concat(window[:len(window)-1], older)
-	slices.Sort(candidates)
-
+	candidates := older
+	for _, e := range window {
+		if e.id != winner {
+			candidates = append(candidates, e.id)
+		}
+	}
 	superseded, err := s.supersede(ctx, r.appID, candidates, winner)
 	if err != nil {
 		return err
@@ -126,11 +149,35 @@ func (s *Store) batch(ctx context.Context, r *claimResult, workerID string, leas
 	return err
 }
 
+type windowEntry struct {
+	id        core.DeploymentID
+	firstSeen core.DeploymentID
+}
+
+func (s *Store) batchWindow(ctx context.Context, appID AppID, priority int, head core.DeploymentID, limit int) ([]windowEntry, error) {
+	rows, err := s.db.Query(ctx, batchWindowSQL, appID, priority, head, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (windowEntry, error) {
+		var e windowEntry
+		err := row.Scan(&e.id, &e.firstSeen)
+		return e, err
+	})
+}
+
 func (s *Store) supersede(ctx context.Context, appID AppID, ids []core.DeploymentID, winner core.DeploymentID) ([]core.DeploymentID, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	superseded, err := s.deploymentIDs(ctx, supersedeSQL, ids, winner)
+	older, err := s.deploymentIDs(ctx, commitsSeenBeforeSQL, appID, ids, winner)
+	if err != nil {
+		return nil, fmt.Errorf("order commits against deployment %d: %w", winner, err)
+	}
+	if len(older) == 0 {
+		return nil, nil
+	}
+	superseded, err := s.deploymentIDs(ctx, supersedeSQL, older, winner)
 	if err != nil {
 		return nil, fmt.Errorf("supersede deployments by %d: %w", winner, err)
 	}

@@ -25,20 +25,20 @@ type queueResponse struct {
 }
 
 type queueEntry struct {
-	Position       int        `json:"position"`
-	DeploymentID   int64      `json:"deployment_id"`
-	Environment    string     `json:"environment"`
-	Kind           string     `json:"kind"`
-	State          string     `json:"state"`
-	Priority       string     `json:"priority"`
-	CommitSHA      string     `json:"commit_sha"`
-	Source         string     `json:"source"`
-	RequestedBy    string     `json:"requested_by"`
-	EnqueuedAt     time.Time  `json:"enqueued_at"`
-	AvailableAt    time.Time  `json:"available_at"`
-	Attempts       int        `json:"attempts"`
-	InFlight       bool       `json:"in_flight"`
-	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
+	Position       int               `json:"position"`
+	DeploymentID   core.DeploymentID `json:"deployment_id"`
+	Environment    string            `json:"environment"`
+	Kind           string            `json:"kind"`
+	State          string            `json:"state"`
+	Priority       string            `json:"priority"`
+	CommitSHA      string            `json:"commit_sha"`
+	Source         string            `json:"source"`
+	RequestedBy    string            `json:"requested_by"`
+	EnqueuedAt     time.Time         `json:"enqueued_at"`
+	AvailableAt    time.Time         `json:"available_at"`
+	Attempts       int               `json:"attempts"`
+	InFlight       bool              `json:"in_flight"`
+	LeaseExpiresAt *time.Time        `json:"lease_expires_at"`
 }
 
 func (a *api) registerQueue(mux *http.ServeMux) {
@@ -54,7 +54,7 @@ func (a *api) getQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(entries) == 0 && !a.apps.Known(app) {
-		writeError(w, http.StatusNotFound, codeNotFound, "app "+app+" is not configured")
+		writeError(w, http.StatusNotFound, codeNotFound, "app is not configured")
 		return
 	}
 
@@ -66,7 +66,7 @@ func (a *api) getQueue(w http.ResponseWriter, r *http.Request) {
 		d := e.Deployment
 		resp.Entries = append(resp.Entries, queueEntry{
 			Position:       e.Position,
-			DeploymentID:   int64(d.ID),
+			DeploymentID:   d.ID,
 			Environment:    d.Target.Environment,
 			Kind:           string(d.Kind),
 			State:          string(d.State),

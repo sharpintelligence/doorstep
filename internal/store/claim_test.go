@@ -74,6 +74,8 @@ const (
 	releaseEntry  = "UPDATE queue_entries SET available_at = now() - interval '1 second' WHERE deployment_id = $1"
 	cancelEntry   = "UPDATE deployments SET state = 'cancelled' WHERE id = $1"
 	startEntry    = "UPDATE deployments SET state = 'resolving', started_at = now() WHERE id = $1"
+
+	succeedDeployment = "UPDATE deployments SET state = 'succeeded', finished_at = now() WHERE id = $1"
 )
 
 func TestClaim(t *testing.T) {

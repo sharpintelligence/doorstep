@@ -48,6 +48,14 @@ WHERE deployment_id = $1
   AND lease_expires_at > now()
 RETURNING lease_expires_at`
 
+const ownedEntryStateSQL = `
+SELECT d.state
+FROM queue_entries q
+JOIN deployments d ON d.id = q.deployment_id
+WHERE q.deployment_id = $1
+  AND q.lease_owner = $2
+FOR NO KEY UPDATE OF q`
+
 const releaseSQL = `
 UPDATE queue_entries
 SET lease_owner = NULL,
@@ -213,7 +221,26 @@ func (s *Store) ReleaseQueueEntry(ctx context.Context, id core.DeploymentID, wor
 	if delay < 0 {
 		return fmt.Errorf("release: delay must not be negative, got %s", delay)
 	}
-	return s.execOwned(ctx, "release", id, releaseSQL, id, workerID, delay)
+	err := s.InTx(ctx, func(tx *Store) error {
+		var state core.State
+		err := tx.db.QueryRow(ctx, ownedEntryStateSQL, id, workerID).Scan(&state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return core.ErrLeaseLost
+		}
+		if err != nil {
+			return err
+		}
+		if state.Terminal() {
+			_, err = tx.db.Exec(ctx, completeSQL, id, workerID)
+			return err
+		}
+		_, err = tx.db.Exec(ctx, releaseSQL, id, workerID, delay)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("release deployment %d: %w", id, err)
+	}
+	return nil
 }
 
 func (s *Store) CompleteQueueEntry(ctx context.Context, id core.DeploymentID, workerID string) error {

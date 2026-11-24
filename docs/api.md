@@ -1,8 +1,8 @@
 # HTTP API
 
-doorstep's JSON API lives under `/api/v1/` on the main listener (default `:8080`). It is built by `internal/api` and mounted once by `serve`.
+doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mounted once by `serve`.
 
-> **Unauthenticated for now.** API authentication is being built separately. Until it is merged, every API endpoint is reachable by anyone who can reach the main listener. The only endpoint is read-only and withholds worker hostnames and failure text, but keep the listener off untrusted networks until authentication lands.
+> **Metrics listener only, for now.** API authentication is being built separately. Until it is merged, the API is mounted only on the metrics listener (`--metrics-listen-addr`, default `:9090`) and never on the main listener, which receives GitHub webhooks and is usually reachable from the internet. When the metrics address is empty the API is not served at all and `serve` logs a warning. The queue shows commit SHAs, GitHub logins and deploy cadence, so keep the metrics listener on a private network.
 
 ## Conventions
 
@@ -11,7 +11,7 @@ doorstep's JSON API lives under `/api/v1/` on the main listener (default `:8080`
 - Errors use one envelope:
 
   ```json
-  {"error": {"code": "not_found", "message": "app blog is not configured"}}
+  {"error": {"code": "not_found", "message": "app is not configured"}}
   ```
 
   | Status | Code | When |

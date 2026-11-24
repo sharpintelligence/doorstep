@@ -143,7 +143,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 
 	build := buildinfo.Read()
 	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
-	mainRoutes := map[string]http.Handler{api.Prefix: apiHandler}
+	mainRoutes := map[string]http.Handler{}
 	metricsRoutes := map[string]http.Handler{"GET /metrics": m.Handler()}
 	checks := map[string]server.Check{"postgres": st.Ping}
 	newServer := func(routes map[string]http.Handler) *server.Server {
@@ -167,6 +167,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	)
 
 	if cfg.Server.MetricsListenAddr == "" {
+		logger.WarnContext(ctx, "API disabled; it is served only on the metrics listener until API authentication exists")
 		maps.Copy(mainRoutes, metricsRoutes)
 		if err := newServer(mainRoutes).Run(ctx, ln); err != nil {
 			return err
@@ -180,6 +181,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
 	}
 	logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
+	metricsRoutes[api.Prefix] = apiHandler
 
 	mainServer := newServer(mainRoutes)
 	metricsServer := newServer(metricsRoutes)

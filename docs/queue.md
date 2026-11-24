@@ -28,13 +28,15 @@ Each app's queue is ordered by:
 2. **Priority**, highest first.
 3. **Deployment id**, oldest first. Enqueue order stands in for commit order; the queue does not ask GitHub about ancestry.
 
+Where batching needs to know which of two commits is newer, it uses the order in which each commit was **first seen**: the lowest deployment id of the app with that SHA. A redeploy of an older commit therefore keeps the age of its first deployment and is never treated as newer than commits that arrived after it. A commit doorstep has never seen before counts as the newest, and commits that arrive out of order (a webhook for `c2` delivered before the one for `c1`) are ordered as they arrived.
+
 Only the head of an app's queue can be claimed, and nothing of an app is claimed while another of its entries holds a live lease. Different apps run in parallel.
 
 ## Batching
 
-When a worker claims a `queued` deploy, the queue looks at the deploys waiting behind it at the same priority and takes the first `deploy.max_batch` of them (the head included, ordered by id). The newest in that window is the one that runs; the older ones become `superseded`, with `superseded_by_id` naming the winner. All of this happens inside the claim transaction, so there is never a moment where a head is leased and then superseded.
+When a worker claims a `queued` deploy, the queue looks at the deploys waiting behind it at the same priority and takes the first `deploy.max_batch` of them (the head included, ordered by id). The one with the newest commit in that window runs; the older ones become `superseded`, with `superseded_by_id` naming the winner. All of this happens inside the claim transaction, so there is never a moment where a head is leased and then superseded.
 
-With `max_batch: 3` and five queued commits `c1`…`c5`, the first claim deploys `c3` and supersedes `c1` and `c2`; the next deploys `c5` and supersedes `c4`. `max_batch: 1` turns batching off: every commit is deployed. The limit is per app (`apps[].deploy.max_batch`, default 10, 1 to 100; see [configuration.md](configuration.md#apps)). Apps that are no longer in the configuration file are handled with a limit of 1.
+With `max_batch: 3` and five queued commits `c1`…`c5`, the first claim deploys `c3` and supersedes `c1` and `c2`; the next deploys `c5` and supersedes `c4`. `max_batch: 1` turns batching within a priority off: every normal commit is deployed. It does not turn off urgent superseding (below), which is not bounded by `max_batch`. The limit is per app (`apps[].deploy.max_batch`, default 10, 1 to 100; see [configuration.md](configuration.md#apps)). Apps that are no longer in the configuration file are handled with a limit of 1.
 
 A superseded deployment gets `finished_at`, its queue entry is deleted, and a `transition` event from `queued` to `superseded` is recorded with actor `doorstep` and the message `superseded by deployment <id>`. The claim result lists the superseded ids so the engine can notify about them.
 
@@ -42,7 +44,9 @@ Batching never applies to rollbacks, and never to a resumed in-flight deployment
 
 ## Urgent deploys
 
-An urgent deploy outranks every normal deploy of its app. When it is claimed it also supersedes **every** queued normal deploy of that app with a lower deployment id, regardless of `max_batch`. Without that, a hotfix `c5` that jumped `c1`…`c4` would be followed by a deploy of `c4` that silently reverts it. Normal deploys enqueued after the urgent one stay queued and run after it. Several urgent deploys batch among themselves exactly like normal ones.
+An urgent deploy outranks every normal deploy of its app. When it is claimed it also supersedes **every** queued normal deploy of that app with a lower deployment id whose commit was first seen before the urgent commit, regardless of `max_batch`. Without that, a hotfix `c5` that jumped `c1`…`c4` would be followed by a deploy of `c4` that silently reverts it. Normal deploys enqueued after the urgent one stay queued and run after it.
+
+An urgent redeploy of an older commit supersedes nothing newer than that commit: with `c9` and `c10` queued, an urgent redeploy of the already deployed `c8` runs first and `c9` and `c10` stay queued, so the newest commit still deploys afterwards. Several urgent deploys batch among themselves exactly like normal ones.
 
 The general rule is one sentence: batch within the head's priority, then supersede older deploys of lower priority. Rollbacks are never superseded and never supersede anything.
 
@@ -87,7 +91,6 @@ runner := queue.NewRunner(queue.RunnerOptions{
 	Source:            q,
 	Listen:            q.Listen,
 	WorkerID:          workerID,
-	HeartbeatInterval: q.HeartbeatInterval(),
 	Logger:            logger,
 })
 err = runner.Run(ctx, func(ctx context.Context, c queue.Claimed) (queue.Result, error) {
@@ -97,8 +100,8 @@ err = runner.Run(ctx, func(ctx context.Context, c queue.Claimed) (queue.Result, 
 ```
 
 - It claims until nothing is claimable or `Concurrency` (default 4) handlers are running, then waits for a wake-up or the poll tick (`PollInterval`, default 5 s). A finished handler also wakes the loop.
-- Each claim gets a heartbeat goroutine at `HeartbeatInterval` (use `Queue.HeartbeatInterval()`, a third of the lease). On `ErrLeaseLost` it cancels the handler's context with `core.ErrLeaseLost` as the cause, and the runner neither releases nor retries the entry. Other heartbeat errors are logged and retried on the next tick.
-- When the handler returns, the entry is released with `Result.RequeueAfter` as the delay. If the handler returned an error (or panicked) the delay is `Backoff(failures)` instead, where `failures` counts consecutive failures of that deployment in this process (default 5 s doubling to 5 minutes). A release that reports `ErrLeaseLost` means the handler finished the deployment and deleted its entry; that is the normal end.
+- Each claim gets a heartbeat goroutine at `HeartbeatInterval`, which defaults to a third of `Source.Lease()`; `Run` refuses to start when the interval is not shorter than the lease. On `ErrLeaseLost` it cancels the handler's context with `core.ErrLeaseLost` as the cause, and the runner neither releases nor retries the entry. Other heartbeat errors are logged and retried on the next tick.
+- When the handler returns, the entry is released with `Result.RequeueAfter` as the delay. If the handler returned an error (or panicked) the delay is `Backoff(failures)` instead, where `failures` counts consecutive failures of that deployment in this process (default 5 s doubling to 5 minutes). A deployment that has not failed here for an hour is forgotten, so deployments finished by another replica do not accumulate. A release that reports `ErrLeaseLost` means the handler finished the deployment and deleted its entry; that is the normal end. Releasing an entry whose deployment is already terminal deletes the entry, so a handler that forgets to delete it does not leak a row.
 - On shutdown the handler's context is cancelled and the entry is released with no delay, through a detached context bounded to 5 s, so another replica can take over at once instead of waiting for the lease to expire. `Run` returns nil after every handler has returned.
 - `NewWorkerID` returns the hostname plus 8 random hex characters.
 
@@ -107,5 +110,5 @@ The handler contract for the engine: do one idempotent step (or the whole deploy
 ## Observability
 
 - `doorstep_queue_depth` reports entries whose deployment is `queued` and not leased, across all apps ([metrics.md](metrics.md)).
-- `GET /api/v1/apps/{app}/queue` shows an app's entries in run order ([api.md](api.md)).
+- `GET /api/v1/apps/{app}/queue`, on the metrics listener until API authentication exists, shows an app's entries in run order ([api.md](api.md)).
 - Superseded deployments and priority changes are in the deployment events.

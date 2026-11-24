@@ -407,6 +407,47 @@ func TestQueueEntryLease(t *testing.T) {
 			},
 		},
 		{
+			name:    "release of a finished deployment drops its entry",
+			prepare: succeedDeployment,
+			worker:  "w1",
+			op: func(t *testing.T, st *store.Store, id core.DeploymentID, worker string) error {
+				t.Helper()
+				return st.ReleaseQueueEntry(t.Context(), id, worker, time.Hour)
+			},
+			check: func(t *testing.T, st *store.Store, id core.DeploymentID) {
+				t.Helper()
+				if n := queryInt(t, st, "SELECT count(*) FROM queue_entries WHERE deployment_id = $1", id); n != 0 {
+					t.Error("entry of a finished deployment was kept")
+				}
+			},
+		},
+		{
+			name:    "release of a cancelled deployment by another worker is lost",
+			prepare: cancelEntry,
+			worker:  "w2",
+			op: func(t *testing.T, st *store.Store, id core.DeploymentID, worker string) error {
+				t.Helper()
+				return st.ReleaseQueueEntry(t.Context(), id, worker, 0)
+			},
+			wantErr: core.ErrLeaseLost,
+			check: func(t *testing.T, st *store.Store, id core.DeploymentID) {
+				t.Helper()
+				if n := queryInt(t, st, "SELECT count(*) FROM queue_entries WHERE deployment_id = $1 AND lease_owner = 'w1'", id); n != 1 {
+					t.Error("foreign release dropped the entry")
+				}
+			},
+		},
+		{
+			name:    "release of a completed entry is lost",
+			prepare: completeEntry,
+			worker:  "w1",
+			op: func(t *testing.T, st *store.Store, id core.DeploymentID, worker string) error {
+				t.Helper()
+				return st.ReleaseQueueEntry(t.Context(), id, worker, 0)
+			},
+			wantErr: core.ErrLeaseLost,
+		},
+		{
 			name:   "release by another worker is lost",
 			worker: "w2",
 			op: func(t *testing.T, st *store.Store, id core.DeploymentID, worker string) error {

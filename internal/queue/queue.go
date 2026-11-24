@@ -75,10 +75,6 @@ func (q *Queue) Lease() time.Duration {
 	return q.lease
 }
 
-func (q *Queue) HeartbeatInterval() time.Duration {
-	return q.lease / 3
-}
-
 func (q *Queue) Enqueue(ctx context.Context, d core.Deployment, opts EnqueueOptions) (EnqueueResult, error) {
 	got, created, err := q.store.EnqueueDeployment(ctx, d, PriorityFor(d.Kind, opts.Urgent))
 	if err != nil {

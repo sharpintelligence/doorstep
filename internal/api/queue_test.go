@@ -115,6 +115,14 @@ func TestGetQueue(t *testing.T) {
 			wantCode:   "not_found",
 		},
 		{
+			name:       "unknown app with markup in its name",
+			path:       "/api/v1/apps/%3Cscript%3Ealert(1)%3C%2Fscript%3E/queue",
+			queue:      &fakeQueue{},
+			apps:       fakeApps{"web": true},
+			wantStatus: http.StatusNotFound,
+			wantCode:   "not_found",
+		},
+		{
 			name:       "store error hides detail",
 			path:       "/api/v1/apps/web/queue",
 			queue:      &fakeQueue{err: errors.New("dial tcp 10.0.0.5:5432: password authentication failed")},
@@ -175,6 +183,9 @@ func TestGetQueue(t *testing.T) {
 				envelope, _ := body["error"].(map[string]any)
 				if envelope["code"] != tt.wantCode || envelope["message"] == "" {
 					t.Errorf("error = %v, want code %q with a message", body["error"], tt.wantCode)
+				}
+				if strings.Contains(rec.Body.String(), "nope") || strings.Contains(rec.Body.String(), "script") {
+					t.Errorf("response echoes the requested app: %s", rec.Body.String())
 				}
 				if strings.Contains(rec.Body.String(), "password") {
 					t.Errorf("response leaks the store error: %s", rec.Body.String())

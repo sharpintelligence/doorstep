@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -19,9 +20,11 @@ const (
 	releaseTimeout = 5 * time.Second
 	minBackoff     = 5 * time.Second
 	maxBackoff     = 5 * time.Minute
+	failureMemory  = time.Hour
 )
 
 type Source interface {
+	Lease() time.Duration
 	Claim(ctx context.Context, workerID string) (Claimed, bool, error)
 	Heartbeat(ctx context.Context, id core.DeploymentID, workerID string) (time.Time, error)
 	Release(ctx context.Context, id core.DeploymentID, workerID string, delay time.Duration) error
@@ -55,7 +58,12 @@ type Runner struct {
 	logger            *slog.Logger
 
 	mu       sync.Mutex
-	failures map[core.DeploymentID]int
+	failures map[core.DeploymentID]failure
+}
+
+type failure struct {
+	count int
+	last  time.Time
 }
 
 func NewRunner(opts RunnerOptions) *Runner {
@@ -68,7 +76,7 @@ func NewRunner(opts RunnerOptions) *Runner {
 		heartbeatInterval: opts.HeartbeatInterval,
 		backoff:           opts.Backoff,
 		logger:            opts.Logger,
-		failures:          map[core.DeploymentID]int{},
+		failures:          map[core.DeploymentID]failure{},
 	}
 	if r.concurrency <= 0 {
 		r.concurrency = DefaultConcurrency
@@ -76,8 +84,8 @@ func NewRunner(opts RunnerOptions) *Runner {
 	if r.pollInterval <= 0 {
 		r.pollInterval = DefaultPollInterval
 	}
-	if r.heartbeatInterval <= 0 {
-		r.heartbeatInterval = DefaultLease / 3
+	if r.heartbeatInterval <= 0 && r.source != nil {
+		r.heartbeatInterval = r.source.Lease() / 3
 	}
 	if r.backoff == nil {
 		r.backoff = ExponentialBackoff
@@ -105,6 +113,9 @@ func (r *Runner) Run(ctx context.Context, handle Handler) error {
 	}
 	if handle == nil {
 		return errors.New("queue runner: handler is required")
+	}
+	if lease := r.source.Lease(); r.heartbeatInterval <= 0 || r.heartbeatInterval >= lease {
+		return fmt.Errorf("queue runner: heartbeat interval %s must be positive and shorter than the lease %s", r.heartbeatInterval, lease)
 	}
 
 	wakeups := make(chan struct{}, 1)
@@ -239,8 +250,15 @@ func (r *Runner) heartbeat(ctx context.Context, cancel context.CancelCauseFunc, 
 func (r *Runner) recordFailure(id core.DeploymentID) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.failures[id]++
-	return r.failures[id]
+	now := time.Now()
+	maps.DeleteFunc(r.failures, func(_ core.DeploymentID, f failure) bool {
+		return now.Sub(f.last) > failureMemory
+	})
+	f := r.failures[id]
+	f.count++
+	f.last = now
+	r.failures[id] = f
+	return f.count
 }
 
 func (r *Runner) forget(id core.DeploymentID) {

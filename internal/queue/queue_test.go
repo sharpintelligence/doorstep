@@ -61,19 +61,17 @@ func TestNewDefaults(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		lease         time.Duration
-		wantLease     time.Duration
-		wantHeartbeat time.Duration
+		name      string
+		lease     time.Duration
+		wantLease time.Duration
 	}{
-		{name: "default", wantLease: queue.DefaultLease, wantHeartbeat: queue.DefaultLease / 3},
-		{name: "negative", lease: -time.Second, wantLease: queue.DefaultLease, wantHeartbeat: queue.DefaultLease / 3},
-		{name: "custom", lease: 90 * time.Second, wantLease: 90 * time.Second, wantHeartbeat: 30 * time.Second},
+		{name: "default", wantLease: queue.DefaultLease},
+		{name: "negative", lease: -time.Second, wantLease: queue.DefaultLease},
+		{name: "custom", lease: 90 * time.Second, wantLease: 90 * time.Second},
 	}
 	for _, tt := range tests {
-		q := queue.New(queue.Options{Lease: tt.lease})
-		if q.Lease() != tt.wantLease || q.HeartbeatInterval() != tt.wantHeartbeat {
-			t.Errorf("%s: lease %s, heartbeat %s; want %s, %s", tt.name, q.Lease(), q.HeartbeatInterval(), tt.wantLease, tt.wantHeartbeat)
+		if got := queue.New(queue.Options{Lease: tt.lease}).Lease(); got != tt.wantLease {
+			t.Errorf("%s: lease %s, want %s", tt.name, got, tt.wantLease)
 		}
 	}
 }
@@ -232,11 +230,10 @@ func TestRunnerEndToEnd(t *testing.T) {
 
 	handled := make(chan queue.Claimed, 10)
 	runner := queue.NewRunner(queue.RunnerOptions{
-		Source:            q,
-		Listen:            q.Listen,
-		WorkerID:          "runner-1",
-		PollInterval:      time.Hour,
-		HeartbeatInterval: q.HeartbeatInterval(),
+		Source:       q,
+		Listen:       q.Listen,
+		WorkerID:     "runner-1",
+		PollInterval: time.Hour,
 	})
 	done := make(chan error, 1)
 	go func() {
@@ -294,10 +291,9 @@ func TestRunnerRecoversCrashedWorker(t *testing.T) {
 	var got queue.Claimed
 	handled := make(chan struct{})
 	runner := queue.NewRunner(queue.RunnerOptions{
-		Source:            q,
-		WorkerID:          "survivor",
-		PollInterval:      100 * time.Millisecond,
-		HeartbeatInterval: q.HeartbeatInterval(),
+		Source:       q,
+		WorkerID:     "survivor",
+		PollInterval: 100 * time.Millisecond,
 	})
 	done := make(chan error, 1)
 	go func() {

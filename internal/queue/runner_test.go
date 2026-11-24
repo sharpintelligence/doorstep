@@ -28,6 +28,7 @@ type releaseCall struct {
 }
 
 type fakeSource struct {
+	lease        time.Duration
 	mu           sync.Mutex
 	items        []*fakeItem
 	claimErr     error
@@ -61,6 +62,13 @@ func (f *fakeSource) complete(id core.DeploymentID) {
 	f.item(id).done = true
 }
 
+func (f *fakeSource) Lease() time.Duration {
+	if f.lease > 0 {
+		return f.lease
+	}
+	return DefaultLease
+}
+
 func (f *fakeSource) Claim(context.Context, string) (Claimed, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,7 +98,7 @@ func (f *fakeSource) Heartbeat(_ context.Context, id core.DeploymentID, _ string
 	if it := f.item(id); it == nil || it.done || !it.leased {
 		return time.Time{}, core.ErrLeaseLost
 	}
-	return time.Now().Add(DefaultLease), nil
+	return time.Now().Add(f.Lease()), nil
 }
 
 func (f *fakeSource) Release(ctx context.Context, id core.DeploymentID, worker string, delay time.Duration) error {
@@ -301,11 +309,13 @@ func TestRunnerHeartbeats(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		lease    time.Duration
 		interval time.Duration
 		work     time.Duration
 		want     int
 	}{
 		{name: "default interval", work: 70 * time.Second, want: 3},
+		{name: "default interval from a short lease", lease: 9 * time.Second, work: 10 * time.Second, want: 3},
 		{name: "custom interval", interval: 10 * time.Second, work: 35 * time.Second, want: 3},
 		{name: "short work", interval: 10 * time.Second, work: 5 * time.Second, want: 0},
 	}
@@ -313,7 +323,7 @@ func TestRunnerHeartbeats(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				src := &fakeSource{}
+				src := &fakeSource{lease: tt.lease}
 				src.add(1)
 				h := startRunner(t, RunnerOptions{Source: src, HeartbeatInterval: tt.interval}, func(_ context.Context, c Claimed) (Result, error) {
 					time.Sleep(tt.work)
@@ -420,6 +430,33 @@ func TestRunnerBackoff(t *testing.T) {
 	})
 }
 
+func TestRunnerForgetsStaleFailures(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		r := NewRunner(RunnerOptions{Source: &fakeSource{}})
+		if got := r.recordFailure(1); got != 1 {
+			t.Fatalf("first failure of 1 = %d", got)
+		}
+		if got := r.recordFailure(1); got != 2 {
+			t.Fatalf("second failure of 1 = %d", got)
+		}
+		time.Sleep(failureMemory + time.Second)
+		if got := r.recordFailure(2); got != 1 {
+			t.Fatalf("first failure of 2 = %d", got)
+		}
+		if _, ok := r.failures[1]; ok {
+			t.Errorf("failures still tracks deployment 1 after %s: %v", failureMemory, r.failures)
+		}
+		if got := r.recordFailure(1); got != 1 {
+			t.Errorf("failure of 1 after it was forgotten = %d, want 1", got)
+		}
+		if len(r.failures) != 2 {
+			t.Errorf("failures = %v, want two entries", r.failures)
+		}
+	})
+}
+
 func TestRunnerHandlerPanicIsAFailure(t *testing.T) {
 	t.Parallel()
 
@@ -521,6 +558,9 @@ func TestRunnerRejectsInvalidOptions(t *testing.T) {
 		{name: "no source", opts: RunnerOptions{WorkerID: "w1"}, handler: handler},
 		{name: "no worker", opts: RunnerOptions{Source: &fakeSource{}, WorkerID: " "}, handler: handler},
 		{name: "no handler", opts: RunnerOptions{Source: &fakeSource{}, WorkerID: "w1"}},
+		{name: "heartbeat as long as the lease", opts: RunnerOptions{Source: &fakeSource{lease: 10 * time.Second}, WorkerID: "w1", HeartbeatInterval: 10 * time.Second}, handler: handler},
+		{name: "heartbeat longer than the lease", opts: RunnerOptions{Source: &fakeSource{}, WorkerID: "w1", HeartbeatInterval: 2 * DefaultLease}, handler: handler},
+		{name: "lease too short for a heartbeat", opts: RunnerOptions{Source: &fakeSource{lease: 2 * time.Nanosecond}, WorkerID: "w1"}, handler: handler},
 	}
 	for _, tt := range tests {
 		if err := NewRunner(tt.opts).Run(t.Context(), tt.handler); err == nil {

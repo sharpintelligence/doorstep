@@ -199,7 +199,7 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
 - Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - A target's queue runs in-flight deployments first, then by priority (`normal` 0, `urgent` 100, `rollback` 200), then oldest first. An urgent deploy jumps queued work but never preempts an in-flight deployment.
-- Claiming a queued deploy batches it: the newest of the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy. Rollbacks never batch and are never superseded ([ADR 0003](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
+- Claiming a queued deploy batches it: the deploy with the newest commit among the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy of an older commit. Commit age is the order in which commits were first enqueued. Rollbacks never batch and are never superseded ([ADR 0003](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
 - Enqueueing a deploy is idempotent per app and commit SHA while a deploy of that commit is queued or in flight.
 - `LISTEN/NOTIFY` is only a wake-up hint: a trigger on `queue_entries` notifies on enqueue, completion, release and priority changes, and `queue.Runner` also polls every 5 seconds, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
@@ -275,12 +275,12 @@ One listener (default `:8080`) serves everything public:
 | `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
 | `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
 | `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) | built |
-| `GET /api/v1/apps/{app}/queue` | an app's queue in run order; unauthenticated until the auth work lands (see [api.md](api.md)) | built |
+| `GET /api/v1/apps/{app}/queue` | an app's queue in run order; served only on the metrics listener until the auth work lands (see [api.md](api.md)) | built |
 | `/api/v1/...` | further JSON API resources; unknown API paths answer with a JSON `404` | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
 
-The JSON API is one handler from `api.New`, mounted at `api.Prefix` (`/api/v1/`) on the main listener in both listener modes; its `Options.Middleware` wraps every API route, which is where authentication plugs in.
+The JSON API is one handler from `api.New`, mounted at `api.Prefix` (`/api/v1/`) on the metrics listener only, and not at all when that listener is disabled, until authentication exists; its `Options.Middleware` wraps every API route, which is where authentication plugs in.
 
 Readiness checks are registered by name in `server.Options.Checks`; `serve` registers `postgres`, which pings the connection pool. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. Further handlers are mounted through `server.Options.Routes` (a map of `ServeMux` pattern to handler), which keeps them inside the request logging and panic recovery middleware; `/metrics` requests are logged at debug like probes.
 
