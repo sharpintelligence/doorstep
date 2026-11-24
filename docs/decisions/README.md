@@ -7,6 +7,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
 | [0001](0001-go-and-core-design.md) | Go, and doorstep's core design | Accepted | 2026-11-23 |
+| [0002](0002-rollback-is-a-new-deployment.md) | A rollback is a new deployment | Accepted | 2026-11-23 |
 
 ## When to write one
 

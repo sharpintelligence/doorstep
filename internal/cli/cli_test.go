@@ -6,7 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +19,7 @@ import (
 
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
+	"github.com/sharpintelligence/doorstep/internal/store/storetest"
 )
 
 type lockedBuffer struct {
@@ -95,11 +100,13 @@ func TestRunVersion(t *testing.T) {
 func TestRunErrors(t *testing.T) {
 	t.Parallel()
 
+	const password = "hunter2-very-secret"
 	tests := []struct {
-		name       string
-		args       []string
-		env        map[string]string
-		wantStderr []string
+		name         string
+		args         []string
+		env          map[string]string
+		wantStderr   []string
+		forbidStderr []string
 	}{
 		{
 			name:       "unknown command",
@@ -131,6 +138,7 @@ func TestRunErrors(t *testing.T) {
 				"shutdown timeout",
 				"log level",
 				"log format",
+				"database",
 			},
 		},
 		{
@@ -146,9 +154,76 @@ func TestRunErrors(t *testing.T) {
 			wantStderr: []string{"doorstep: invalid configuration", "log format"},
 		},
 		{
-			name:       "listen failure",
-			args:       []string{"serve", "--listen-addr", "256.0.0.1:0"},
-			wantStderr: []string{"doorstep: listen on 256.0.0.1:0"},
+			name:       "serve without database",
+			args:       []string{"serve"},
+			wantStderr: []string{"doorstep: invalid configuration", config.EnvDatabaseURL, config.EnvDatabaseURLFile},
+		},
+		{
+			name: "serve with both database sources",
+			args: []string{"serve"},
+			env: map[string]string{
+				config.EnvDatabaseURL:     "postgres://doorstep:" + password + "@localhost/doorstep",
+				config.EnvDatabaseURLFile: "/run/secrets/database-url",
+			},
+			wantStderr:   []string{"doorstep: invalid configuration", "exactly one"},
+			forbidStderr: []string{password},
+		},
+		{
+			name:       "serve with missing database URL file",
+			args:       []string{"serve", "--database-url-file", "/nonexistent/database-url"},
+			wantStderr: []string{"doorstep: read database URL file", "/nonexistent/database-url"},
+		},
+		{
+			name:         "serve with unreachable database",
+			args:         []string{"serve"},
+			env:          map[string]string{config.EnvDatabaseURL: "postgres://doorstep:" + password + "@127.0.0.1:1/doorstep?connect_timeout=1&sslmode=disable"},
+			wantStderr:   []string{"doorstep: open database: connect to database"},
+			forbidStderr: []string{password, "postgres://"},
+		},
+		{
+			name:         "serve with malformed database URL",
+			args:         []string{"serve"},
+			env:          map[string]string{config.EnvDatabaseURL: "postgres://doorstep:" + password + "@localhost:notaport/doorstep"},
+			wantStderr:   []string{"doorstep: open database: invalid database URL"},
+			forbidStderr: []string{password, "postgres://"},
+		},
+		{
+			name:       "migrate without database",
+			args:       []string{"migrate"},
+			wantStderr: []string{"doorstep: invalid configuration: database", config.EnvDatabaseURL},
+		},
+		{
+			name:       "migrate status without database",
+			args:       []string{"migrate", "status"},
+			wantStderr: []string{"doorstep: invalid configuration: database"},
+		},
+		{
+			name:       "migrate with invalid log level",
+			args:       []string{"migrate", "--log-level", "loud", "--database-url-file", "/run/secrets/database-url"},
+			wantStderr: []string{"doorstep: invalid configuration", "log level"},
+		},
+		{
+			name:       "migrate ignores server settings",
+			args:       []string{"migrate", "--database-url-file", "/nonexistent/database-url"},
+			env:        map[string]string{config.EnvListenAddr: "nowhere"},
+			wantStderr: []string{"doorstep: read database URL file"},
+		},
+		{
+			name:       "migrate rejects server flags",
+			args:       []string{"migrate", "--listen-addr", ":0"},
+			wantStderr: []string{"doorstep: unknown flag: --listen-addr"},
+		},
+		{
+			name:       "migrate unexpected argument",
+			args:       []string{"migrate", "down"},
+			wantStderr: []string{`doorstep: unknown command "down"`},
+		},
+		{
+			name:         "migrate status with unreachable database",
+			args:         []string{"migrate", "status"},
+			env:          map[string]string{config.EnvDatabaseURL: "postgres://doorstep:" + password + "@127.0.0.1:1/doorstep?connect_timeout=1&sslmode=disable"},
+			wantStderr:   []string{"doorstep: open database"},
+			forbidStderr: []string{password, "postgres://"},
 		},
 	}
 
@@ -165,6 +240,11 @@ func TestRunErrors(t *testing.T) {
 					t.Errorf("stderr %q does not contain %q", stderr.String(), want)
 				}
 			}
+			for _, forbidden := range tt.forbidStderr {
+				if strings.Contains(stderr.String(), forbidden) || strings.Contains(stdout.String(), forbidden) {
+					t.Errorf("output leaks %q: stdout %q stderr %q", forbidden, stdout.String(), stderr.String())
+				}
+			}
 			if strings.Contains(stderr.String(), "Usage:") {
 				t.Errorf("stderr prints usage on error: %q", stderr.String())
 			}
@@ -175,23 +255,51 @@ func TestRunErrors(t *testing.T) {
 func TestRunHelp(t *testing.T) {
 	t.Parallel()
 
-	var stdout, stderr bytes.Buffer
-	if code := Run(t.Context(), []string{"serve", "--help"}, &stdout, &stderr, envFrom(nil)); code != 0 {
-		t.Fatalf("exit code = %d, stderr %q", code, stderr.String())
+	tests := []struct {
+		args []string
+		want []string
+	}{
+		{
+			args: []string{"serve", "--help"},
+			want: []string{"--listen-addr", "--log-level", "--log-format", "--shutdown-delay", "--shutdown-timeout", "--database-url-file", config.EnvListenAddr, config.EnvShutdownDelay, config.EnvDatabaseURL, config.EnvDatabaseURLFile},
+		},
+		{
+			args: []string{"migrate", "--help"},
+			want: []string{"status", "--log-level", "--log-format", "--database-url-file", config.EnvDatabaseURLFile},
+		},
+		{
+			args: []string{"migrate", "status", "--help"},
+			want: []string{"--database-url-file", "--log-level"},
+		},
+		{
+			args: []string{"--help"},
+			want: []string{"serve", "migrate", "version"},
+		},
 	}
-	for _, want := range []string{"--listen-addr", "--log-level", "--log-format", "--shutdown-delay", "--shutdown-timeout", config.EnvListenAddr, config.EnvShutdownDelay} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Errorf("help %q does not mention %q", stdout.String(), want)
-		}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			if code := Run(t.Context(), tt.args, &stdout, &stderr, envFrom(nil)); code != 0 {
+				t.Fatalf("exit code = %d, stderr %q", code, stderr.String())
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("help %q does not mention %q", stdout.String(), want)
+				}
+			}
+		})
 	}
 }
 
 func TestResolveServeConfig(t *testing.T) {
 	t.Parallel()
 
+	const databaseURL = "postgres://doorstep@localhost/doorstep"
 	flags := config.Config{
-		Server: config.Server{ListenAddr: "127.0.0.1:7000", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
-		Log:    config.Log{Level: "error", Format: "text"},
+		Server:   config.Server{ListenAddr: "127.0.0.1:7000", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
+		Log:      config.Log{Level: "error", Format: "text"},
+		Database: config.Database{URLFile: "/run/secrets/database-url"},
 	}
 	tests := []struct {
 		name    string
@@ -219,8 +327,24 @@ func TestResolveServeConfig(t *testing.T) {
 		},
 		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat},
+			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile},
 			want:    func(c *config.Config) { *c = flags },
+		},
+		{
+			name: "database URL file from environment",
+			env:  map[string]string{config.EnvDatabaseURL: "", config.EnvDatabaseURLFile: "/etc/doorstep/db"},
+			want: func(c *config.Config) { c.Database = config.Database{URLFile: "/etc/doorstep/db"} },
+		},
+		{
+			name:    "database URL file flag replaces the environment URL",
+			changed: []string{flagDatabaseURLFile},
+			want:    func(c *config.Config) { c.Database = flags.Database },
+		},
+		{
+			name:    "database URL file flag replaces the environment file",
+			env:     map[string]string{config.EnvDatabaseURL: "", config.EnvDatabaseURLFile: "/etc/doorstep/db"},
+			changed: []string{flagDatabaseURLFile},
+			want:    func(c *config.Config) { c.Database = flags.Database },
 		},
 		{
 			name: "flags over environment",
@@ -255,10 +379,16 @@ func TestResolveServeConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			changed := func(name string) bool { return slices.Contains(tt.changed, name) }
+			env := map[string]string{config.EnvDatabaseURL: databaseURL}
+			maps.Copy(env, tt.env)
+			if env[config.EnvDatabaseURL] == "" {
+				delete(env, config.EnvDatabaseURL)
+			}
 			want := config.Default()
+			want.Database.URL = databaseURL
 			tt.want(&want)
 
-			got, err := resolveServeConfig(changed, flags, envFrom(tt.env))
+			got, err := resolveServeConfig(changed, flags, envFrom(env))
 			if err != nil {
 				t.Fatalf("resolveServeConfig: %v", err)
 			}
@@ -273,13 +403,20 @@ func TestRunServe(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		args []string
-		env  map[string]string
+		name     string
+		args     []string
+		env      map[string]string
+		database databaseSource
 	}{
 		{
-			name: "flags",
-			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
+			name:     "flags",
+			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
+			database: databaseFileFlag,
+		},
+		{
+			name:     "database URL file from environment",
+			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--log-level", "debug"},
+			database: databaseFileEnv,
 		},
 		{
 			name: "environment",
@@ -306,22 +443,16 @@ func TestRunServe(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
+			args, env := withDatabase(t, tt.database, tt.args, tt.env)
 			done := make(chan int, 1)
-			go func() { done <- Run(ctx, tt.args, &stdout, &stderr, envFrom(tt.env)) }()
+			go func() { done <- Run(ctx, args, &stdout, &stderr, envFrom(env)) }()
 
 			addr := waitForListening(t, &stderr, done)
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/healthz", http.NoBody)
-			if err != nil {
-				t.Fatalf("NewRequest: %v", err)
+			if code, body := get(t, "http://"+addr+"/healthz"); code != http.StatusOK || !strings.Contains(body, `"status":"ok"`) {
+				t.Errorf("GET /healthz = %d %q", code, body)
 			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("GET /healthz: %v", err)
-			}
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
-				t.Errorf("GET /healthz = %d %q", resp.StatusCode, body)
+			if code, body := get(t, "http://"+addr+"/readyz"); code != http.StatusOK || !strings.Contains(body, `"postgres":"ok"`) {
+				t.Errorf("GET /readyz = %d %q", code, body)
 			}
 
 			cancel()
@@ -335,7 +466,7 @@ func TestRunServe(t *testing.T) {
 			}
 
 			logs := parseLogs(t, stderr.String())
-			for _, msg := range []string{"listening", "request", "shutting down", "stopped"} {
+			for _, msg := range []string{"database ready", "listening", "request", "shutting down", "stopped"} {
 				if !hasMessage(logs, msg) {
 					t.Errorf("logs missing %q: %s", msg, stderr.String())
 				}
@@ -344,6 +475,154 @@ func TestRunServe(t *testing.T) {
 				t.Errorf("unexpected stdout %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunServeListenFailure(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	env := map[string]string{config.EnvDatabaseURL: storetest.DatabaseURL(t)}
+	code := Run(t.Context(), []string{"serve", "--listen-addr", "256.0.0.1:0"}, &stdout, &stderr, envFrom(env))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doorstep: listen on 256.0.0.1:0") {
+		t.Errorf("stderr %q does not report the listen failure", stderr.String())
+	}
+}
+
+func TestRunMigrate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		database databaseSource
+	}{
+		{name: "environment URL", database: databaseURLEnv},
+		{name: "file flag", database: databaseFileFlag},
+		{name: "file environment", database: databaseFileEnv},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			databaseArgs, env := withDatabase(t, tt.database, nil, nil)
+			run := func(args ...string) string {
+				t.Helper()
+				args = append(args, databaseArgs...)
+				var stdout, stderr bytes.Buffer
+				if code := Run(t.Context(), args, &stdout, &stderr, envFrom(env)); code != 0 {
+					t.Fatalf("%v: exit code = %d, stderr %q", args, code, stderr.String())
+				}
+				return stdout.String()
+			}
+
+			before := run("migrate", "status")
+			assertLines(t, before, `^VERSION\s+STATE\s+APPLIED AT\s+NAME$`, `^1\s+pending\s+-\s+00001_initial_schema\.sql$`)
+
+			assertLines(t, run("migrate"), `^applied 1 00001_initial_schema\.sql \(\S+\)$`)
+			assertLines(t, run("migrate"), `^no pending migrations$`)
+
+			after := run("migrate", "status", "--log-format", "text")
+			assertLines(t, after, `^VERSION\s+STATE\s+APPLIED AT\s+NAME$`, `^1\s+applied\s+\d{4}-\d{2}-\d{2}T\S+Z\s+00001_initial_schema\.sql$`)
+		})
+	}
+}
+
+func TestRunMigrateThenServe(t *testing.T) {
+	t.Parallel()
+
+	args, env := withDatabase(t, databaseURLEnv, []string{"migrate"}, nil)
+	var stdout, stderr bytes.Buffer
+	if code := Run(t.Context(), args, &stdout, &stderr, envFrom(env)); code != 0 {
+		t.Fatalf("migrate exit code = %d, stderr %q", code, stderr.String())
+	}
+
+	var logs lockedBuffer
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"}, io.Discard, &logs, envFrom(env))
+	}()
+	waitForListening(t, &logs, done)
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("serve exit code = %d, stderr %q", code, logs.String())
+	}
+	for _, entry := range parseLogs(t, logs.String()) {
+		if entry["msg"] != "database ready" {
+			continue
+		}
+		if applied, ok := entry["applied_migrations"].([]any); !ok || len(applied) != 0 {
+			t.Errorf("serve applied migrations %v after migrate, want none", entry["applied_migrations"])
+		}
+		return
+	}
+	t.Errorf("serve never logged database ready: %s", logs.String())
+}
+
+type databaseSource int
+
+const (
+	databaseURLEnv databaseSource = iota
+	databaseFileFlag
+	databaseFileEnv
+)
+
+func withDatabase(t *testing.T, source databaseSource, args []string, env map[string]string) ([]string, map[string]string) {
+	t.Helper()
+	databaseURL := storetest.DatabaseURL(t)
+	merged := maps.Clone(env)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	args = slices.Clone(args)
+	switch source {
+	case databaseURLEnv:
+		merged[config.EnvDatabaseURL] = databaseURL
+	case databaseFileFlag:
+		args = append(args, "--database-url-file", writeDatabaseURLFile(t, databaseURL))
+	case databaseFileEnv:
+		merged[config.EnvDatabaseURLFile] = writeDatabaseURLFile(t, databaseURL)
+	}
+	return args, merged
+}
+
+func writeDatabaseURLFile(t *testing.T, databaseURL string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "database-url")
+	if err := os.WriteFile(path, []byte(databaseURL+"\n"), 0o600); err != nil {
+		t.Fatalf("write database URL file: %v", err)
+	}
+	return path
+}
+
+func get(t *testing.T, url string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func assertLines(t *testing.T, out string, patterns ...string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != len(patterns) {
+		t.Fatalf("output has %d lines, want %d: %q", len(lines), len(patterns), out)
+	}
+	for i, pattern := range patterns {
+		if !regexp.MustCompile(pattern).MatchString(lines[i]) {
+			t.Errorf("line %d %q does not match %s", i, lines[i], pattern)
+		}
 	}
 }
 

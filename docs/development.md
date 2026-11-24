@@ -31,15 +31,33 @@ Run `just check` before pushing.
 
 ## Integration tests
 
-Tests that need Postgres read `DOORSTEP_TEST_DATABASE_URL` and skip when it is unset. To run them locally, point it at a disposable database:
+Tests that need Postgres read `DOORSTEP_TEST_DATABASE_URL` (a `postgres://` URL) and skip when it is unset. Set `DOORSTEP_TEST_REQUIRE_DATABASE=true` to make them fail instead of skipping; CI does, so a lost variable cannot silently turn the integration tests off. To run them locally, start a disposable database on a free port:
 
 ```sh
-docker run --rm -d --name doorstep-pg -e POSTGRES_PASSWORD=doorstep -e POSTGRES_DB=doorstep_test -p 5432:5432 postgres:18-alpine
-export DOORSTEP_TEST_DATABASE_URL='postgres://postgres:doorstep@localhost:5432/doorstep_test?sslmode=disable'
+container=$(docker run -d --rm -e POSTGRES_PASSWORD=doorstep -p 127.0.0.1:0:5432 postgres:18-alpine)
+port=$(docker port "$container" 5432 | cut -d: -f2)
+export DOORSTEP_TEST_DATABASE_URL="postgres://postgres:doorstep@127.0.0.1:$port/postgres?sslmode=disable"
+export DOORSTEP_TEST_REQUIRE_DATABASE=true
 just test
+docker stop "$container"
 ```
 
-A helper that gives each test its own schema, so tests can run in parallel against one database, is planned (`internal/store/storetest`, added by the store bead) and not yet implemented.
+Tests that only unit-test logic need none of this; `serve` and `migrate` command tests and everything in `internal/store` do.
+
+`internal/store/storetest` isolates tests so they can run in parallel against one database:
+
+- `storetest.Open(t)` returns a `*store.Store` connected to a fresh schema with all migrations applied, closed when the test ends.
+- `storetest.DatabaseURL(t)` creates a fresh, empty schema and returns a URL whose `search_path` points at it (with `pool_max_conns=5`), for tests that open the store or run commands themselves.
+
+Each schema is named `t_<random hex>` and dropped with everything in it when the test finishes, so no `CREATEDB` privilege is needed. `storetest.Open` migrates with `store.WithoutSessionLock()`, because the migration advisory lock is database-wide and would serialise parallel tests; production code always takes the lock.
+
+To run the binary locally, point it at the same container:
+
+```sh
+export DOORSTEP_DATABASE_URL="$DOORSTEP_TEST_DATABASE_URL"
+bin/doorstep migrate status
+bin/doorstep serve
+```
 
 ## Continuous integration
 
@@ -49,7 +67,7 @@ A helper that gives each test its own schema, so tests can run in parallel again
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
 3. runs `just check` and `just build`.
 
-A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` exported. No code uses it yet: it is provisioned ahead of the store bead on purpose, so the CI environment for integration tests is settled before the first one lands. Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions and Go modules.
+A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions and Go modules.
 
 ## Conventions
 

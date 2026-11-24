@@ -36,10 +36,9 @@ doorstep never talks to workloads directly and never mutates Argo CD. Git is the
           │                 │
        pass                fail
           ▼                 ▼
-     succeeded         rollback: re-pin previous digest
-                            │
-                            ▼
-                   rolled_back | rollback_failed
+     succeeded         failed, and a rollback deployment is queued
+                       at high priority: it re-pins the previous
+                       digest through this same path
 
  notify fires on every terminal state; history records every transition.
 ```
@@ -56,8 +55,8 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
 | `internal/buildinfo` | version from `-ldflags -X`, VCS revision/time/dirty flag and Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
-| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...) and the state enum; imports nothing internal | planned |
-| `internal/store` | Postgres via pgx, embedded goose migrations, repositories implementing engine ports | planned |
+| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation and queue claims; see [database.md](database.md) | built |
 | `internal/queue` | durable work queue: `SELECT ... FOR UPDATE SKIP LOCKED` claims with leases and heartbeats | planned |
 | `internal/locks` | per-target deployment locks and manual freeze locks | planned |
 | `internal/history` | append-only transition log and its read models | planned |
@@ -83,10 +82,11 @@ The design is ports and adapters.
 
 - `core` imports nothing from `internal/`. Every other package may import it.
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
-- Adapters (`store`, `queue`, `locks`, `history`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with one exception: `gitops` and `intake` use `github`.
+- Adapters (`store`, `queue`, `locks`, `history`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `history`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers.
+- `store` imports only `core`.
 - `api` and `web` call `engine` for commands and `store` read models for queries. They contribute handlers; `server` owns the listener, middleware and health endpoints.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
-- No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The single exception is the link-time `buildinfo.version` variable.
+- No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The single exception is the link-time `buildinfo.version` variable. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
 - Errors are wrapped with `%w` and inspected with `errors.Is` / `errors.As`.
 
@@ -149,20 +149,24 @@ Deployment state is persisted in Postgres:
 ```
 queued → resolving → pinning → syncing → verifying → succeeded
                                               │
-                                              └────► failed → rolling_back → rolled_back
-                                                                     └─────► rollback_failed
+                                              └────► failed
 ```
 
-Any non-terminal deployment can also become `cancelled` (operator action) or `superseded` (a newer deployment for the same target was queued before this one started pinning).
+Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `failed` (an unresolvable tag or a GitHub error fails a deploy before verification). Any non-terminal deployment can become `cancelled` (operator action), and a `queued` or `resolving` deployment can become `superseded` (a newer deployment for the same target was queued before this one started pinning).
+
+- Terminal states: `succeeded`, `failed`, `cancelled`, `superseded`. A terminal state has no outgoing transitions.
+- Active states: `resolving`, `pinning`, `syncing`, `verifying`. At most one deployment per target is active.
+- The legal transitions are a table in `core` (`State.CanTransitionTo`), not a switch.
+- A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`.
 
 - Every transition is a compare-and-set on `(id, from_state)` and is recorded in history.
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
-- Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target.
+- Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - `LISTEN/NOTIFY` is only a wake-up hint; workers also poll, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
 - Manual freeze locks are rows in a `locks` table, visible and removable in the UI and CLI.
 
-Postgres is the only stateful dependency. Running more than one replica is safe.
+Postgres is the only stateful dependency. Running more than one replica is safe. The schema, migration policy and claim semantics are described in [database.md](database.md).
 
 ## Library choices
 
@@ -199,12 +203,12 @@ One listener (default `:8080`) serves everything public:
 | Path | Purpose | Status |
 | --- | --- | --- |
 | `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
-| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s); `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
+| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
 | `/api/v1/...` | JSON API | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
 
-Readiness checks are registered by name in `server.Options.Checks`; the store bead adds a Postgres ping. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. `/metrics` is served on its own optional listen address (metrics bead) so it is not exposed through the public ingress.
+Readiness checks are registered by name in `server.Options.Checks`; `serve` registers `postgres`, which pings the connection pool. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. `/metrics` is served on its own optional listen address (metrics bead) so it is not exposed through the public ingress.
 
 On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for the shutdown delay (default 5 s), so `/readyz` answers `503 {"status":"shutting_down"}` while load balancers and Kubernetes endpoints stop routing to it. It then stops accepting connections and waits up to the shutdown timeout for in-flight requests before exiting. A second signal during shutdown terminates the process immediately.
 
@@ -213,7 +217,7 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 - Standard library `testing` only (no testify), table-driven with `t.Run` and `t.Parallel`, `httptest` for HTTP.
 - Engine logic is tested against hand-written fakes of its ports; no Postgres, GitHub or Kubernetes needed.
 - Tests always run with the race detector and shuffled order (`just test`).
-- Postgres integration tests read `DOORSTEP_TEST_DATABASE_URL` and call `t.Skip` when it is unset. Each test gets an isolated schema through a helper the store bead adds (`internal/store/storetest`).
-- CI runs a `postgres:18-alpine` service (pinned by digest) and exports `DOORSTEP_TEST_DATABASE_URL`, so integration tests run on every pull request.
+- Postgres integration tests read `DOORSTEP_TEST_DATABASE_URL` and call `t.Skip` when it is unset. Each test gets an isolated schema through `internal/store/storetest`.
+- CI runs a `postgres:18-alpine` service (pinned by digest), exports `DOORSTEP_TEST_DATABASE_URL` and sets `DOORSTEP_TEST_REQUIRE_DATABASE=true`, so integration tests run on every pull request and a missing database fails the build instead of skipping.
 
-See [development.md](development.md) for the commands and [configuration.md](configuration.md) for runtime settings.
+See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings and [database.md](database.md) for the schema.

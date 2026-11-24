@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/logging"
@@ -16,11 +17,16 @@ const (
 	EnvShutdownDelay   = "DOORSTEP_SHUTDOWN_DELAY"
 	EnvLogLevel        = "DOORSTEP_LOG_LEVEL"
 	EnvLogFormat       = "DOORSTEP_LOG_FORMAT"
+	EnvDatabaseURL     = "DOORSTEP_DATABASE_URL"
+	EnvDatabaseURLFile = "DOORSTEP_DATABASE_URL_FILE"
 )
 
+var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
+
 type Config struct {
-	Server Server
-	Log    Log
+	Server   Server
+	Log      Log
+	Database Database
 }
 
 type Server struct {
@@ -32,6 +38,11 @@ type Server struct {
 type Log struct {
 	Level  string
 	Format string
+}
+
+type Database struct {
+	URL     string
+	URLFile string
 }
 
 func Default() Config {
@@ -64,6 +75,12 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup(EnvLogFormat); ok {
 		cfg.Log.Format = v
 	}
+	if v, ok := lookup(EnvDatabaseURL); ok {
+		cfg.Database.URL = v
+	}
+	if v, ok := lookup(EnvDatabaseURLFile); ok {
+		cfg.Database.URLFile = v
+	}
 	return cfg, errors.Join(errs...)
 }
 
@@ -91,13 +108,47 @@ func (c Config) Validate() error {
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("shutdown timeout: must be positive, got %s", c.Server.ShutdownTimeout))
 	}
-	if _, err := logging.ParseLevel(c.Log.Level); err != nil {
+	errs = append(errs, c.Log.Validate())
+	if err := c.Database.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("database: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func (l Log) Validate() error {
+	var errs []error
+	if _, err := logging.ParseLevel(l.Level); err != nil {
 		errs = append(errs, fmt.Errorf("log level: %w", err))
 	}
-	if _, err := logging.ParseFormat(c.Log.Format); err != nil {
+	if _, err := logging.ParseFormat(l.Format); err != nil {
 		errs = append(errs, fmt.Errorf("log format: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+func (d Database) Validate() error {
+	if (d.URL == "") == (d.URLFile == "") {
+		return ErrDatabaseSource
+	}
+	return nil
+}
+
+func (d Database) ConnString(readFile func(string) ([]byte, error)) (string, error) {
+	if err := d.Validate(); err != nil {
+		return "", err
+	}
+	if d.URL != "" {
+		return d.URL, nil
+	}
+	content, err := readFile(d.URLFile)
+	if err != nil {
+		return "", fmt.Errorf("read database URL file: %w", err)
+	}
+	connString := strings.TrimSpace(string(content))
+	if connString == "" {
+		return "", fmt.Errorf("database URL file %s is empty", d.URLFile)
+	}
+	return connString, nil
 }
 
 func validateListenAddr(addr string) error {

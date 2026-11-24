@@ -15,20 +15,13 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/server"
 )
 
-const (
-	flagListenAddr      = "listen-addr"
-	flagShutdownDelay   = "shutdown-delay"
-	flagShutdownTimeout = "shutdown-timeout"
-	flagLogLevel        = "log-level"
-	flagLogFormat       = "log-format"
-)
-
 func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	defaults := config.Default()
 	var overrides config.Config
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the doorstep server",
+		Long:  "Run the doorstep server. Pending database migrations are applied before the listener opens.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveServeConfig(cmd.Flags().Changed, overrides, lookupEnv)
@@ -46,32 +39,15 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 		"time to keep serving while reporting not ready before draining on shutdown (env "+config.EnvShutdownDelay+")")
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
 		"time allowed for in-flight requests on shutdown (env "+config.EnvShutdownTimeout+")")
-	flags.StringVar(&overrides.Log.Level, flagLogLevel, defaults.Log.Level,
-		"log level: debug, info, warn or error (env "+config.EnvLogLevel+")")
-	flags.StringVar(&overrides.Log.Format, flagLogFormat, defaults.Log.Format,
-		"log format: json or text (env "+config.EnvLogFormat+")")
+	bindLogFlags(flags, &overrides)
+	bindDatabaseFlags(flags, &overrides)
 	return cmd
 }
 
 func resolveServeConfig(changed func(name string) bool, overrides config.Config, lookupEnv LookupEnv) (config.Config, error) {
-	cfg, err := config.FromEnv(config.Default(), lookupEnv)
+	cfg, err := resolveConfig(changed, overrides, lookupEnv)
 	if err != nil {
-		return config.Config{}, fmt.Errorf("invalid environment: %w", err)
-	}
-	if changed(flagListenAddr) {
-		cfg.Server.ListenAddr = overrides.Server.ListenAddr
-	}
-	if changed(flagShutdownDelay) {
-		cfg.Server.ShutdownDelay = overrides.Server.ShutdownDelay
-	}
-	if changed(flagShutdownTimeout) {
-		cfg.Server.ShutdownTimeout = overrides.Server.ShutdownTimeout
-	}
-	if changed(flagLogLevel) {
-		cfg.Log.Level = overrides.Log.Level
-	}
-	if changed(flagLogFormat) {
-		cfg.Log.Format = overrides.Log.Format
+		return config.Config{}, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, fmt.Errorf("invalid configuration: %w", err)
@@ -84,6 +60,17 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+
+	st, err := openStore(ctx, cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	applied, err := st.Migrate(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	logger.InfoContext(ctx, "database ready", slog.Any("applied_migrations", migrationVersions(applied)))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Server.ListenAddr)
@@ -99,6 +86,7 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 		Logger:          logger,
 		ShutdownDelay:   cfg.Server.ShutdownDelay,
 		ShutdownTimeout: cfg.Server.ShutdownTimeout,
+		Checks:          map[string]server.Check{"postgres": st.Ping},
 	})
 	if err := srv.Run(ctx, ln); err != nil {
 		return err
