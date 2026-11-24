@@ -147,6 +147,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	}
 	apiHandler := api.New(api.Options{
 		Logger:        logger,
+		History:       st,
 		Queue:         q,
 		Apps:          apps,
 		Locks:         locksService,

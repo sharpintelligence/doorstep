@@ -51,8 +51,11 @@ func TestMigrateFreshSchema(t *testing.T) {
 	if len(applied) != len(pending) {
 		t.Fatalf("applied %d migrations, want %d", len(applied), len(pending))
 	}
-	if applied[0].Version != 1 || applied[0].Name != "00001_initial_schema.sql" {
-		t.Errorf("first migration = %+v", applied[0])
+	wantNames := []string{"00001_initial_schema.sql", "00002_queue_notify.sql", "00003_lock_scope_and_events.sql", "00004_deployment_lineage.sql"}
+	for i, name := range wantNames {
+		if i >= len(applied) || applied[i].Version != int64(i+1) || applied[i].Name != name {
+			t.Errorf("migration %d = %+v, want version %d %s", i, applied[i:min(i+1, len(applied))], i+1, name)
+		}
 	}
 
 	again, err := st.Migrate(t.Context(), discard(), store.WithoutSessionLock())

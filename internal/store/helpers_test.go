@@ -18,8 +18,10 @@ import (
 )
 
 const (
-	testSHA    = "0123456789abcdef0123456789abcdef01234567"
-	testDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testSHA     = "0123456789abcdef0123456789abcdef01234567"
+	otherSHA    = "89abcdef0123456789abcdef0123456789abcdef"
+	testDigest  = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	otherDigest = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 )
 
 func newDeployment(app string) core.Deployment {
@@ -96,6 +98,63 @@ func mustCreate(t *testing.T, st *store.Store, d core.Deployment, priority int) 
 		t.Fatalf("CreateDeployment(%s): %v", d.Target, err)
 	}
 	return created
+}
+
+func pathTo(to core.State) []core.State {
+	paths := map[core.State][]core.State{
+		core.StateQueued:     {},
+		core.StateResolving:  {core.StateResolving},
+		core.StatePinning:    {core.StateResolving, core.StatePinning},
+		core.StateSyncing:    {core.StateResolving, core.StatePinning, core.StateSyncing},
+		core.StateVerifying:  {core.StateResolving, core.StatePinning, core.StateSyncing, core.StateVerifying},
+		core.StateSucceeded:  {core.StateResolving, core.StatePinning, core.StateSyncing, core.StateVerifying, core.StateSucceeded},
+		core.StateFailed:     {core.StateResolving, core.StateFailed},
+		core.StateCancelled:  {core.StateCancelled},
+		core.StateSuperseded: {core.StateSuperseded},
+	}
+	return paths[to]
+}
+
+func mustAdvance(t *testing.T, st *store.Store, d core.Deployment, to core.State) core.Deployment {
+	t.Helper()
+	for _, next := range pathTo(to)[indexAfter(pathTo(to), d.State):] {
+		tr := withOutcome(t, st, store.Transition{ID: d.ID, From: d.State, To: next, Actor: "worker"}, d.Target.App)
+		var err error
+		d, err = st.TransitionDeployment(t.Context(), tr)
+		if err != nil {
+			t.Fatalf("TransitionDeployment(%d, %s -> %s): %v", d.ID, d.State, next, err)
+		}
+	}
+	if d.State != to {
+		t.Fatalf("deployment %d is %s after advancing, want %s", d.ID, d.State, to)
+	}
+	return d
+}
+
+func withOutcome(t *testing.T, st *store.Store, tr store.Transition, app string) store.Transition {
+	t.Helper()
+	if tr.To == core.StateFailed {
+		tr.FailureReason = "test failure"
+	}
+	if tr.To == core.StateSuperseded {
+		successor := mustCreate(t, st, newDeployment(app+"-successor"), 0)
+		tr.SupersededByID = &successor.ID
+	}
+	return tr
+}
+
+func indexAfter(path []core.State, current core.State) int {
+	for i, s := range path {
+		if s == current {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func mustCreateIn(t *testing.T, st *store.Store, d core.Deployment, to core.State) core.Deployment {
+	t.Helper()
+	return mustAdvance(t, st, mustCreate(t, st, d, 0), to)
 }
 
 func mustExec(t *testing.T, st *store.Store, sql string, args ...any) {

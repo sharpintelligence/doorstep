@@ -35,6 +35,7 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Database](docs/database.md)
+- [HTTP API](docs/api.md)
 - [GitHub App](docs/github-app.md)
 - [Locks](docs/locks.md)
 - [Metrics](docs/metrics.md)

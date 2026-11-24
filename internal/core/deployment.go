@@ -43,25 +43,27 @@ func (s Source) Valid() bool {
 }
 
 type Deployment struct {
-	ID             DeploymentID
-	Target         Target
-	Kind           Kind
-	State          State
-	Source         Source
-	RequestedBy    string
-	Commit         Commit
-	Image          ImageRef
-	Digest         Digest
-	PreviousDigest Digest
-	PinCommitSHA   string
-	ParentID       *DeploymentID
-	RollbackOfID   *DeploymentID
-	SupersededByID *DeploymentID
-	FailureReason  string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	StartedAt      *time.Time
-	FinishedAt     *time.Time
+	ID               DeploymentID
+	Target           Target
+	Kind             Kind
+	State            State
+	Source           Source
+	RequestedBy      string
+	Commit           Commit
+	Image            ImageRef
+	Digest           Digest
+	PreviousDigest   Digest
+	PinCommitSHA     string
+	GitOpsRepository string
+	ArgoCDRevision   string
+	ParentID         *DeploymentID
+	RollbackOfID     *DeploymentID
+	SupersededByID   *DeploymentID
+	FailureReason    string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	StartedAt        *time.Time
+	FinishedAt       *time.Time
 }
 
 func (d Deployment) Validate() error {

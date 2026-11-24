@@ -429,7 +429,8 @@ func TestGetDeploymentRoundTripsOptionalColumns(t *testing.T) {
 	successor := mustCreate(t, st, newDeployment("web"), 0)
 	mustExec(t, st, `UPDATE deployments
 		SET state = 'superseded', pin_commit_sha = $2, previous_digest = $3, superseded_by_id = $4,
-		    failure_reason = 'replaced', started_at = now(), finished_at = now()
+		    failure_reason = 'replaced', started_at = now(), finished_at = now(),
+		    gitops_repository = 'acme/gitops', argocd_revision = '1.2.3'
 		WHERE id = $1`, created.ID, testSHA, testDigest, successor.ID)
 
 	got, err := st.GetDeployment(t.Context(), created.ID)
@@ -438,7 +439,8 @@ func TestGetDeploymentRoundTripsOptionalColumns(t *testing.T) {
 	}
 	if got.State != core.StateSuperseded || got.PinCommitSHA != testSHA || got.PreviousDigest != testDigest ||
 		got.FailureReason != "replaced" || got.SupersededByID == nil || *got.SupersededByID != successor.ID ||
-		got.StartedAt == nil || got.FinishedAt == nil || got.Digest != "" {
+		got.StartedAt == nil || got.FinishedAt == nil || got.Digest != "" ||
+		got.GitOpsRepository != "acme/gitops" || got.ArgoCDRevision != "1.2.3" {
 		t.Errorf("GetDeployment = %+v", got)
 	}
 }
@@ -449,6 +451,7 @@ func assertDeployment(t *testing.T, got, want core.Deployment) {
 		got.Source != want.Source || got.RequestedBy != want.RequestedBy || got.Commit != want.Commit ||
 		got.Image != want.Image || got.Digest != want.Digest || got.PreviousDigest != want.PreviousDigest ||
 		got.PinCommitSHA != want.PinCommitSHA || got.FailureReason != want.FailureReason ||
+		got.GitOpsRepository != want.GitOpsRepository || got.ArgoCDRevision != want.ArgoCDRevision ||
 		!equalID(got.ParentID, want.ParentID) || !equalID(got.RollbackOfID, want.RollbackOfID) ||
 		!equalID(got.SupersededByID, want.SupersededByID) ||
 		!got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) ||

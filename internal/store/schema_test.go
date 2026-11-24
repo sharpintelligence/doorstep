@@ -165,6 +165,8 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{name: "lock expired before creation", sql: "INSERT INTO locks (kind, owner, expires_at) VALUES ('freeze', 'ops', now() - interval '1 minute')", constraint: "locks_expires_at_check"},
 		{name: "unknown lock action", sql: "INSERT INTO lock_events (action, owner) VALUES ('stolen', 'ops')", constraint: "lock_events_action_check"},
 		{name: "lock event for unknown app", sql: "INSERT INTO lock_events (app_id, action, owner) VALUES (-1, 'locked', 'ops')", constraint: "lock_events_app_id_fkey"},
+		{name: "blank gitops repository", sql: "UPDATE deployments SET gitops_repository = ' ' WHERE id = $1", constraint: "deployments_gitops_repository_check"},
+		{name: "empty argo cd revision", sql: "UPDATE deployments SET argocd_revision = '' WHERE id = $1", constraint: "deployments_argocd_revision_check"},
 		{name: "deployment moved to another app", sql: withOtherApp + "UPDATE deployments d SET app_id = other.id FROM other WHERE d.id = $1", constraint: "queue_entries_deployment_fkey"},
 	}
 	for _, tt := range tests {
