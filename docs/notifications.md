@@ -51,7 +51,7 @@ Set `server.public_url` (`--public-url`, `DOORSTEP_PUBLIC_URL`) to the address p
 
 Create an [incoming webhook](https://api.slack.com/messaging/webhooks) for the channel and store its URL in a Secret or environment variable. The URL is a credential: doorstep only reads it from `webhook_url_env` or `webhook_url_file`, re-reads it for every message (so a rotated Secret applies without a restart), never logs it and removes it from error messages.
 
-Each message has a plain `text` line, used for push notifications and by Slack-compatible receivers, and one attachment whose colour bar shows the outcome at a glance:
+Each message has a plain `text` line such as `blog: deploy #42 succeeded`, used for push notifications and by Slack-compatible receivers, and one attachment whose colour bar shows the outcome at a glance:
 
 | Colour | Events |
 | --- | --- |

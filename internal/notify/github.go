@@ -255,12 +255,6 @@ func (g *GitHub) forget(key string) {
 	delete(g.ids, key)
 }
 
-func (g *GitHub) cacheLen() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return len(g.ids)
-}
-
 func cacheKey(repository string, id core.DeploymentID) string {
 	return fmt.Sprintf("%s#%d", strings.ToLower(repository), id)
 }

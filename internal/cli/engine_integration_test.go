@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -183,6 +184,7 @@ type engineServe struct {
 	store   *store.Store
 	addr    string
 	stderr  *lockedBuffer
+	tokens  map[core.Role]string
 	cancel  context.CancelFunc
 	done    chan int
 }
@@ -194,17 +196,24 @@ func startEngineServe(t *testing.T, f *engineFixture) *engineServe {
 
 func startEngineServeWith(t *testing.T, f *engineFixture, cfg string) *engineServe {
 	t.Helper()
+	return startEngineServeEnv(t, f, cfg, nil)
+}
+
+func startEngineServeEnv(t *testing.T, f *engineFixture, cfg string, extra map[string]string) *engineServe {
+	t.Helper()
 	sink := newRecordingSink(t)
-	args, env := withDatabase(t, databaseURLEnv, []string{
-		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
-		"--config", writeConfig(t, f.config(cfg)),
-	}, f.env(map[string]string{
+	env := map[string]string{
 		config.EnvGitHubWebhookSecret: intakeTestSecret,
 		config.EnvPollInterval:        "0",
 		"TEST_HOOK_URL":               sink.server.URL,
-	}))
+	}
+	maps.Copy(env, extra)
+	args, env := withDatabase(t, databaseURLEnv, []string{
+		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
+		"--config", writeConfig(t, f.config(cfg)),
+	}, f.env(env))
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, cancel: cancel, done: make(chan int, 1)}
+	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, tokens: map[core.Role]string{}, cancel: cancel, done: make(chan int, 1)}
 	go func() { s.done <- Run(ctx, args, io.Discard, s.stderr, envFrom(env)) }()
 	s.addr = waitForListening(t, s.stderr, s.done)
 	waitForLog(t, s.stderr, s.done, "engine started")
@@ -300,12 +309,16 @@ func (s *engineServe) transitions(id core.DeploymentID) []core.State {
 
 func (s *engineServe) token(role core.Role) string {
 	s.t.Helper()
+	if token, ok := s.tokens[role]; ok {
+		return token
+	}
 	var out, errOut bytes.Buffer
 	args := []string{"token", "create", "--name", "engine-" + string(role), "--role", string(role)}
 	if code := Run(s.t.Context(), args, &out, &errOut, envFrom(s.env)); code != 0 {
 		s.t.Fatalf("token create = %d: %s", code, errOut.String())
 	}
-	return strings.TrimSpace(out.String())
+	s.tokens[role] = strings.TrimSpace(out.String())
+	return s.tokens[role]
 }
 
 func (s *engineServe) metrics() string {

@@ -53,10 +53,6 @@ type requestError struct {
 	message string
 }
 
-func (e *requestError) Error() string {
-	return e.message
-}
-
 func badRequest(format string, args ...any) *requestError {
 	return &requestError{status: http.StatusBadRequest, code: codeInvalidRequest, message: fmt.Sprintf(format, args...)}
 }

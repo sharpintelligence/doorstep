@@ -17,6 +17,12 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/metrics"
 )
 
+type gateFunc func(ctx context.Context, req gates.Request) (gates.Evaluation, error)
+
+func (f gateFunc) Evaluate(ctx context.Context, req gates.Request) (gates.Evaluation, error) {
+	return f(ctx, req)
+}
+
 type fakeClock struct {
 	mu  sync.Mutex
 	now time.Time

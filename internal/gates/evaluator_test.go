@@ -424,11 +424,11 @@ func TestEvaluateCallTimeout(t *testing.T) {
 		name string
 		gate gates.Gate
 	}{
-		{name: "gate honours its context", gate: gates.GateFunc(func(ctx context.Context, _ gates.Request) (gates.Evaluation, error) {
+		{name: "gate honours its context", gate: gateFunc(func(ctx context.Context, _ gates.Request) (gates.Evaluation, error) {
 			<-ctx.Done()
 			return gates.Evaluation{}, ctx.Err()
 		})},
-		{name: "gate ignores its context", gate: gates.GateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
+		{name: "gate ignores its context", gate: gateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
 			<-release
 			return gates.Evaluation{Status: core.GatePassed}, nil
 		})},
@@ -452,7 +452,7 @@ func TestEvaluateSkipsGateWithAbandonedCall(t *testing.T) {
 
 	release := make(chan struct{})
 	var calls atomic.Int32
-	gate := gates.GateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
+	gate := gateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
 		if calls.Add(1) == 1 {
 			<-release
 		}
@@ -535,7 +535,7 @@ func TestEvaluateMetricDurationIncludesCall(t *testing.T) {
 func TestEvaluateRecoversGatePanic(t *testing.T) {
 	t.Parallel()
 
-	gate := gates.GateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
+	gate := gateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
 		panic("boom")
 	})
 	h := newHarness(t, gates.Plan{After: []gates.Binding{bind("health", core.GatePhaseAfter, gate)}})
@@ -733,7 +733,7 @@ func TestEvaluateCancelledContext(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		gate := gates.GateFunc(func(gctx context.Context, _ gates.Request) (gates.Evaluation, error) {
+		gate := gateFunc(func(gctx context.Context, _ gates.Request) (gates.Evaluation, error) {
 			cancel()
 			<-gctx.Done()
 			return gates.Evaluation{}, gctx.Err()
