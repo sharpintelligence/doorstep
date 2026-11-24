@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how doorstep is put together: what it does, how a deployment flows through the system, how the Go packages are laid out and allowed to depend on each other, and which libraries it builds on. It grows as features land. Significant decisions are recorded as Architecture Decision Records under `docs/decisions`; this document is the current map, the ADRs explain why.
+This document describes how doorstep is put together: what it does, how a deployment flows through the system, how the Go packages are laid out and allowed to depend on each other, and which libraries it builds on. Significant decisions are recorded as Architecture Decision Records under `docs/decisions`; this document is the current map, the ADRs explain why.
 
 ## Purpose and scope
 
@@ -14,84 +14,82 @@ doorstep is a deployment engine that sits upstream of [Argo CD](https://argo-cd.
 
 doorstep never talks to workloads directly and never mutates Argo CD. Git is the only thing it writes to; Argo CD remains the only thing that applies manifests to the cluster. doorstep only observes Argo CD `Application` resources and, when the `job` gate is enabled, validation Jobs that Argo CD runs as PostSync hooks ([ADR 0016](decisions/0016-validation-job-gate.md)).
 
+```mermaid
+flowchart LR
+    people["People: web UI, API, CLI"] --> doorstep
+    github["GitHub App"] -->|webhooks| doorstep
+    doorstep((doorstep))
+    doorstep -->|read: checks, commits, branch heads| github
+    doorstep -->|read: tag to digest| registry["OCI registry"]
+    doorstep -->|read and write: state| postgres[("Postgres")]
+    doorstep ==>|only write: pin commits and pull requests| gitops["GitOps repository"]
+    doorstep -->|read: Applications, Jobs, pods| kube["Kubernetes API"]
+    doorstep -->|read: gate queries| prom["Prometheus"]
+    doorstep -->|notify, commit statuses| out["Slack, webhooks, GitHub"]
+    gitops -.->|synced by| argo["Argo CD"]
+    argo -.-> kube
+```
+
 ## Deployment flow
 
-```
- intake (webhook | poll | API | CLI)
-        │
-        ▼
-     queue ──► lock (one active deployment per app/environment, freeze locks)
-                 │
-                 ▼
-     registry: resolve tag ─► digest
-                 │
-                 ▼
-     gitops: commit pin (kustomize images | YAML path) via GitHub API
-                 │
-                 ▼
-     argocd: wait until the Application is synced to that revision
-             │  not healthy in time: classify (transient, version, ...);
-             │  transient or unknown: wait again on the same pin with
-             │  backoff, up to the app's retry budget
-             ▼
-     gates: before (checks, lock, schedule, external, backup webhook for
-            releases flagged as migrations) and after (health, soak,
-            prometheus queries, validation Job, external)
-          │                 │
-       pass                fail
-          ▼                 ▼
-     succeeded         failed; with auto_rollback a rollback is queued
-                       at high priority: it re-pins the previous
-                       digest through this same path, unless the
-                       release crossed a flagged migration: then the
-                       rollback is withheld and a person decides
-
- notify reports queued, started and every terminal state (Slack, webhooks,
- GitHub deployment statuses) and lock changes, every gate result is mirrored
- to a GitHub commit status; history records every transition.
+```mermaid
+flowchart TD
+    intake["Intake: webhook, poll, API, CLI"] --> queue["Queue + lock: one active deployment per app and environment, freeze locks"]
+    queue --> resolve["Registry: resolve tag to digest"]
+    resolve --> before["Before gates: checks, lock, schedule, external, backup webhook for migrations"]
+    before --> pin["GitOps: commit pin via GitHub API"]
+    pin --> sync["Argo CD: wait until the Application is synced to the revision"]
+    sync -->|not healthy in time: classify| retry{"Transient or unknown, budget left?"}
+    retry -->|yes: wait with backoff| sync
+    retry -->|no| failed
+    sync -->|synced and healthy| after["After gates: health, soak, prometheus, validation Job, external"]
+    after -->|pass| succeeded(["Succeeded"])
+    after -->|fail| failed(["Failed"])
+    failed -->|auto_rollback| migration{"Crossed a flagged migration?"}
+    migration -->|no| rollback["Rollback queued at high priority: re-pins the previous digest through the same path"]
+    migration -->|yes| withheld(["Rollback withheld: a person decides"])
 ```
 
 ## Package map
 
 There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so the module exposes no public Go API. Kubernetes install manifests live in `deploy/kustomize` (a base, optional registry-credentials and job-gate components and an example overlay) with a test that keeps them consistent with the code; see [install.md](install.md).
 
-| Package | Responsibility | Status |
-| --- | --- | --- |
-| `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run`; embeds the IANA time zone database (`time/tzdata`) | built |
-| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file; `lock`, `unlock` and `locks` call the API through a small shared client; `rollback`, `block`, `unblock`, `blocks`, `deploy` and `cancel` call the API too; `argocd status` reads an app's Argo CD Application; `serve` also holds the engine's adapters (`engine.go`), the app mapping (`apps.go`), gate wiring (`gates.go`), the lock notifier (`locknotify.go`), the manual deploy wiring and its announcing decorator (`deploys.go`) and the web UI wiring (`web.go`) | built |
-| `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates with their deploy windows and Prometheus queries, notification targets, Prometheus servers) and secret references | built |
-| `internal/promquery` | small Prometheus HTTP API client on the standard library: `POST` instant and range queries, scalar, vector and matrix results (NaN and infinities included), typed API errors, bearer and basic authentication read per request, no redirects, 1 MiB response limit; a leaf used by `gates` through its `MetricsQuerier` port and built by `cli` ([ADR 0013](decisions/0013-prometheus-query-gate.md)) | built |
-| `internal/windows` | recurring time windows: five-field cron parsing (`robfig/cron`), time zone loading and the active/next arithmetic behind `schedule` gates; a leaf used by `config` for validation and by `gates` for evaluation | built |
-| `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
-| `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
-| `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, request logging and panic recovery, `/healthz`, `/readyz` and readiness checks | built |
-| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `Notification`, `ImageRef`, `Digest`, `Role`, `Actor`, `AuditEntry`, `Block`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
-| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, tracked commits, API tokens, sessions, the audit log, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks), the freeze lock repository and blocks (with their pending git trailers); see [database.md](database.md) | built |
-| `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
-| `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, a `lock.acquire` or `lock.release` audit row with the caller's actor and role in the same transaction as each change, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends on `core` and `store` through a `Repository` port with `InTx` (`locks.NewRepository`) and a narrower `Sweeper` port for the reminder; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
-| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites, branch heads, deployments and deployment statuses, webhook signature verification, user lookups for GitHub sign-in; `Repo` handle with typed contents, refs, commits and pull request calls | built |
-| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens; in-memory fake repository (branches, commits, contents, refs, commit comparisons, pull requests with squash merges) with hooks to inject concurrent writes, blocked merges and conflicts | built |
-| `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; the signed GitHub webhook handler with delivery deduplication and the polling safety net that drive it; see [Merge and CI detection](#merge-and-ci-detection) and [Webhooks and polling](#webhooks-and-polling). `LiveChecks` reads and judges a commit's checks on demand for the `checks` gate; opt-in migration detection flags a release from PR labels and commit trailers across every commit since the previous deploy ([rollback.md](rollback.md#migration-aware-releases)), and `Service.MigrationFlag` exposes the same detection to manual deploys | built |
-| `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
-| `internal/registry/registrytest` | fake OCI registry for tests: `/v2/` ping and manifest `HEAD`/`GET` with `Docker-Content-Digest` for pushed tags | built |
-| `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) | built |
-| `internal/argocd` | read-only `Application` watcher through the Kubernetes API: `WaitSynced` (synced to a revision containing the pin commit and healthy, with a per-app timeout), `Check`, `Health` and `Workloads` (the Deployments, StatefulSets, DaemonSets and Rollouts an Application manages); a get and a watch per wait, no cache; see [argocd.md](argocd.md) | built |
-| `internal/argocd/argocdtest` | fake Kubernetes API for Argo CD `Application` resources: get and watch (field selector, resource version, timeout), event pushes, closed and expired watches, injected `401`/`403`/`404`/`5xx`, request counts and a generated kubeconfig | built |
-| `internal/kube` | small Kubernetes REST client: in-cluster ServiceAccount or explicit kubeconfig subset, host-pinned transport, bounded `Get` and `Stream`, `StatusError` with `ErrNotFound`, `ErrForbidden` and `ErrGone`; imports nothing internal ([ADR 0008](decisions/0008-kubernetes-rest-client.md)) | built |
-| `internal/pods` | opt-in, read-only pod lister for retry diagnostics: one `GET /api/v1/namespaces/{ns}/pods?limit=500` per namespace (at most five) through `internal/kube`, matched to workloads by controller owner reference and decoded into `core.PodStatus` (node, images, phase, conditions, container waiting and termination reasons); imports only `core` ([ADR 0017](decisions/0017-retry-before-rollback.md)) | built |
-| `internal/retry` | the retry-before-rollback failure policy: a pure `Classify` that turns an Argo CD failure, pod statuses and earlier diagnoses into a verdict with findings and evidence, and `Policy`, the `engine.FailurePolicy` that retries transient and unknown failures within each app's attempt budget with doubling backoff; imports `core` and `engine` ([engine.md](engine.md#retry-before-rollback), [ADR 0017](decisions/0017-retry-before-rollback.md)) | built |
-| `internal/jobs` | read-only Kubernetes `batch/v1` Job reader for the `job` gate: one `GET` per call through `internal/kube`, decoded into a small `Job` type, `ErrNotFound`; imports only `kube` ([ADR 0016](decisions/0016-validation-job-gate.md)) | built |
-| `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; the built-in `checks`, `lock`, `schedule`, `health` and `soak` gate types, registered by `RegisterBuiltins` over small read ports; the deferred `backup` webhook gate, registered by `RegisterBackup`; the `prometheus` gate type, registered by `RegisterPrometheus` over its `MetricsQuerier` port; the `job` gate type, registered by `RegisterJobGate` over its `JobReader` and the shared `ApplicationReader` port; the `external` gate type (`RegisterExternal`), which reads results other systems posted, and `Reporter`, the service behind the external gate API; see [gates.md](gates.md#built-in-gates) | built |
-| `internal/rollback` | rollback requests and blocks: picks the current version and the previous good, unblocked digest, cancels the deploy it replaces and queued deploys of the blocked commit, queues the rollback deployment at rollback priority, records the block and the audit row in one transaction (retried on state conflicts); manual block, unblock and list; the confirmation guard for rollbacks across releases flagged as database migrations; `Automatic`, which fails an eligible deploy and queues its rollback in one transaction unless it would cross a migration; the engine's `BlockList` port. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [rollback.md](rollback.md) | built |
-| `internal/notify` | Slack and generic webhook notifications; GitHub deployment statuses; `GateStatuses`, the gate observer that mirrors every gate result to a GitHub commit status; see [notifications.md](notifications.md) and [gates.md](gates.md#github-commit-statuses) | built |
-| `internal/engine` | the deployment state machine: claims run admit (before gates), resolve, pin, sync and verify (after gates) as idempotent, resumable steps; classifies errors, bounds retries per state, routes every failure through a `FailurePolicy`, records transitions, emits `deploy.*` notifications and deployment metrics; declares the ports it consumes and imports only `core`; see [engine.md](engine.md) | built |
-| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, role-checked endpoints (viewer reads, reporter posts external gate results, deployer changes locks, requests rollbacks and changes blocks), queue, lock, rollback, block, gate report and deploy history endpoints; see [api.md](api.md) | built |
-| `internal/deploys` | manual deploy requests and cancellation, shared by the API, the web UI and the CLI: checks that the commit is on the app's branch (`Commits` port) and flags migrations (`Migrations` port) before the transaction, then under the app's row lock refuses blocked commits, queues the deploy (`source: api`, normal or urgent) and writes the `deploy.request` audit row; `Cancel` moves any unfinished deployment to `cancelled` with a `deploy.cancel` audit row, retried on state conflicts. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [api.md](api.md#manual-deploys-and-cancellation) and [ADR 0019](decisions/0019-manual-deploys-and-cancellation.md) | built |
-| `internal/web` | server-rendered UI with `html/template`, embedded templates and static files and a vendored htmx used only for polling: overview, app pages with queue, blocks and history, deployment pages with lineage, events, gate results and retry attempts with their diagnosis, locks, audit log and API tokens; plain HTML forms for deploy, cancel, rollback (with the migration confirmation page), block, unblock, lock and token actions; one route table with the role of every route; see [ui.md](ui.md) and [ADR 0018](decisions/0018-server-rendered-web-ui.md) | built |
-| `internal/auth` | viewer, deployer and admin roles; hashed API tokens; OIDC or GitHub sign-in with Postgres-backed sessions; authentication middleware with CSRF enforcement and `RequireRole`; see [authentication.md](authentication.md) | built |
-| `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener | built |
-
-Planned packages are created by the bead that implements them; there are no placeholder packages.
+| Package | Responsibility |
+| --- | --- |
+| `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run`; embeds the IANA time zone database (`time/tzdata`) |
+| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file; `lock`, `unlock` and `locks` call the API through a small shared client; `rollback`, `block`, `unblock`, `blocks`, `deploy` and `cancel` call the API too; `argocd status` reads an app's Argo CD Application; `serve` also holds the engine's adapters (`engine.go`), the app mapping (`apps.go`), gate wiring (`gates.go`), the lock notifier (`locknotify.go`), the manual deploy wiring and its announcing decorator (`deploys.go`) and the web UI wiring (`web.go`) |
+| `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates with their deploy windows and Prometheus queries, notification targets, Prometheus servers) and secret references |
+| `internal/promquery` | small Prometheus HTTP API client on the standard library: `POST` instant and range queries, scalar, vector and matrix results (NaN and infinities included), typed API errors, bearer and basic authentication read per request, no redirects, 1 MiB response limit; a leaf used by `gates` through its `MetricsQuerier` port and built by `cli` ([ADR 0013](decisions/0013-prometheus-query-gate.md)) |
+| `internal/windows` | recurring time windows: five-field cron parsing (`robfig/cron`), time zone loading and the active/next arithmetic behind `schedule` gates; a leaf used by `config` for validation and by `gates` for evaluation |
+| `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) |
+| `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` |
+| `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, request logging and panic recovery, `/healthz`, `/readyz` and readiness checks |
+| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `Notification`, `ImageRef`, `Digest`, `Role`, `Actor`, `AuditEntry`, `Block`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, tracked commits, API tokens, sessions, the audit log, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks), the freeze lock repository and blocks (with their pending git trailers); see [database.md](database.md) |
+| `internal/store/storetest` | test helpers: `Open` and `DatabaseURL` give each test a fresh schema with all migrations applied, dropped when the test ends; they read `DOORSTEP_TEST_DATABASE_URL` and skip when it is unset |
+| `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) |
+| `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, a `lock.acquire` or `lock.release` audit row with the caller's actor and role in the same transaction as each change, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends on `core` and `store` through a `Repository` port with `InTx` (`locks.NewRepository`) and a narrower `Sweeper` port for the reminder; see [locks.md](locks.md). Per-target deployment locks are left to the engine |
+| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites, branch heads, deployments and deployment statuses, webhook signature verification, user lookups for GitHub sign-in; `Repo` handle with typed contents, refs, commits and pull request calls |
+| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens; in-memory fake repository (branches, commits, contents, refs, commit comparisons, pull requests with squash merges) with hooks to inject concurrent writes, blocked merges and conflicts |
+| `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; the signed GitHub webhook handler with delivery deduplication and the polling safety net that drive it; see [Merge and CI detection](#merge-and-ci-detection) and [Webhooks and polling](#webhooks-and-polling). `LiveChecks` reads and judges a commit's checks on demand for the `checks` gate; opt-in migration detection flags a release from PR labels and commit trailers across every commit since the previous deploy ([rollback.md](rollback.md#migration-aware-releases)), and `Service.MigrationFlag` exposes the same detection to manual deploys |
+| `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix |
+| `internal/registry/registrytest` | fake OCI registry for tests: `/v2/` ping and manifest `HEAD`/`GET` with `Docker-Content-Digest` for pushed tags |
+| `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) |
+| `internal/argocd` | read-only `Application` watcher through the Kubernetes API: `WaitSynced` (synced to a revision containing the pin commit and healthy, with a per-app timeout), `Check`, `Health` and `Workloads` (the Deployments, StatefulSets, DaemonSets and Rollouts an Application manages); a get and a watch per wait, no cache; see [argocd.md](argocd.md) |
+| `internal/argocd/argocdtest` | fake Kubernetes API for Argo CD `Application` resources: get and watch (field selector, resource version, timeout), event pushes, closed and expired watches, injected `401`/`403`/`404`/`5xx`, request counts and a generated kubeconfig |
+| `internal/kube` | small Kubernetes REST client: in-cluster ServiceAccount or explicit kubeconfig subset, host-pinned transport, bounded `Get` and `Stream`, `StatusError` with `ErrNotFound`, `ErrForbidden` and `ErrGone`; imports nothing internal ([ADR 0008](decisions/0008-kubernetes-rest-client.md)) |
+| `internal/pods` | opt-in, read-only pod lister for retry diagnostics: one `GET /api/v1/namespaces/{ns}/pods?limit=500` per namespace (at most five) through `internal/kube`, matched to workloads by controller owner reference and decoded into `core.PodStatus` (node, images, phase, conditions, container waiting and termination reasons); imports only `core` ([ADR 0017](decisions/0017-retry-before-rollback.md)) |
+| `internal/retry` | the retry-before-rollback failure policy: a pure `Classify` that turns an Argo CD failure, pod statuses and earlier diagnoses into a verdict with findings and evidence, and `Policy`, the `engine.FailurePolicy` that retries transient and unknown failures within each app's attempt budget with doubling backoff; imports `core` and `engine` ([engine.md](engine.md#retry-before-rollback), [ADR 0017](decisions/0017-retry-before-rollback.md)) |
+| `internal/jobs` | read-only Kubernetes `batch/v1` Job reader for the `job` gate: one `GET` per call through `internal/kube`, decoded into a small `Job` type, `ErrNotFound`; imports only `kube` ([ADR 0016](decisions/0016-validation-job-gate.md)) |
+| `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; the built-in `checks`, `lock`, `schedule`, `health` and `soak` gate types, registered by `RegisterBuiltins` over small read ports; the deferred `backup` webhook gate, registered by `RegisterBackup`; the `prometheus` gate type, registered by `RegisterPrometheus` over its `MetricsQuerier` port; the `job` gate type, registered by `RegisterJobGate` over its `JobReader` and the shared `ApplicationReader` port; the `external` gate type (`RegisterExternal`), which reads results other systems posted, and `Reporter`, the service behind the external gate API; see [gates.md](gates.md#built-in-gates) |
+| `internal/rollback` | rollback requests and blocks: picks the current version and the previous good, unblocked digest, cancels the deploy it replaces and queued deploys of the blocked commit, queues the rollback deployment at rollback priority, records the block and the audit row in one transaction (retried on state conflicts); manual block, unblock and list; the confirmation guard for rollbacks across releases flagged as database migrations; `Automatic`, which fails an eligible deploy and queues its rollback in one transaction unless it would cross a migration; the engine's `BlockList` port. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [rollback.md](rollback.md) |
+| `internal/notify` | Slack and generic webhook notifications; GitHub deployment statuses; `GateStatuses`, the gate observer that mirrors every gate result to a GitHub commit status; see [notifications.md](notifications.md) and [gates.md](gates.md#github-commit-statuses) |
+| `internal/engine` | the deployment state machine: claims run admit (before gates), resolve, pin, sync and verify (after gates) as idempotent, resumable steps; classifies errors, bounds retries per state, routes every failure through a `FailurePolicy`, records transitions, emits `deploy.*` notifications and deployment metrics; declares the ports it consumes and imports only `core`; see [engine.md](engine.md) |
+| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, role-checked endpoints (viewer reads, reporter posts external gate results, deployer changes locks, requests rollbacks and changes blocks), queue, lock, rollback, block, gate report and deploy history endpoints; see [api.md](api.md) |
+| `internal/deploys` | manual deploy requests and cancellation, shared by the API, the web UI and the CLI: checks that the commit is on the app's branch (`Commits` port) and flags migrations (`Migrations` port) before the transaction, then under the app's row lock refuses blocked commits, queues the deploy (`source: api`, normal or urgent) and writes the `deploy.request` audit row; `Cancel` moves any unfinished deployment to `cancelled` with a `deploy.cancel` audit row, retried on state conflicts. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [api.md](api.md#manual-deploys-and-cancellation) and [ADR 0019](decisions/0019-manual-deploys-and-cancellation.md) |
+| `internal/web` | server-rendered UI with `html/template`, embedded templates and static files and a vendored htmx used only for polling: overview, app pages with queue, blocks and history, deployment pages with lineage, events, gate results and retry attempts with their diagnosis, locks, audit log and API tokens; plain HTML forms for deploy, cancel, rollback (with the migration confirmation page), block, unblock, lock and token actions; one route table with the role of every route; see [ui.md](ui.md) and [ADR 0018](decisions/0018-server-rendered-web-ui.md) |
+| `internal/auth` | viewer, deployer and admin roles; hashed API tokens; OIDC or GitHub sign-in with Postgres-backed sessions; authentication middleware with CSRF enforcement and `RequireRole`; see [authentication.md](authentication.md) |
+| `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener |
 
 ## Dependency rules
 
@@ -101,7 +99,7 @@ The design is ports and adapters.
 - `kube` imports nothing from `internal/`. `jobs` imports only `kube`. `argocd` imports only `core` and `kube`; it reaches GitHub for ancestry checks through its own `Ancestry` port, which `cli` implements over `(*github.Repo).Compare`, and it never imports `config` (`cli` maps the catalog to `argocd.Application` values).
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
 - `retry` implements `engine.FailurePolicy`, so it imports `engine` for the `Failure` and `Decision` types, and `core`; it reaches pods, history and the queue through its own `Diagnostics`, `History` and `Queue` ports, which `cli` fills. `pods` imports only `core` and reads through a one-method `Getter` that `*kube.Client` satisfies.
-- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops`, `intake`, `notify` and `auth` (for GitHub sign-in) use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, `auth`, `rollback`, and later `gates` persistence) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config` or `metrics` (its `Observer` port is adapted to `metrics.Recorder` in `cli`).
+- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops`, `intake`, `notify` and `auth` (for GitHub sign-in) use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, `auth`, `rollback`) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config` or `metrics` (its `Observer` port is adapted to `metrics.Recorder` in `cli`).
 - `store` imports only `core`.
 - Actions are audited through `(*store.Store).RecordAudit`, called on the transaction-bound store in the same `InTx` as the action. Consumers declare a one-method `RecordAudit(ctx, core.AuditEntry) error` port rather than importing `auth`.
 - `api` and `web` read `store` read models for queries and never import `engine`; commands go through services (`locks`, `rollback`, `deploys`) whose `cli` wrappers announce to the engine after commit. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers, wrapped in `auth.RequireRole` or `auth.RequireRoleOrLogin`, which `serve` also wraps in the authenticator; `server` owns the listener, logging, panic recovery and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port. Rollback requests and blocks are the other exception: a rollback request is a queue and block write, not orchestration, so `api` calls `rollback.Service` directly through its `RollbackService` and `BlockService` ports, and the engine executes the queued rollback deployment like any other. `cli` wraps `rollback.Service` for the API so that the engine announces the queued rollback and the cancelled deployments after the request commits.
@@ -458,32 +456,32 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 
 One listener (default `:8080`) serves everything public:
 
-| Path | Purpose | Status |
-| --- | --- | --- |
-| `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
-| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
-| `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) | built |
-| `GET /api/v1/apps/{app}/queue` | an app's queue in run order; viewer role (see [api.md](api.md)) | built |
-| `POST /api/v1/apps/{app}/lock`, `DELETE /api/v1/apps/{app}/lock` | freeze or release one app; deployer role; see [locks.md](locks.md#api) | built |
-| `POST /api/v1/lock`, `DELETE /api/v1/lock` | global freeze; deployer role | built |
-| `GET /api/v1/locks` | live freezes; viewer role | built |
-| `GET /api/v1/apps/{app}/deployments` | deploy history of an app, filtered and paginated; viewer role ([api.md](api.md)) | built |
-| `GET /api/v1/deployments/{id}` | one deployment with its events, gates, rollbacks and retries ([api.md](api.md)) | built |
-| `POST /api/v1/apps/{app}/rollback` | queue a rollback to the previous good digest and block the replaced version; deployer role ([rollback.md](rollback.md#api)) | built |
-| `GET`, `POST /api/v1/apps/{app}/blocks`, `DELETE /api/v1/apps/{app}/blocks/{ref}` | list (viewer), add and clear (deployer) blocked versions | built |
-| `POST /api/v1/deployments/{id}/gates/{gate}`, `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}` | post the result of an `external` gate; reporter role ([api.md](api.md#external-gate-results)) | built |
-| `GET /auth/login` | starts sign-in at the configured provider; mounted only when one is configured ([authentication.md](authentication.md#the-sign-in-flow)) | built |
-| `GET /auth/callback` | completes sign-in, creates the session and redirects to the return path | built |
-| `POST /auth/logout` | ends the session; needs the CSRF token | built |
-| `POST /api/v1/apps/{app}/deployments` | queue a deploy of a commit on the app's branch; deployer role ([api.md](api.md#manual-deploys-and-cancellation)) | built |
-| `POST /api/v1/deployments/{id}/cancel` | cancel an unfinished deployment; deployer role | built |
-| `/api/v1/...` | further JSON API resources; unknown API paths answer with a JSON `404` | planned |
-| `POST /webhooks/github` | GitHub App webhooks, signature-verified and outside sign-in; mounted only when a webhook secret is configured ([github-app.md](github-app.md#webhooks)) | built |
-| `GET /`, `GET /apps/{app}`, `GET /deployments/{id}`, `GET /locks`, `GET /audit` | web UI pages; viewer role, anonymous browsers are redirected to sign-in ([ui.md](ui.md)) | built |
-| `GET /tokens`, `POST /tokens`, `POST /tokens/{name}/revoke` | API token administration in the web UI; admin role | built |
-| `POST /apps/{app}/deployments`, `/deployments/{id}/cancel`, `/apps/{app}/rollback`, `/apps/{app}/block`, `/apps/{app}/unblock`, `/apps/{app}/lock`, `/apps/{app}/unlock`, `/locks/global`, `/locks/global/release` | web UI form actions answered with `303`; deployer role and the session's CSRF token | built |
-| `GET /static/{file}` | the UI's CSS, JavaScript and vendored htmx, immutable when requested with their content hash | built |
-| `/` (any other path) | HTML `404` page | built |
+| Path | Purpose |
+| --- | --- |
+| `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves |
+| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins |
+| `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) |
+| `GET /api/v1/apps/{app}/queue` | an app's queue in run order; viewer role (see [api.md](api.md)) |
+| `POST /api/v1/apps/{app}/lock`, `DELETE /api/v1/apps/{app}/lock` | freeze or release one app; deployer role; see [locks.md](locks.md#api) |
+| `POST /api/v1/lock`, `DELETE /api/v1/lock` | global freeze; deployer role |
+| `GET /api/v1/locks` | live freezes; viewer role |
+| `GET /api/v1/apps/{app}/deployments` | deploy history of an app, filtered and paginated; viewer role ([api.md](api.md)) |
+| `GET /api/v1/deployments/{id}` | one deployment with its events, gates, rollbacks and retries ([api.md](api.md)) |
+| `POST /api/v1/apps/{app}/rollback` | queue a rollback to the previous good digest and block the replaced version; deployer role ([rollback.md](rollback.md#api)) |
+| `GET`, `POST /api/v1/apps/{app}/blocks`, `DELETE /api/v1/apps/{app}/blocks/{ref}` | list (viewer), add and clear (deployer) blocked versions |
+| `POST /api/v1/deployments/{id}/gates/{gate}`, `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}` | post the result of an `external` gate; reporter role ([api.md](api.md#external-gate-results)) |
+| `GET /auth/login` | starts sign-in at the configured provider; mounted only when one is configured ([authentication.md](authentication.md#the-sign-in-flow)) |
+| `GET /auth/callback` | completes sign-in, creates the session and redirects to the return path |
+| `POST /auth/logout` | ends the session; needs the CSRF token |
+| `POST /api/v1/apps/{app}/deployments` | queue a deploy of a commit on the app's branch; deployer role ([api.md](api.md#manual-deploys-and-cancellation)) |
+| `POST /api/v1/deployments/{id}/cancel` | cancel an unfinished deployment; deployer role |
+| any other `/api/v1/...` path | JSON `404` |
+| `POST /webhooks/github` | GitHub App webhooks, signature-verified and outside sign-in; mounted only when a webhook secret is configured ([github-app.md](github-app.md#webhooks)) |
+| `GET /`, `GET /apps/{app}`, `GET /deployments/{id}`, `GET /locks`, `GET /audit` | web UI pages; viewer role, anonymous browsers are redirected to sign-in ([ui.md](ui.md)) |
+| `GET /tokens`, `POST /tokens`, `POST /tokens/{name}/revoke` | API token administration in the web UI; admin role |
+| `POST /apps/{app}/deployments`, `/deployments/{id}/cancel`, `/apps/{app}/rollback`, `/apps/{app}/block`, `/apps/{app}/unblock`, `/apps/{app}/lock`, `/apps/{app}/unlock`, `/locks/global`, `/locks/global/release` | web UI form actions answered with `303`; deployer role and the session's CSRF token |
+| `GET /static/{file}` | the UI's CSS, JavaScript and vendored htmx, immutable when requested with their content hash |
+| `/` (any other path) | HTML `404` page |
 
 The JSON API is one handler from `api.New`, mounted at `api.Prefix` (`/api/v1/`) on the main listener. `serve` wraps the application routes (not `/healthz`, `/readyz` or `/metrics`) in the authentication middleware, and `Options.Middleware` applies `RequireRole(viewer)` to every API route, so unauthenticated callers get `401` with `WWW-Authenticate: Bearer`. Deploy, cancel, lock, rollback and block changes and gate reports additionally call `api.Authenticator`, implemented in `internal/cli/serve.go` over the authenticated principal, which requires the deployer role, or the reporter role for gate reports (`403` otherwise) and returns the caller (`api.Caller{Actor, Role}`): the actor string is recorded as the lock owner, and the actor and role go into audit rows. `serve` builds `rollback.Service` over the store and passes it to the API; its `Observer` port is adapted to `metrics.Recorder.Rollback(app, manual)`. When the engine runs, `serve` also builds `deploys.Service` over the store, wrapped in `announcingDeploys`, and passes it to the API and the web UI; without apps the deploy and cancel routes are not mounted.
 

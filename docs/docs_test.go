@@ -159,6 +159,7 @@ func TestLinksResolve(t *testing.T) {
 			}
 		}
 		t.Run(file, func(t *testing.T) {
+			t.Parallel()
 			for _, problem := range problems {
 				t.Error(problem)
 			}
@@ -181,6 +182,7 @@ func TestReadmeIndexesEveryDocument(t *testing.T) {
 	}
 	for _, name := range required {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if !strings.Contains(readme, "]("+name) {
 				t.Errorf("README.md does not link %s", name)
 			}
@@ -210,6 +212,7 @@ func TestDecisionIndexMatchesRecords(t *testing.T) {
 		}
 		checked++
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			match := decisionStatus.FindStringSubmatch(readFile(t, "docs/decisions/"+name))
 			if match == nil {
 				t.Fatal("decision has no status line")
@@ -388,6 +391,7 @@ func TestConfigurationReferenceIsComplete(t *testing.T) {
 
 	for env := range surface.envs {
 		t.Run(env, func(t *testing.T) {
+			t.Parallel()
 			if !strings.Contains(reference, env) {
 				t.Errorf("docs/configuration.md does not mention %s", env)
 			}
@@ -395,6 +399,7 @@ func TestConfigurationReferenceIsComplete(t *testing.T) {
 	}
 	for key := range surface.keys {
 		t.Run("yaml "+key, func(t *testing.T) {
+			t.Parallel()
 			if !strings.Contains(reference, "`"+key+"`") && !strings.Contains(reference, key+":") && !strings.Contains(reference, "."+key) {
 				t.Errorf("docs/configuration.md does not mention the key %s", key)
 			}
@@ -402,6 +407,7 @@ func TestConfigurationReferenceIsComplete(t *testing.T) {
 	}
 	for flag := range surface.flags {
 		t.Run("--"+flag, func(t *testing.T) {
+			t.Parallel()
 			if !strings.Contains(reference, "--"+flag) {
 				t.Errorf("docs/configuration.md does not mention --%s", flag)
 			}
@@ -415,6 +421,7 @@ func TestTestVariablesAreDocumentedInDevelopmentGuide(t *testing.T) {
 	guide := readFile(t, "docs/development.md")
 	for _, name := range []string{"DOORSTEP_TEST_DATABASE_URL", "DOORSTEP_TEST_REQUIRE_DATABASE"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if !strings.Contains(guide, name) {
 				t.Errorf("docs/development.md does not mention %s", name)
 			}
