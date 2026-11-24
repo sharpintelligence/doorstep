@@ -59,6 +59,10 @@ bin/doorstep migrate status
 bin/doorstep serve
 ```
 
+## GitHub in tests
+
+Tests that need GitHub never call the real API and need no credentials. `githubtest.NewServer(t)` (in `internal/github/githubtest`) starts a fake API with a freshly generated App key: it verifies App JWTs, serves installation lookup and token minting (`Install`, `Suspend`, `Uninstall`, call counters, an injectable clock) and authenticates extra handlers registered with `Handle` by installation token. Point `github.Options.BaseURL` at its `URL`, using its `AppID` and `PrivateKey`.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request and on pushes to `main`. A single job, `check`, on `ubuntu-24.04`:

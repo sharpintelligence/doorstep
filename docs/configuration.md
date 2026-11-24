@@ -69,6 +69,19 @@ VERSION  STATE    APPLIED AT            NAME
 
 Both accept `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
 
+## GitHub App
+
+GitHub access is optional as a group: with none of these set, `doorstep serve` runs without GitHub. Once the App ID or a private key is set, the App ID and exactly one private key source are required. These settings are environment variables only; there are no flags, so the key never shows up in process listings. See [github-app.md](github-app.md) for creating, installing and rotating the App.
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `DOORSTEP_GITHUB_APP_ID` | unset | The App's numeric App ID or its Client ID, used as the JWT issuer. Must not contain whitespace. |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` | unset | Path to the App's private key: PEM, PKCS #1 (`RSA PRIVATE KEY`, as GitHub downloads it) or PKCS #8 (`PRIVATE KEY`), RSA, at least 2048 bits. Usually a mounted Kubernetes Secret. |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY` | unset | The private key inline, same formats. Literal `\n` sequences are turned into newlines, for env files that cannot hold multi-line values. Setting both this and `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is an error. |
+| `DOORSTEP_GITHUB_API_URL` | `https://api.github.com` | REST API root. For GitHub Enterprise Server use `https://<host>/api/v3`. Must be an absolute URL without user information, query or fragment, and must use `https` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`). A trailing slash is ignored. Validated even when no App is configured. |
+
+The key is read and parsed when `serve` starts; a missing, unreadable or malformed key stops startup. Key values are redacted wherever configuration is printed or logged.
+
 ## `doorstep version`
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.

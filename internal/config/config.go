@@ -27,6 +27,7 @@ type Config struct {
 	Server   Server
 	Log      Log
 	Database Database
+	GitHub   GitHub
 }
 
 type Server struct {
@@ -56,6 +57,7 @@ func Default() Config {
 			Level:  "info",
 			Format: logging.FormatJSON,
 		},
+		GitHub: defaultGitHub(),
 	}
 }
 
@@ -81,6 +83,7 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup(EnvDatabaseURLFile); ok {
 		cfg.Database.URLFile = v
 	}
+	cfg.GitHub = githubFromEnv(cfg.GitHub, lookup)
 	return cfg, errors.Join(errs...)
 }
 
@@ -112,6 +115,7 @@ func (c Config) Validate() error {
 	if err := c.Database.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("database: %w", err))
 	}
+	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }
 
