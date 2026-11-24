@@ -60,6 +60,11 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Server.ListenAddr = "127.0.0.1:9000" },
 		},
 		{
+			name: "metrics listen address",
+			env:  map[string]string{EnvMetricsListenAddr: "127.0.0.1:9090"},
+			want: func(c *Config) { c.Server.MetricsListenAddr = "127.0.0.1:9090" },
+		},
+		{
 			name: "shutdown timeout",
 			env:  map[string]string{EnvShutdownTimeout: "1m30s"},
 			want: func(c *Config) { c.Server.ShutdownTimeout = 90 * time.Second },
@@ -167,6 +172,19 @@ func TestValidate(t *testing.T) {
 		{name: "host and port", mutate: func(c *Config) { c.Server.ListenAddr = "127.0.0.1:8080" }},
 		{name: "ephemeral port", mutate: func(c *Config) { c.Server.ListenAddr = "127.0.0.1:0" }},
 		{name: "ipv6", mutate: func(c *Config) { c.Server.ListenAddr = "[::1]:8080" }},
+		{name: "empty metrics listen address", mutate: func(c *Config) { c.Server.MetricsListenAddr = "" }},
+		{name: "metrics host and port", mutate: func(c *Config) { c.Server.MetricsListenAddr = "127.0.0.1:9090" }},
+		{name: "metrics ephemeral port", mutate: func(c *Config) { c.Server.MetricsListenAddr = ":0" }},
+		{
+			name:    "metrics missing port",
+			mutate:  func(c *Config) { c.Server.MetricsListenAddr = "nope" },
+			wantErr: []string{"metrics listen address", "missing port"},
+		},
+		{
+			name:    "metrics named port",
+			mutate:  func(c *Config) { c.Server.MetricsListenAddr = ":http" },
+			wantErr: []string{"metrics listen address", `port "http"`},
+		},
 		{name: "text format", mutate: func(c *Config) { c.Log.Format = "text" }},
 		{
 			name:    "missing port",

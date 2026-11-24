@@ -34,6 +34,7 @@ type Options struct {
 	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
 	Checks          map[string]Check
+	Routes          map[string]http.Handler
 }
 
 type Server struct {
@@ -81,6 +82,9 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	for pattern, handler := range opts.Routes {
+		mux.Handle(pattern, handler)
+	}
 	s.handler = logRequests(s.logger, recoverPanics(s.logger, mux))
 	return s
 }

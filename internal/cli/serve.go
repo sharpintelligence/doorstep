@@ -2,17 +2,21 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
+	"sync"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/logging"
+	"github.com/sharpintelligence/doorstep/internal/metrics"
 	"github.com/sharpintelligence/doorstep/internal/registry"
 	"github.com/sharpintelligence/doorstep/internal/server"
 )
@@ -37,6 +41,8 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&overrides.Server.ListenAddr, flagListenAddr, defaults.Server.ListenAddr,
 		"address to listen on as host:port (env "+config.EnvListenAddr+")")
+	flags.StringVar(&overrides.Server.MetricsListenAddr, flagMetricsListenAddr, defaults.Server.MetricsListenAddr,
+		"address for a separate /metrics listener as host:port; empty serves /metrics on the main listener (env "+config.EnvMetricsListenAddr+")")
 	flags.DurationVar(&overrides.Server.ShutdownDelay, flagShutdownDelay, defaults.Server.ShutdownDelay,
 		"time to keep serving while reporting not ready before draining on shutdown (env "+config.EnvShutdownDelay+")")
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
@@ -91,6 +97,19 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 	}
 	logger.InfoContext(ctx, "database ready", slog.Any("applied_migrations", migrationVersions(applied)))
 
+	build := buildinfo.Read()
+	m := metrics.New(metrics.Options{Logger: logger, Build: build})
+	routes := map[string]http.Handler{"GET /metrics": m.Handler()}
+	newServer := func(routes map[string]http.Handler) *server.Server {
+		return server.New(server.Options{
+			Logger:          logger,
+			ShutdownDelay:   cfg.Server.ShutdownDelay,
+			ShutdownTimeout: cfg.Server.ShutdownTimeout,
+			Checks:          map[string]server.Check{"postgres": st.Ping},
+			Routes:          routes,
+		})
+	}
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Server.ListenAddr)
 	if err != nil {
@@ -98,18 +117,48 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 	}
 	logger.InfoContext(ctx, "listening",
 		slog.String("addr", ln.Addr().String()),
-		slog.Any("build", buildinfo.Read()),
+		slog.Any("build", build),
 	)
 
-	srv := server.New(server.Options{
-		Logger:          logger,
-		ShutdownDelay:   cfg.Server.ShutdownDelay,
-		ShutdownTimeout: cfg.Server.ShutdownTimeout,
-		Checks:          map[string]server.Check{"postgres": st.Ping},
-	})
-	if err := srv.Run(ctx, ln); err != nil {
+	if cfg.Server.MetricsListenAddr == "" {
+		if err := newServer(routes).Run(ctx, ln); err != nil {
+			return err
+		}
+		logger.InfoContext(ctx, "stopped")
+		return nil
+	}
+
+	metricsLn, err := lc.Listen(ctx, "tcp", cfg.Server.MetricsListenAddr)
+	if err != nil {
+		return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
+	}
+	logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
+
+	mainServer := newServer(nil)
+	metricsServer := newServer(routes)
+	err = runServers(ctx,
+		func(ctx context.Context) error { return mainServer.Run(ctx, ln) },
+		func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) },
+	)
+	if err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "stopped")
 	return nil
+}
+
+func runServers(ctx context.Context, runs ...func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errs := make([]error, len(runs))
+	var wg sync.WaitGroup
+	for i, run := range runs {
+		wg.Go(func() {
+			defer cancel()
+			errs[i] = run(ctx)
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

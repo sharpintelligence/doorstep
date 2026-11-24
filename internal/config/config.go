@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	EnvListenAddr      = "DOORSTEP_LISTEN_ADDR"
-	EnvShutdownTimeout = "DOORSTEP_SHUTDOWN_TIMEOUT"
-	EnvShutdownDelay   = "DOORSTEP_SHUTDOWN_DELAY"
-	EnvLogLevel        = "DOORSTEP_LOG_LEVEL"
-	EnvLogFormat       = "DOORSTEP_LOG_FORMAT"
-	EnvDatabaseURL     = "DOORSTEP_DATABASE_URL"
-	EnvDatabaseURLFile = "DOORSTEP_DATABASE_URL_FILE"
+	EnvListenAddr        = "DOORSTEP_LISTEN_ADDR"
+	EnvMetricsListenAddr = "DOORSTEP_METRICS_LISTEN_ADDR"
+	EnvShutdownTimeout   = "DOORSTEP_SHUTDOWN_TIMEOUT"
+	EnvShutdownDelay     = "DOORSTEP_SHUTDOWN_DELAY"
+	EnvLogLevel          = "DOORSTEP_LOG_LEVEL"
+	EnvLogFormat         = "DOORSTEP_LOG_FORMAT"
+	EnvDatabaseURL       = "DOORSTEP_DATABASE_URL"
+	EnvDatabaseURLFile   = "DOORSTEP_DATABASE_URL_FILE"
 
 	EnvRegistryCredentialsFile = "DOORSTEP_REGISTRY_CREDENTIALS_FILE"
 )
@@ -34,9 +35,10 @@ type Config struct {
 }
 
 type Server struct {
-	ListenAddr      string
-	ShutdownDelay   time.Duration
-	ShutdownTimeout time.Duration
+	ListenAddr        string
+	MetricsListenAddr string
+	ShutdownDelay     time.Duration
+	ShutdownTimeout   time.Duration
 }
 
 type Log struct {
@@ -73,6 +75,9 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	var errs []error
 	if v, ok := lookup(EnvListenAddr); ok {
 		cfg.Server.ListenAddr = v
+	}
+	if v, ok := lookup(EnvMetricsListenAddr); ok {
+		cfg.Server.MetricsListenAddr = v
 	}
 	errs = append(errs,
 		lookupDuration(lookup, EnvShutdownDelay, &cfg.Server.ShutdownDelay),
@@ -114,6 +119,11 @@ func (c Config) Validate() error {
 	var errs []error
 	if err := validateListenAddr(c.Server.ListenAddr); err != nil {
 		errs = append(errs, fmt.Errorf("listen address: %w", err))
+	}
+	if c.Server.MetricsListenAddr != "" {
+		if err := validateListenAddr(c.Server.MetricsListenAddr); err != nil {
+			errs = append(errs, fmt.Errorf("metrics listen address: %w", err))
+		}
 	}
 	if c.Server.ShutdownDelay < 0 {
 		errs = append(errs, fmt.Errorf("shutdown delay: must not be negative, got %s", c.Server.ShutdownDelay))
