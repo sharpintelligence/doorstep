@@ -230,7 +230,7 @@ func validateSecretFile(s string) error {
 	return nil
 }
 
-func validateURL(s string) error {
+func validateURL(s, alternative string) error {
 	u, err := url.Parse(s)
 	if err != nil {
 		return errors.New("is not a valid URL")
@@ -242,10 +242,10 @@ func validateURL(s string) error {
 		return errors.New("must include a host")
 	}
 	if u.User != nil {
-		return errors.New("must not include credentials; use url_env or url_file")
+		return errors.New("must not include credentials; use " + alternative)
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return errors.New("must not include a query string or fragment, which often carry tokens; use url_env or url_file")
+		return errors.New("must not include a query string or fragment, which often carry tokens; use " + alternative)
 	}
 	return nil
 }

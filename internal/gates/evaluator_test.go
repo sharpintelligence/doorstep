@@ -459,14 +459,14 @@ func TestEvaluateSkipsGateWithAbandonedCall(t *testing.T) {
 		return gates.Evaluation{Status: core.GatePassed, Message: "ok"}, nil
 	})
 	h := newHarness(t, gates.Plan{After: []gates.Binding{bind("health", core.GatePhaseAfter, gate)}}, func(o *gates.Options) {
-		o.EvaluationTimeout = 20 * time.Millisecond
+		o.EvaluationTimeout = 250 * time.Millisecond
 	})
 	d := deployment(core.KindDeploy)
 	other := deployment(core.KindDeploy)
 	other.ID = 8
 
 	out := mustEvaluate(t, h, d, core.GatePhaseAfter)
-	if out.Results[0].Message != "evaluation error: no verdict within 20ms" {
+	if out.Results[0].Message != "evaluation error: no verdict within 250ms" {
 		t.Fatalf("first message = %q", out.Results[0].Message)
 	}
 	if !strings.Contains(h.logs.String(), "gate call abandoned while still running") {

@@ -7,7 +7,7 @@ A gate is a check that decides whether a deployment may continue. Gates run in t
 
 Which gates an app runs, their names and their timeouts come from the configuration file ([configuration.md](configuration.md#gates)). Gate results are recorded data, not control flow ([ADR 0001](decisions/0001-go-and-core-design.md), decision 4): every evaluation leaves a row explaining the verdict.
 
-The code lives in `internal/gates`: the data model, the registry, the evaluator and the five [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`).
+The code lives in `internal/gates`: the data model, the registry, the evaluator, the five [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`) and the [`prometheus`](#prometheus) gate type, which reads Prometheus through the `internal/promquery` client.
 
 ## Data model
 
@@ -17,7 +17,7 @@ A gate result is the latest verdict of one named gate for one deployment, stored
 | --- | --- |
 | `DeploymentID` | the deployment; its commit is the deployment's commit, so a result is effectively *(commit, gate name, phase, details)*, and a rollback of the same commit gets its own results |
 | `Name` | gate name from the configuration, unique within the app across both phases |
-| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, ...) |
+| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, `prometheus`, ...) |
 | `Phase` | `before` or `after` (`core.GatePhase`) |
 | `Status` | `pending`, `passed`, `failed` or `skipped` |
 | `Message` | short human-readable explanation |
@@ -62,11 +62,11 @@ Each gate receives the deployment, the phase and its previously recorded result 
 
 ### Timeouts
 
-A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for `health`, the soak `duration` plus `10m` for `soak`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
+A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
 
 ### Errors
 
-A gate that cannot reach a verdict (it returns an error, panics, returns an unknown status, invalid or oversized evidence, or gives no answer within 30 seconds) is treated as a transient problem. It is recorded as `pending` with the message `evaluation error: <reason>` and keeps its previous evidence, the error is logged at `warn` and counted in metrics, and the phase stays `pending` until the gate recovers or its timeout fails it. A Prometheus or GitHub blip therefore never fails a deploy by itself, but it is visible, and it cannot hold a deploy forever.
+A gate that cannot reach a verdict (it returns an error, panics, returns an unknown status, invalid or oversized evidence, or gives no answer within 30 seconds) is treated as a transient problem. It is recorded as `pending` with the message `evaluation error: <reason>` and keeps its previous evidence, the error is logged at `warn` and counted in metrics, and the phase stays `pending` until the gate recovers or its timeout fails it. A Prometheus or GitHub blip shorter than the gate's timeout therefore never fails a deploy by itself, but it is visible, and it cannot hold a deploy forever: an outage that outlasts the timeout fails the gate, and an after gate failing rolls the deploy back.
 
 A gate call that gives no answer within 30 seconds is abandoned: the evaluator stops waiting and logs `gate call abandoned while still running` at `warn`. A gate that ignores `ctx` keeps running in the background, so while an abandoned call of a gate for a deployment has not returned, later passes do not call that gate for that deployment again; they record the evaluation error `previous call has not returned yet` instead. A stuck gate therefore costs at most one goroutine per deployment, and its timeout still fails it.
 
@@ -85,12 +85,13 @@ A rollback re-pins a digest that already passed CI and soak, but it still waits 
 | `schedule` | before | `schedule` | skipped unless `apply_to_rollbacks: true` | none | the clock |
 | `health` | after | `argocd` | runs | `10m` | the Argo CD Application |
 | `soak` | after | `soak` | skipped | `duration` + `10m` | the Argo CD Application |
+| `prometheus` | after | `metrics` | skipped | `initial_delay` + `success_threshold` × `interval` + `10m` | a Prometheus server |
 
-The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule` and `soak` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
+The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak` and `prometheus` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
 
 ### Wiring
 
-The composition root (`serve`) registers all five types with one call and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates`), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
+The composition root (`serve`) registers the five built-in types with one call, the `prometheus` type with a second, and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates` and the Prometheus registrar), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
 
 ```go
 registry := gates.NewRegistry()
@@ -100,8 +101,11 @@ err := gates.RegisterBuiltins(registry, gates.Builtins{
 	Freezes:      lockService,                             // *locks.Service
 	Applications: argoApplications,                        // adapter over the argocd package
 })
+err = registerPrometheusGate(registry, catalog, secretSource{lookupEnv: lookupEnv, readFile: config.ReadSecretFile})
 plans, err := registry.Plans(catalog)
 ```
+
+`registerPrometheusGate` (in `internal/cli`) builds one `promquery.Client` per configured `prometheus` server and calls `gates.RegisterPrometheus(registry, gates.Prometheus{Servers: ...})`. It registers the type even when no server is configured, so a gate without a server is rejected by configuration validation rather than by wiring. Without the call, a configuration that uses the gate fails at startup with `unknown gate type "prometheus"`.
 
 The ports are small interfaces in `internal/gates`:
 
@@ -111,6 +115,7 @@ The ports are small interfaces in `internal/gates`:
 | `LiveChecks` | `Checks(ctx, repository, sha, required) (core.ChecksEvaluation, error)` | `intake.LiveChecks`: GitHub checks read through intake's `CheckSource` and judged by `intake.Evaluate` |
 | `FreezeReader` | `Blocking(ctx, core.Target) ([]core.Lock, error)` | `*locks.Service` |
 | `ApplicationReader` | `Application(ctx, namespace, name) (gates.Application, error)` | `cli.argoApplications`: finds the app configured for that Application and reads it with `(*argocd.Watcher).Status`, mapping not found to `gates.ErrApplicationNotFound` |
+| `MetricsQuerier` | `Query(ctx, expr, at) (promquery.Result, error)` and `QueryRange(ctx, expr, from, to, step) (promquery.Result, error)` | `*promquery.Client`, one per `prometheus` server |
 
 `gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
 
@@ -203,6 +208,67 @@ Requires the Application to stay healthy for `duration` after the deploy. The ga
 
 Evidence: `{"application", "found", "sync", "health", "health_message", "revision", "operation_phase", "degraded_since", "healthy_since", "soak", "until"}`.
 
+### prometheus
+
+Evaluates a PromQL expression after the deploy and passes once it has been good for long enough, optionally comparing each reading with the level before the deploy ([ADR 0013](decisions/0013-prometheus-query-gate.md)). The server and its credentials come from the top-level `prometheus` list ([configuration.md](configuration.md#prometheus)).
+
+```yaml
+gates:
+  after:
+    - type: health
+    - type: prometheus
+      name: error-rate
+      query: sum(rate(http_requests_total{app="api",code=~"5.."}[5m])) / sum(rate(http_requests_total{app="api"}[5m]))
+      condition: "< 0.05"
+      initial_delay: 2m
+      baseline:
+        ratio: 0.2
+        absolute: 0.001
+```
+
+**Sampling.** The gate takes at most one sample per `interval` (default `1m`): an instant query at the current time. The first sample is taken `initial_delay` (default `0s`) after the gate's first evaluation. Polls inside the interval return the previous message and evidence without contacting Prometheus, so several replicas polling the same gate do not multiply the load. Attempt and start times are compared with a tolerance of 5 seconds, so a replica whose clock is slightly behind the one that took the last sample still waits instead of taking an extra sample that would count towards `success_threshold`; a recorded time more than 5 seconds in the future is treated as a skewed clock and ignored rather than trusted. The measurement window of each sample is the range selector in the query (`[5m]` above); the gate does not average samples itself.
+
+| Samples | Verdict |
+| --- | --- |
+| `success_threshold` (default `5`) successes in a row | `passed` (`5 consecutive samples passed; latest 0.004`) |
+| `failure_threshold` (default `3`) failures in a row | `failed` (`3 consecutive samples failed; latest 0.08 (want < 0.05)`) |
+| otherwise | `pending` (`3/5 samples passed; latest 0.004 (want < 0.05; baseline limit <= 0.013)`) |
+
+A success resets the failure streak and a failure resets the success streak. With the defaults the gate passes after about four minutes of good samples and fails after about two minutes of bad ones; the effective window is (`success_threshold` - 1) × `interval`. The timeout defaults to `initial_delay` + `success_threshold` × `interval` + `10m`, and configuration validation rejects a timeout no longer than `initial_delay` + (`success_threshold` - 1) × `interval`, which could never pass. Because a failed after gate rolls the deploy back, `failure_threshold` defaults to more than one sample.
+
+**A sample succeeds** when every configured comparison holds:
+
+- `condition`, such as `"< 0.05"`: an operator (`<`, `<=`, `>`, `>=`, `==`, `!=`) and a finite number;
+- `baseline`: the value stays within a margin of the level before the deploy.
+
+At least one of the two is required; with both, both must hold, which reads as "no worse than before, and never above a hard ceiling".
+
+**Baseline.** The baseline is one number: the mean of the same query evaluated as a range query over [*anchor* - `window`, *anchor*] with step `interval`, where *anchor* is the deployment's start time (just before the pin was written), or its creation time when it has none. NaN and infinite points are ignored. It is computed on the first sample, stored in the evidence and reused for the rest of the deployment, so samples are never compared with post-deploy data. With `direction: increase` (the default; higher is worse) a sample passes when
+
+*value* ≤ *baseline* + \|*baseline*\| × `ratio` + `absolute`
+
+and with `direction: decrease` (lower is worse, for throughput or success rates) when
+
+*value* ≥ *baseline* - \|*baseline*\| × `ratio` - `absolute`.
+
+`absolute` covers a zero baseline, where a ratio alone would fail on the first error. `window` defaults to `30m`.
+
+**No data.** An empty result or a NaN value (for example `0/0` when there is no traffic) is no data. With `no_data: pending` (the default) such a sample counts neither way and does not reset the streaks, so the gate waits and its timeout eventually fails it. With `no_data: fail` it counts as a failing sample; when every sample of the failing streak had no data the message is `no data for 3 consecutive samples`. There is no option to pass on no data, because a misspelt metric name would then pass forever; write `or vector(0)` into the query when an absent series really means zero:
+
+```yaml
+query: (sum(rate(http_requests_total{code=~"5.."}[5m])) or vector(0)) / sum(rate(http_requests_total[5m]))
+```
+
+When the baseline window has no data (a new app or a new metric), `baseline.no_data: ignore` (the default) skips the baseline comparison for this deployment, records `"status": "missing"` and appends `baseline unavailable, compared against the condition only` to the message (`baseline unavailable, so any value passes` without a `condition`); `baseline.no_data: fail` fails the gate at once with `no baseline data`. Missing history never appears later, so waiting would only end in a timeout.
+
+**Result shape.** The query must return a scalar or an instant vector with exactly one series, and the baseline range query at most one series. Aggregate with `sum`, `max` or `min`, which also makes the intent explicit. More series, or a range vector or string from the instant query, leaves the gate `pending` with `query failed: query returned 2 series; aggregate it to a single value`.
+
+**Errors.** A query that Prometheus rejects as invalid, a `400` or `422` response with error type `bad_data` (a PromQL syntax error or a bad parameter, which configuration validation cannot catch), fails the gate at once with `query failed: <reason>` (`baseline query failed: <reason>` for the baseline): it would fail the same way on every sample and every deploy, so waiting for the timeout would only delay the rollback. Any other error, a network error, a timeout, another `4xx` or `5xx` response (including `422 execution` for a query that ran out of time or memory), or a malformed body, leaves the gate `pending` with the same message and records `last_attempt_at` and `last_error`. Those errors count neither as success nor as failure, so a Prometheus blip shorter than the gate's timeout never fails a deploy, and the interval still applies, so a Prometheus that is down is not queried on every poll by every replica. An outage that lasts until the timeout does fail the gate, with `timed out after <timeout>`, and so rolls the deploy back; the evidence keeps `last_error`, which shows the cause. They are gate results rather than evaluation errors, so they do not appear as `error` observations in the gate duration metric. Only cancellation is returned to the evaluator as an error.
+
+**Client.** `internal/promquery` is a small standard library client: `POST` form requests to `<url>/api/v1/query` and `<url>/api/v1/query_range` (long queries fit, and a path prefix in `url` is kept), a 10 second timeout per request, a 1 MiB response limit, `User-Agent: doorstep/<version>`, no redirects (so the `Authorization` header never reaches another host), and the bearer token or password read from its secret on every request, so a rotated token takes effect without a restart. Prometheus, Thanos, Mimir and VictoriaMetrics serve this API.
+
+State lives in the evidence of the `pending` result and is carried only from a `pending` previous result, so `Reevaluate` starts over, and so does a change of server or query. Evidence: `{"server", "query", "query_sha256", "condition", "interval", "success_threshold", "failure_threshold", "started_at", "last_attempt_at", "consecutive_successes", "consecutive_failures", "consecutive_no_data", "last_error", "baseline": {"status": "ok" | "missing", "direction", "value", "limit", "from", "to", "points"}, "samples": [{"at", "value", "outcome": "success" | "failure" | "no_data"}]}`. Values are strings (`"0.004"`, `"+Inf"`), because JSON numbers cannot hold NaN or infinities; `samples` keeps the last 10. `query` holds the configured query cut to 1024 bytes for display, and `query_sha256` the SHA-256 of the whole query, which is what detects a changed query; the server URL and credentials never appear in evidence or messages.
+
 ## Limits
 
 - Messages are cut to 1024 bytes (on a UTF-8 boundary); NUL bytes are removed and invalid UTF-8 is replaced.
@@ -249,7 +315,7 @@ Observers are called after a result is committed, only when its status changed (
 
 Evaluations are recorded in `doorstep_gate_evaluation_duration_seconds` ([metrics.md](metrics.md)):
 
-- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, ...), never the configured name;
+- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, `metrics` for `prometheus`, ...), never the configured name;
 - `phase` is the deployment kind (`deploy` or `rollback`), not `before`/`after`;
 - one `passed` or `failed` observation when a gate reaches that verdict, with the time from `StartedAt` to `FinishedAt` plus the wall time of the call that produced the verdict (`StartedAt` is stamped after the first call returns, so a gate that decides on its first evaluation records the duration of that call, not 0; a timeout counts as `failed`);
 - one `error` observation per evaluation error, with the wall time of that call;

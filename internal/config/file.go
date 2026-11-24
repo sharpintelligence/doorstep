@@ -16,18 +16,19 @@ const (
 )
 
 type File struct {
-	Server        FileServer     `yaml:"server"`
-	Log           FileLog        `yaml:"log"`
-	Database      FileDatabase   `yaml:"database"`
-	GitHub        FileGitHub     `yaml:"github"`
-	Registry      FileRegistry   `yaml:"registry"`
-	Locks         FileLocks      `yaml:"locks"`
-	Kubernetes    FileKubernetes `yaml:"kubernetes"`
-	Intake        FileIntake     `yaml:"intake"`
-	Engine        FileEngine     `yaml:"engine"`
-	Auth          Auth           `yaml:"auth"`
-	Notifications []Notification `yaml:"notifications"`
-	Apps          []App          `yaml:"apps"`
+	Server        FileServer         `yaml:"server"`
+	Log           FileLog            `yaml:"log"`
+	Database      FileDatabase       `yaml:"database"`
+	GitHub        FileGitHub         `yaml:"github"`
+	Registry      FileRegistry       `yaml:"registry"`
+	Locks         FileLocks          `yaml:"locks"`
+	Kubernetes    FileKubernetes     `yaml:"kubernetes"`
+	Intake        FileIntake         `yaml:"intake"`
+	Engine        FileEngine         `yaml:"engine"`
+	Auth          Auth               `yaml:"auth"`
+	Notifications []Notification     `yaml:"notifications"`
+	Prometheus    []PrometheusServer `yaml:"prometheus"`
+	Apps          []App              `yaml:"apps"`
 }
 
 type FileServer struct {
@@ -170,8 +171,12 @@ func (f File) Catalog() Catalog {
 	for i := range c.Notifications {
 		c.Notifications[i].Events = slices.Clone(c.Notifications[i].Events)
 	}
+	c.Prometheus = slices.Clone(f.Prometheus)
 	for _, a := range f.Apps {
 		c.Apps = append(c.Apps, a.withDefaults())
+	}
+	if len(c.Prometheus) == 1 {
+		c.fillPrometheusServer(c.Prometheus[0].Name)
 	}
 	return c
 }
