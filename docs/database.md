@@ -106,7 +106,24 @@ The append-only audit of freeze locks: `app_id` (null for the global freeze), `a
 
 ### `gate_results`
 
-The latest result of each named gate for a deployment: `UNIQUE (deployment_id, name)`, upserted on re-evaluation. Columns: `status` (`pending`, `passed`, `failed`, `skipped`), `message`, `evidence jsonb`, `started_at`, `finished_at`, `updated_at`. Earlier evaluations are recorded as `gate` events.
+The latest result of each named gate for a deployment: `UNIQUE (deployment_id, name)`, upserted on re-evaluation. The commit a result belongs to is the deployment's `commit_sha`; it is not copied, and a rollback of the same commit gets its own rows. Gate names are unique across both phases of an app, so the phase is an attribute, not part of the key. Gate semantics are described in [gates.md](gates.md).
+
+| Column | Notes |
+| --- | --- |
+| `deployment_id` | `ON DELETE CASCADE` |
+| `name` | configured gate name, not blank |
+| `type` | gate type from the configuration (`checks`, `health`, `soak`, ...), not blank; no enumeration `CHECK`, because new gate types should not need a migration |
+| `phase` | `before` or `after` |
+| `status` | `pending`, `passed`, `failed` or `skipped` |
+| `message` | short explanation, at most 1024 bytes as written by the evaluator |
+| `evidence` | `jsonb` object, `{}` when there is none |
+| `started_at` | set on insert, and reset to `now()` when a result moves from a verdict back to `pending`, so a gate timeout restarts |
+| `finished_at` | set to `now()` when the status becomes a verdict, kept while the same verdict is recorded again, cleared while `pending` |
+| `updated_at` | maintained by the trigger on every recording, including an unchanged `pending` poll; the gate timeout compares it with `started_at`, so both readings come from the database clock |
+
+`Store.RecordGateResult` cleans the message and validates the evidence with the same limits as the evaluator ([gates.md](gates.md#limits)), then, in one transaction, inserts the row (`ON CONFLICT DO NOTHING`) or, when it exists, locks it with `SELECT ... FOR UPDATE`, reads the previous status and updates it. Concurrent writers of one gate are therefore serialised and exactly one of them sees each change of status. In the same transaction it appends a `gate` event to `deployment_events` whenever the status changed (including the first recording), with the message `<name> <status>` and `data` `{"gate", "type", "phase", "status"}`. An unchanged `pending` poll updates the row but writes no event. It returns the stored row and whether the status changed, and `core.ErrNotFound` for an unknown deployment. `Store.ListGateResults` returns a deployment's rows in creation order.
+
+Migration `00006_gate_result_phase.sql` added `type` and `phase`. Both are `NOT NULL` with no default, so every writer must state them; the temporary defaults used to add the columns are dropped in the same migration.
 
 ### `deployment_events`
 

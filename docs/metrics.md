@@ -45,7 +45,7 @@ Deployment, rollback and gate series appear once the engine records into them. U
 | `doorstep_deployments_started_total` | counter | `app` | Deployments that started. |
 | `doorstep_deployment_duration_seconds` | histogram | `app`, `outcome` | Time from deployment start to a final outcome. Its `_count` is the number of finished deployments per outcome. |
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
-| `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time spent evaluating a gate. Its `_count` is the number of evaluations. |
+| `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time from a gate starting to wait to its verdict, or the duration of a call that failed (see [Labels](#labels)). Its `_count` is the number of verdicts and evaluation errors. |
 | `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time: queue entries whose deployment is `queued` and not leased, across all apps. In-flight deployments are not counted ([queue.md](queue.md#observability)). The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
 | `doorstep_queue_depth_errors_total` | counter | none | Scrapes where the queue depth could not be read. The first failure of a streak is logged at `warn` and the recovery at `info`; further failures are only counted. |
 | `doorstep_build_info` | gauge | `version`, `commit`, `go_version` | Always 1; identifies the running build. |
@@ -53,7 +53,7 @@ Deployment, rollback and gate series appear once the engine records into them. U
 
 ### Labels
 
-`app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
+`app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. Each gate type declares its kind when it is registered with the gate registry (for example `checks` as `ci`, `health` as `argocd`). A gate records one `passed` or `failed` observation when it reaches that verdict, measured from when it started waiting to the verdict, including the call that produced the verdict (so a gate that decides on its first evaluation records the duration of that call, and a timeout is a `failed` observation of about the timeout), and one `error` observation, with the duration of that call, each time it cannot be evaluated. Polls that leave a gate `pending` and gates skipped for a rollback record nothing. See [gates.md](gates.md#metrics). There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
 
 The other labels are fixed sets. Any other value is recorded as `unknown`.
 

@@ -23,11 +23,19 @@ func (s GateStatus) Valid() bool {
 	return slices.Contains(GateStatuses(), s)
 }
 
+func (s GateStatus) Terminal() bool {
+	return s == GatePassed || s == GateFailed || s == GateSkipped
+}
+
 type GateResult struct {
-	Name       string
-	Status     GateStatus
-	Message    string
-	Evidence   json.RawMessage
-	StartedAt  time.Time
-	FinishedAt *time.Time
+	DeploymentID DeploymentID
+	Name         string
+	Type         string
+	Phase        GatePhase
+	Status       GateStatus
+	Message      string
+	Evidence     json.RawMessage
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	UpdatedAt    time.Time
 }
