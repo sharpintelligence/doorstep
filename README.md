@@ -26,4 +26,5 @@ curl localhost:8080/readyz
 - [Configuration](docs/configuration.md)
 - [Database](docs/database.md)
 - [GitHub App](docs/github-app.md)
+- [Metrics](docs/metrics.md)
 - [Development](docs/development.md)

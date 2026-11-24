@@ -39,7 +39,7 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		level := slog.LevelInfo
-		if isProbe(r.URL.Path) {
+		if isQuietPath(r.URL.Path) {
 			level = slog.LevelDebug
 		}
 		logger.LogAttrs(r.Context(), level, "request",
@@ -52,8 +52,8 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-func isProbe(path string) bool {
-	return path == "/healthz" || path == "/readyz"
+func isQuietPath(path string) bool {
+	return path == "/healthz" || path == "/readyz" || path == "/metrics"
 }
 
 type statusRecorder struct {

@@ -214,6 +214,45 @@ func TestNewCopiesChecks(t *testing.T) {
 	}
 }
 
+func TestRoutes(t *testing.T) {
+	t.Parallel()
+
+	routes := map[string]http.Handler{
+		"GET /metrics": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "custom") }),
+		"GET /boom":    http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }),
+	}
+	tests := []struct {
+		name     string
+		routes   map[string]http.Handler
+		method   string
+		path     string
+		wantCode int
+		wantBody string
+	}{
+		{name: "mounted route served", routes: routes, method: http.MethodGet, path: "/metrics", wantCode: http.StatusOK, wantBody: "custom"},
+		{name: "route method restricted", routes: routes, method: http.MethodPost, path: "/metrics", wantCode: http.StatusMethodNotAllowed},
+		{name: "route not mounted without routes", method: http.MethodGet, path: "/metrics", wantCode: http.StatusNotFound},
+		{name: "healthz still served", routes: routes, method: http.MethodGet, path: "/healthz", wantCode: http.StatusOK},
+		{name: "readyz still served", routes: routes, method: http.MethodGet, path: "/readyz", wantCode: http.StatusOK},
+		{name: "route panics are recovered", routes: routes, method: http.MethodGet, path: "/boom", wantCode: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(Options{Routes: tt.routes})
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody))
+			if rec.Code != tt.wantCode {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantCode)
+			}
+			if tt.wantBody != "" && rec.Body.String() != tt.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
 func TestNewDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -533,6 +572,21 @@ func TestLogRequests(t *testing.T) {
 			minLevel: slog.LevelInfo,
 		},
 		{
+			name:     "metrics hidden at info",
+			path:     "/metrics",
+			handler:  func(http.ResponseWriter, *http.Request) {},
+			minLevel: slog.LevelInfo,
+		},
+		{
+			name:      "metrics logged at debug",
+			path:      "/metrics",
+			handler:   func(http.ResponseWriter, *http.Request) {},
+			minLevel:  slog.LevelDebug,
+			wantLog:   true,
+			wantLevel: "DEBUG",
+			wantCode:  http.StatusOK,
+		},
+		{
 			name:      "probe logged at debug",
 			path:      "/healthz",
 			handler:   func(http.ResponseWriter, *http.Request) {},
@@ -796,5 +850,34 @@ func TestRunServeError(t *testing.T) {
 	err := New(Options{}).Run(t.Context(), ln)
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Run() = %v, want net.ErrClosed", err)
+	}
+}
+
+func TestRoutesRejectReservedPatterns(t *testing.T) {
+	t.Parallel()
+
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	tests := []struct {
+		name    string
+		pattern string
+		wantMsg string
+	}{
+		{name: "healthz", pattern: "GET /healthz", wantMsg: `"GET /healthz" is reserved`},
+		{name: "readyz", pattern: "GET /readyz", wantMsg: `"GET /readyz" is reserved`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				v := recover()
+				msg, _ := v.(string)
+				if !strings.Contains(msg, tt.wantMsg) {
+					t.Errorf("panic = %v, want message containing %q", v, tt.wantMsg)
+				}
+			}()
+			New(Options{Routes: map[string]http.Handler{tt.pattern: handler}})
+			t.Error("New did not panic")
+		})
 	}
 }

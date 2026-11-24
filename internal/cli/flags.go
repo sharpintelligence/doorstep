@@ -12,12 +12,13 @@ import (
 )
 
 const (
-	flagListenAddr      = "listen-addr"
-	flagShutdownDelay   = "shutdown-delay"
-	flagShutdownTimeout = "shutdown-timeout"
-	flagLogLevel        = "log-level"
-	flagLogFormat       = "log-format"
-	flagDatabaseURLFile = "database-url-file"
+	flagListenAddr        = "listen-addr"
+	flagMetricsListenAddr = "metrics-listen-addr"
+	flagShutdownDelay     = "shutdown-delay"
+	flagShutdownTimeout   = "shutdown-timeout"
+	flagLogLevel          = "log-level"
+	flagLogFormat         = "log-format"
+	flagDatabaseURLFile   = "database-url-file"
 
 	flagRegistryAuthFile = "registry-credentials-file"
 )
@@ -42,6 +43,9 @@ func resolveConfig(changed func(name string) bool, overrides config.Config, look
 	}
 	if changed(flagListenAddr) {
 		cfg.Server.ListenAddr = overrides.Server.ListenAddr
+	}
+	if changed(flagMetricsListenAddr) {
+		cfg.Server.MetricsListenAddr = overrides.Server.MetricsListenAddr
 	}
 	if changed(flagShutdownDelay) {
 		cfg.Server.ShutdownDelay = overrides.Server.ShutdownDelay

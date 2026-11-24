@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -188,6 +190,17 @@ func TestRunErrors(t *testing.T) {
 			forbidStderr: []string{password, "postgres://"},
 		},
 		{
+			name:       "invalid metrics listen address",
+			args:       []string{"serve", "--metrics-listen-addr", "nope"},
+			wantStderr: []string{"doorstep: invalid configuration", "metrics listen address"},
+		},
+		{
+			name:       "invalid metrics listen address from environment",
+			args:       []string{"serve"},
+			env:        map[string]string{config.EnvMetricsListenAddr: ":http"},
+			wantStderr: []string{"doorstep: invalid configuration", "metrics listen address"},
+		},
+		{
 			name:       "migrate without database",
 			args:       []string{"migrate"},
 			wantStderr: []string{"doorstep: invalid configuration: database", config.EnvDatabaseURL},
@@ -269,6 +282,11 @@ func TestRunErrors(t *testing.T) {
 			},
 			wantStderr: []string{"doorstep: read github app private key", "/nonexistent/doorstep/private-key.pem"},
 		},
+		{
+			name:       "metrics listen address equal to listen address",
+			args:       []string{"serve", "--listen-addr", "127.0.0.1:8123", "--metrics-listen-addr", "127.0.0.1:8123"},
+			wantStderr: []string{"doorstep: invalid configuration", "metrics listen address", "must differ"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -344,7 +362,7 @@ func TestResolveServeConfig(t *testing.T) {
 
 	const databaseURL = "postgres://doorstep@localhost/doorstep"
 	flags := config.Config{
-		Server:   config.Server{ListenAddr: "127.0.0.1:7000", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
+		Server:   config.Server{ListenAddr: "127.0.0.1:7000", MetricsListenAddr: "127.0.0.1:7001", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
 		Log:      config.Log{Level: "error", Format: "text"},
 		Database: config.Database{URLFile: "/run/secrets/database-url"},
 		GitHub:   config.Default().GitHub,
@@ -363,16 +381,28 @@ func TestResolveServeConfig(t *testing.T) {
 		{
 			name: "environment over defaults",
 			env: map[string]string{
-				config.EnvListenAddr:      ":9000",
-				config.EnvShutdownDelay:   "0s",
-				config.EnvShutdownTimeout: "1s",
-				config.EnvLogLevel:        "debug",
-				config.EnvLogFormat:       "text",
+				config.EnvListenAddr:        ":9000",
+				config.EnvMetricsListenAddr: ":9091",
+				config.EnvShutdownDelay:     "0s",
+				config.EnvShutdownTimeout:   "1s",
+				config.EnvLogLevel:          "debug",
+				config.EnvLogFormat:         "text",
 			},
 			want: func(c *config.Config) {
-				c.Server = config.Server{ListenAddr: ":9000", ShutdownDelay: 0, ShutdownTimeout: time.Second}
+				c.Server = config.Server{ListenAddr: ":9000", MetricsListenAddr: ":9091", ShutdownDelay: 0, ShutdownTimeout: time.Second}
 				c.Log = config.Log{Level: "debug", Format: "text"}
 			},
+		},
+		{
+			name: "metrics listen address from environment",
+			env:  map[string]string{config.EnvMetricsListenAddr: "127.0.0.1:9100"},
+			want: func(c *config.Config) { c.Server.MetricsListenAddr = "127.0.0.1:9100" },
+		},
+		{
+			name:    "metrics listen address flag over environment",
+			env:     map[string]string{config.EnvMetricsListenAddr: "127.0.0.1:9100"},
+			changed: []string{flagMetricsListenAddr},
+			want:    func(c *config.Config) { c.Server.MetricsListenAddr = flags.Server.MetricsListenAddr },
 		},
 		{
 			name:    "registry credentials flag over environment",
@@ -387,7 +417,7 @@ func TestResolveServeConfig(t *testing.T) {
 		},
 		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
+			changed: []string{flagListenAddr, flagMetricsListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
 			want:    func(c *config.Config) { *c = flags },
 		},
 		{
@@ -474,35 +504,35 @@ func TestRunServe(t *testing.T) {
 	}{
 		{
 			name:     "flags",
-			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
+			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
 			database: databaseFileFlag,
 			wantLogs: []string{"github app not configured"},
 		},
 		{
 			name:                  "registry credentials from flag",
-			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s", "--registry-credentials-file", "testdata/dockerconfig.json"},
+			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s", "--registry-credentials-file", "testdata/dockerconfig.json"},
 			database:              databaseFileFlag,
 			wantCredentialEntries: 2,
 		},
 		{
 			name:                  "registry credentials from environment",
-			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
+			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
 			env:                   map[string]string{config.EnvRegistryCredentialsFile: "testdata/dockerconfig.json"},
 			wantCredentialEntries: 2,
 		},
 		{
 			name:     "database URL file from environment",
-			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--log-level", "debug"},
+			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--log-level", "debug"},
 			database: databaseFileEnv,
 		},
 		{
 			name: "environment",
 			args: []string{"serve"},
-			env:  map[string]string{config.EnvListenAddr: "127.0.0.1:0", config.EnvLogLevel: "debug", config.EnvShutdownDelay: "0s"},
+			env:  map[string]string{config.EnvListenAddr: "127.0.0.1:0", config.EnvMetricsListenAddr: "127.0.0.1:0", config.EnvLogLevel: "debug", config.EnvShutdownDelay: "0s"},
 		},
 		{
 			name: "flag beats environment",
-			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-format", "json"},
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--log-format", "json"},
 			env: map[string]string{
 				config.EnvShutdownDelay: "10ms",
 				config.EnvListenAddr:    "invalid",
@@ -512,7 +542,7 @@ func TestRunServe(t *testing.T) {
 		},
 		{
 			name: "github app configured",
-			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
 			env: map[string]string{
 				config.EnvLogLevel:            "debug",
 				config.EnvGitHubAppID:         "123456",
@@ -575,14 +605,186 @@ func TestRunServe(t *testing.T) {
 func TestRunServeListenFailure(t *testing.T) {
 	t.Parallel()
 
-	var stdout, stderr bytes.Buffer
-	env := map[string]string{config.EnvDatabaseURL: storetest.DatabaseURL(t)}
-	code := Run(t.Context(), []string{"serve", "--listen-addr", "256.0.0.1:0"}, &stdout, &stderr, envFrom(env))
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr.String())
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "main listener", args: []string{"serve", "--listen-addr", "256.0.0.1:0"}},
+		{name: "metrics listener", args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "256.0.0.1:0"}},
 	}
-	if !strings.Contains(stderr.String(), "doorstep: listen on 256.0.0.1:0") {
-		t.Errorf("stderr %q does not report the listen failure", stderr.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			env := map[string]string{config.EnvDatabaseURL: storetest.DatabaseURL(t)}
+			code := Run(t.Context(), tt.args, &stdout, &stderr, envFrom(env))
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "doorstep: listen on 256.0.0.1:0") {
+				t.Errorf("stderr %q does not report the listen failure", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunServeMetrics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		args         []string
+		env          map[string]string
+		wantSeparate bool
+	}{
+		{
+			name: "main listener when the metrics address is empty",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s"},
+		},
+		{
+			name:         "separate listener from flag",
+			args:         []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			wantSeparate: true,
+		},
+		{
+			name: "separate listener from environment",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			env:  map[string]string{config.EnvMetricsListenAddr: "127.0.0.1:0"},
+
+			wantSeparate: true,
+		},
+		{
+			name:         "flag beats environment",
+			args:         []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			env:          map[string]string{config.EnvMetricsListenAddr: "invalid"},
+			wantSeparate: true,
+		},
+		{
+			name: "empty flag beats environment",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s"},
+			env:  map[string]string{config.EnvMetricsListenAddr: "127.0.0.1:0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr lockedBuffer
+			args, env := withDatabase(t, databaseURLEnv, tt.args, tt.env)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			done := make(chan int, 1)
+			go func() { done <- Run(ctx, args, &stdout, &stderr, envFrom(env)) }()
+
+			mainAddr := waitForListening(t, &stderr, done)
+			metricsAddr := mainAddr
+			if tt.wantSeparate {
+				metricsAddr = waitForLogAddr(t, &stderr, done, "metrics listening")
+				if metricsAddr == mainAddr {
+					t.Fatalf("metrics address equals main address %s", mainAddr)
+				}
+				code, _ := get(t, "http://"+mainAddr+"/metrics")
+				if code != http.StatusNotFound {
+					t.Errorf("main GET /metrics = %d, want %d", code, http.StatusNotFound)
+				}
+			}
+
+			code, body := get(t, "http://"+metricsAddr+"/metrics")
+			if code != http.StatusOK || !strings.Contains(body, "doorstep_build_info{") {
+				t.Errorf("GET /metrics = %d %.200q", code, body)
+			}
+
+			cancel()
+			select {
+			case code := <-done:
+				if code != 0 {
+					t.Errorf("exit code = %d, stderr %q", code, stderr.String())
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("serve did not exit after cancellation")
+			}
+			if !hasMessage(parseLogs(t, stderr.String()), "stopped") {
+				t.Errorf("logs missing stopped: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunServers(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	waitForCancel := func(ctx context.Context) error {
+		<-ctx.Done()
+		return nil
+	}
+	tests := []struct {
+		name    string
+		runs    []func(context.Context) error
+		wantErr error
+	}{
+		{name: "no servers", wantErr: nil},
+		{
+			name:    "one failure stops the other",
+			runs:    []func(context.Context) error{func(context.Context) error { return errBoom }, waitForCancel},
+			wantErr: errBoom,
+		},
+		{
+			name:    "clean exit stops the other",
+			runs:    []func(context.Context) error{func(context.Context) error { return nil }, waitForCancel},
+			wantErr: nil,
+		},
+		{
+			name: "all errors returned",
+			runs: []func(context.Context) error{
+				func(context.Context) error { return errBoom },
+				func(ctx context.Context) error { <-ctx.Done(); return context.Cause(ctx) },
+			},
+			wantErr: errBoom,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			done := make(chan error, 1)
+			go func() { done <- runServers(t.Context(), tt.runs...) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("runServers() = %v, want %v", err, tt.wantErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("runServers did not return")
+			}
+		})
+	}
+}
+
+func TestRunServersParentCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{}, 2)
+	run := func(ctx context.Context) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() { done <- runServers(ctx, run, run) }()
+	<-started
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("runServers() = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runServers did not return after cancellation")
 	}
 }
 
@@ -637,7 +839,7 @@ func TestRunMigrateThenServe(t *testing.T) {
 	defer cancel()
 	done := make(chan int, 1)
 	go func() {
-		done <- Run(ctx, []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"}, io.Discard, &logs, envFrom(env))
+		done <- Run(ctx, []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"}, io.Discard, &logs, envFrom(env))
 	}()
 	waitForListening(t, &logs, done)
 	cancel()
@@ -789,4 +991,64 @@ func hasMessage(entries []map[string]any, msg string) bool {
 		}
 	}
 	return false
+}
+
+func waitForLogAddr(t *testing.T, stderr *lockedBuffer, done <-chan int, msg string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case code := <-done:
+			t.Fatalf("serve exited early with %d: %s", code, stderr.String())
+		default:
+		}
+		for _, entry := range parseLogs(t, stderr.String()) {
+			if entry["msg"] != msg {
+				continue
+			}
+			addr, ok := entry["addr"].(string)
+			if !ok {
+				t.Fatalf("%q log has no addr: %v", msg, entry)
+			}
+			return addr
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("server never logged %q: %s", msg, stderr.String())
+	return ""
+}
+
+func TestRunServeMetricsBindFailureReleasesMainListener(t *testing.T) {
+	t.Parallel()
+
+	var lc net.ListenConfig
+	occupied, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = occupied.Close() }()
+
+	mainProbe, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	mainAddr := mainProbe.Addr().String()
+	if err := mainProbe.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	args, env := withDatabase(t, databaseURLEnv, []string{"serve", "--listen-addr", mainAddr, "--metrics-listen-addr", occupied.Addr().String()}, nil)
+	if code := Run(t.Context(), args, &stdout, &stderr, envFrom(env)); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "listen on "+occupied.Addr().String()) {
+		t.Errorf("stderr %q does not name the metrics address", stderr.String())
+	}
+
+	reused, err := lc.Listen(t.Context(), "tcp", mainAddr)
+	if err != nil {
+		t.Fatalf("main listener was not released: %v", err)
+	}
+	_ = reused.Close()
 }
