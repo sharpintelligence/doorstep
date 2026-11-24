@@ -226,15 +226,19 @@ func TestRunErrors(t *testing.T) {
 			forbidStderr: []string{password, "postgres://"},
 		},
 		{
-			name:       "incomplete github configuration",
-			args:       []string{"serve"},
-			env:        map[string]string{config.EnvGitHubAppID: "123"},
+			name: "incomplete github configuration",
+			args: []string{"serve"},
+			env: map[string]string{
+				config.EnvDatabaseURL: "postgres://doorstep@localhost/doorstep",
+				config.EnvGitHubAppID: "123",
+			},
 			wantStderr: []string{"doorstep: invalid configuration", "github app private key: required"},
 		},
 		{
 			name: "malformed github private key fails startup",
 			args: []string{"serve", "--listen-addr", "127.0.0.1:0"},
 			env: map[string]string{
+				config.EnvDatabaseURL:         "postgres://doorstep@localhost/doorstep",
 				config.EnvGitHubAppID:         "123",
 				config.EnvGitHubAppPrivateKey: "not-a-pem-supersecret",
 			},
@@ -244,6 +248,7 @@ func TestRunErrors(t *testing.T) {
 			name: "missing github private key file fails startup",
 			args: []string{"serve", "--listen-addr", "127.0.0.1:0"},
 			env: map[string]string{
+				config.EnvDatabaseURL:             "postgres://doorstep@localhost/doorstep",
 				config.EnvGitHubAppID:             "123",
 				config.EnvGitHubAppPrivateKeyFile: "/nonexistent/doorstep/private-key.pem",
 			},
@@ -327,6 +332,7 @@ func TestResolveServeConfig(t *testing.T) {
 		Server:   config.Server{ListenAddr: "127.0.0.1:7000", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
 		Log:      config.Log{Level: "error", Format: "text"},
 		Database: config.Database{URLFile: "/run/secrets/database-url"},
+		GitHub:   config.Default().GitHub,
 	}
 	tests := []struct {
 		name    string

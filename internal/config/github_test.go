@@ -128,6 +128,7 @@ func TestGitHubValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Default()
+			cfg.Database.URL = "postgres://doorstep@localhost/doorstep"
 			cfg.GitHub = tt.github
 			err := cfg.Validate()
 			assertErrorContains(t, err, tt.wantErr)
