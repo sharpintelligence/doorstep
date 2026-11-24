@@ -530,6 +530,36 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{`deploy.mode: unknown mode ""`},
 		},
 		{
+			name:    "max batch unset uses the default",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = nil },
+			wantErr: nil,
+		},
+		{
+			name:    "max batch of one disables batching",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = intPtr(1) },
+			wantErr: nil,
+		},
+		{
+			name:    "max batch at the upper bound",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = intPtr(MaxMaxBatch) },
+			wantErr: nil,
+		},
+		{
+			name:    "max batch zero",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = intPtr(0) },
+			wantErr: []string{"deploy.max_batch: 0 is out of range (want 1 to 100)"},
+		},
+		{
+			name:    "max batch negative",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = intPtr(-3) },
+			wantErr: []string{"deploy.max_batch: -3 is out of range"},
+		},
+		{
+			name:    "max batch above the upper bound",
+			mutate:  func(c *Catalog) { c.Apps[0].Deploy.MaxBatch = intPtr(MaxMaxBatch + 1) },
+			wantErr: []string{"deploy.max_batch: 101 is out of range"},
+		},
+		{
 			name:    "argocd application invalid",
 			mutate:  func(c *Catalog) { c.Apps[0].ArgoCD.Application = "Blog_Prod" },
 			wantErr: []string{"argocd.application:", "DNS subdomain"},

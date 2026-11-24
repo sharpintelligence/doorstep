@@ -73,6 +73,7 @@ const (
 	delayEntry    = "UPDATE queue_entries SET available_at = now() + interval '1 hour' WHERE deployment_id = $1"
 	releaseEntry  = "UPDATE queue_entries SET available_at = now() - interval '1 second' WHERE deployment_id = $1"
 	cancelEntry   = "UPDATE deployments SET state = 'cancelled' WHERE id = $1"
+	startEntry    = "UPDATE deployments SET state = 'resolving', started_at = now() WHERE id = $1"
 )
 
 func TestClaim(t *testing.T) {
@@ -234,6 +235,34 @@ func TestClaim(t *testing.T) {
 				e.exec(cancelEntry, 0)
 				e.exec(expireLease, 0)
 				e.expectClaim("w2", none, 0)
+			},
+		},
+		{
+			name: "in-flight deployment outranks a higher priority entry after its lease expires",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.expectClaim("w1", 0, 1)
+				e.exec(startEntry, 0)
+				e.exec(expireLease, 0)
+				e.enqueue("web", 100)
+				e.enqueue("web", 200)
+				e.expectClaim("w2", 0, 2)
+				e.expectClaim("w3", none, 0)
+			},
+		},
+		{
+			name: "in-flight deployments are resumed before queued work of other apps",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueue("api", 200)
+				e.expectClaim("w1", 1, 1)
+				e.expectClaim("w1", 0, 1)
+				e.exec(startEntry, 0)
+				e.exec(expireLease, 0)
+				e.exec(completeEntry, 1)
+				e.enqueue("db", 200)
+				e.expectClaim("w2", 0, 2)
+				e.expectClaim("w2", 2, 1)
 			},
 		},
 		{

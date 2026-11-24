@@ -10,6 +10,8 @@ import (
 const (
 	DefaultBranch          = "main"
 	DefaultArgoCDNamespace = "argocd"
+	DefaultMaxBatch        = 10
+	MaxMaxBatch            = 100
 )
 
 type Catalog struct {
@@ -143,7 +145,15 @@ const (
 )
 
 type Deploy struct {
-	Mode DeployMode `yaml:"mode"`
+	Mode     DeployMode `yaml:"mode"`
+	MaxBatch *int       `yaml:"max_batch"`
+}
+
+func (d Deploy) BatchLimit() int {
+	if d.MaxBatch == nil {
+		return DefaultMaxBatch
+	}
+	return *d.MaxBatch
 }
 
 type ArgoCD struct {
@@ -235,6 +245,8 @@ func (a App) withDefaults() App {
 	a.GitOps.Path = cleanRelative(a.GitOps.Path)
 	a.Pin = a.Pin.withDefaults(a.Image.Repository)
 	a.Deploy.Mode = orDefault(a.Deploy.Mode, DeployCommit)
+	maxBatch := a.Deploy.BatchLimit()
+	a.Deploy.MaxBatch = &maxBatch
 	a.ArgoCD.Application = orDefault(a.ArgoCD.Application, a.Name)
 	a.ArgoCD.Namespace = orDefault(a.ArgoCD.Namespace, DefaultArgoCDNamespace)
 	a.Gates = a.Gates.withDefaults()

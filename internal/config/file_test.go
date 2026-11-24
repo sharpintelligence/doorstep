@@ -52,6 +52,7 @@ apps:
         path: image.digest
     deploy:
       mode: pull_request
+      max_batch: 5
     argocd:
       application: blog-prod
       namespace: gitops
@@ -68,6 +69,8 @@ apps:
 `
 
 func strPtr(s string) *string { return &s }
+
+func intPtr(n int) *int { return &n }
 
 func durPtr(d time.Duration) *Duration {
 	v := Duration(d)
@@ -102,7 +105,7 @@ func TestParse(t *testing.T) {
 			Image:  Image{Repository: "ghcr.io/example-user/blog"},
 			GitOps: GitOps{Repo: "example-org/homelab", Branch: "deploy", Path: "apps/blog/"},
 			Pin:    Pin{YAML: &YAMLPin{File: "values.yaml", Path: "image.digest"}},
-			Deploy: Deploy{Mode: DeployPullRequest},
+			Deploy: Deploy{Mode: DeployPullRequest, MaxBatch: intPtr(5)},
 			ArgoCD: ArgoCD{Application: "blog-prod", Namespace: "gitops"},
 			Gates: Gates{
 				Before: []Gate{{Type: GateChecks, Timeout: durPtr(45 * time.Minute)}},
@@ -367,7 +370,7 @@ func defaultedApp() App {
 		Image:  Image{Repository: "ghcr.io/example-user/blog"},
 		GitOps: GitOps{Repo: "example-user/homelab", Branch: "main", Path: "apps/blog"},
 		Pin:    Pin{Kustomize: &KustomizePin{Image: "ghcr.io/example-user/blog"}},
-		Deploy: Deploy{Mode: DeployCommit},
+		Deploy: Deploy{Mode: DeployCommit, MaxBatch: intPtr(DefaultMaxBatch)},
 		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd"},
 		Gates: Gates{
 			Before: []Gate{{Type: GateChecks, Name: "checks", Timeout: durPtr(30 * time.Minute)}},
@@ -445,6 +448,16 @@ func TestFileCatalogDefaults(t *testing.T) {
 			name:   "pull request mode kept",
 			mutate: func(a *App) { a.Deploy.Mode = DeployPullRequest },
 			want:   func(a *App) { a.Deploy.Mode = DeployPullRequest },
+		},
+		{
+			name:   "explicit max batch kept",
+			mutate: func(a *App) { a.Deploy.MaxBatch = intPtr(1) },
+			want:   func(a *App) { a.Deploy.MaxBatch = intPtr(1) },
+		},
+		{
+			name:   "invalid max batch kept for validation",
+			mutate: func(a *App) { a.Deploy.MaxBatch = intPtr(0) },
+			want:   func(a *App) { a.Deploy.MaxBatch = intPtr(0) },
 		},
 		{
 			name:   "argocd overrides kept",

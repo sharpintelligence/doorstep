@@ -27,6 +27,6 @@ func QueryRowsSQL(ctx context.Context, s *Store, sql string, args ...any) ([]str
 }
 
 func ClaimExcluding(ctx context.Context, s *Store, workerID string, lease time.Duration, excluded []AppID) (core.Deployment, bool, error) {
-	r, err := s.claimOnce(ctx, workerID, lease, excluded)
+	r, err := s.claimOnce(ctx, workerID, lease, excluded, nil)
 	return r.deployment, r.found, err
 }

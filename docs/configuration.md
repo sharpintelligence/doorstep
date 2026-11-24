@@ -268,6 +268,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `gitops.path` | repository root | Directory of the app inside the GitOps repository; relative, without `..`. |
 | `pin` | `kustomize` | How the digest is written; see [Pin strategies](#pin-strategies). |
 | `deploy.mode` | `commit` | `commit` pushes the pin straight to `gitops.branch`; `pull_request` opens a pull request with the pin instead. |
+| `deploy.max_batch` | `10` | Most queued commits collapsed into one deploy, 1 to 100. When several merges are waiting, the newest of the first `max_batch` is deployed and the older ones are superseded; `1` deploys every commit. An urgent deploy supersedes all older queued deploys regardless. See [queue.md](queue.md#batching). |
 | `argocd.application` | the app name | Name of the Argo CD `Application` to watch; a DNS subdomain. Several apps may share one Application, for example when it runs several images. |
 | `argocd.namespace` | `argocd` | Namespace of that Application; a DNS label. |
 | `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
@@ -379,6 +380,7 @@ apps:
         format: digest
     deploy:
       mode: pull_request
+      max_batch: 5
     argocd:
       application: api
       namespace: argo-cd

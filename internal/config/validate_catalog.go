@@ -179,6 +179,9 @@ func validateApp(r reporter, a App, notifications map[string]bool) {
 	default:
 		r.addf("deploy.mode", "unknown mode %q (want commit or pull_request)", a.Deploy.Mode)
 	}
+	if n := a.Deploy.BatchLimit(); n < 1 || n > MaxMaxBatch {
+		r.addf("deploy.max_batch", "%d is out of range (want 1 to %d)", n, MaxMaxBatch)
+	}
 
 	r.check("argocd.application", validateDNSSubdomain(a.ArgoCD.Application))
 	if a.ArgoCD.Namespace == "" {

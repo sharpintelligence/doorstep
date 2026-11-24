@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"log/slog"
 	"path"
@@ -18,6 +19,7 @@ import (
 const (
 	migrationLockRetrySeconds = 1
 	migrationLockMaxRetries   = 120
+	migrationLockPrefix       = "doorstep-migrations:"
 )
 
 var ErrDatabaseNewer = errors.New("database schema is newer than this doorstep binary")
@@ -54,7 +56,7 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 		opt(&settings)
 	}
 
-	provider, closeProvider, err := s.migrationProvider(logger, settings.sessionLock)
+	provider, closeProvider, err := s.migrationProvider(ctx, logger, settings.sessionLock)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +80,7 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 }
 
 func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, err error) {
-	provider, closeProvider, err := s.migrationProvider(slog.New(slog.DiscardHandler), false)
+	provider, closeProvider, err := s.migrationProvider(ctx, slog.New(slog.DiscardHandler), false)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +104,7 @@ func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, e
 	return states, nil
 }
 
-func (s *Store) migrationProvider(logger *slog.Logger, sessionLock bool) (*goose.Provider, func() error, error) {
+func (s *Store) migrationProvider(ctx context.Context, logger *slog.Logger, sessionLock bool) (*goose.Provider, func() error, error) {
 	if s.pool == nil {
 		return nil, nil, fmt.Errorf("migrate: %w", errInTransaction)
 	}
@@ -118,7 +120,14 @@ func (s *Store) migrationProvider(logger *slog.Logger, sessionLock bool) (*goose
 		goose.WithSlog(logger),
 	}
 	if sessionLock {
-		locker, err := lock.NewPostgresSessionLocker(lock.WithLockTimeout(migrationLockRetrySeconds, migrationLockMaxRetries))
+		lockID, err := s.migrationLockID(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		locker, err := lock.NewPostgresSessionLocker(
+			lock.WithLockID(lockID),
+			lock.WithLockTimeout(migrationLockRetrySeconds, migrationLockMaxRetries),
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create migration lock: %w", err)
 		}
@@ -131,6 +140,23 @@ func (s *Store) migrationProvider(logger *slog.Logger, sessionLock bool) (*goose
 		return nil, nil, errors.Join(fmt.Errorf("create migration provider: %w", err), db.Close())
 	}
 	return provider, provider.Close, nil
+}
+
+func (s *Store) migrationLockID(ctx context.Context) (int64, error) {
+	var schema *string
+	if err := s.pool.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
+		return 0, fmt.Errorf("read current schema: %w", err)
+	}
+	if schema == nil {
+		return 0, errors.New("migrate: no current schema: the search_path names no existing schema")
+	}
+	return MigrationLockID(*schema), nil
+}
+
+func MigrationLockID(schema string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(migrationLockPrefix + schema))
+	return int64(h.Sum32())
 }
 
 func checkNotNewer(ctx context.Context, provider *goose.Provider) error {

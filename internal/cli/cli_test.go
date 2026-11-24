@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1049,6 +1051,18 @@ func TestRunServe(t *testing.T) {
 			if code, body := get(t, "http://"+addr+"/readyz"); code != http.StatusOK || !strings.Contains(body, `"postgres":"ok"`) {
 				t.Errorf("GET /readyz = %d %q", code, body)
 			}
+			wantQueue := http.StatusNotFound
+			if tt.wantApps > 0 {
+				wantQueue = http.StatusOK
+			}
+			if code, body := get(t, "http://"+addr+"/api/v1/apps/blog/queue"); code != wantQueue {
+				t.Errorf("GET /api/v1/apps/blog/queue = %d %q, want %d", code, body, wantQueue)
+			} else if code == http.StatusOK && body != `{"app":"blog","depth":0,"entries":[]}`+"\n" {
+				t.Errorf("GET /api/v1/apps/blog/queue body = %q", body)
+			}
+			if code, body := get(t, "http://"+addr+"/api/v1/apps/unknown/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("GET /api/v1/apps/unknown/queue = %d %q", code, body)
+			}
 
 			cancel()
 			select {
@@ -1174,6 +1188,17 @@ func TestRunServeMetrics(t *testing.T) {
 			if code != http.StatusOK || !strings.Contains(body, "doorstep_build_info{") {
 				t.Errorf("GET /metrics = %d %.200q", code, body)
 			}
+			if !strings.Contains(body, "\ndoorstep_queue_depth 0\n") {
+				t.Errorf("GET /metrics does not report an empty queue: %.2000q", body)
+			}
+			if code, body := get(t, "http://"+mainAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("main GET /api/v1/apps/blog/queue = %d %q, want a JSON 404", code, body)
+			}
+			if tt.wantSeparate {
+				if code, _ := get(t, "http://"+metricsAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound {
+					t.Errorf("metrics listener serves the API: %d", code)
+				}
+			}
 
 			cancel()
 			select {
@@ -1292,14 +1317,21 @@ func TestRunMigrate(t *testing.T) {
 				return stdout.String()
 			}
 
-			before := run("migrate", "status")
-			assertLines(t, before, `^VERSION\s+STATE\s+APPLIED AT\s+NAME$`, `^1\s+pending\s+-\s+00001_initial_schema\.sql$`)
+			versions := migrationVersionsOf(t)
+			header := `^VERSION\s+STATE\s+APPLIED AT\s+NAME$`
+			pending := []string{header}
+			applied := []string{}
+			done := []string{header}
+			for _, v := range versions {
+				pending = append(pending, fmt.Sprintf(`^%d\s+pending\s+-\s+%s$`, v.version, regexp.QuoteMeta(v.name)))
+				applied = append(applied, fmt.Sprintf(`^applied %d %s \(\S+\)$`, v.version, regexp.QuoteMeta(v.name)))
+				done = append(done, fmt.Sprintf(`^%d\s+applied\s+\d{4}-\d{2}-\d{2}T\S+Z\s+%s$`, v.version, regexp.QuoteMeta(v.name)))
+			}
 
-			assertLines(t, run("migrate"), `^applied 1 00001_initial_schema\.sql \(\S+\)$`)
+			assertLines(t, run("migrate", "status"), pending...)
+			assertLines(t, run("migrate"), applied...)
 			assertLines(t, run("migrate"), `^no pending migrations$`)
-
-			after := run("migrate", "status", "--log-format", "text")
-			assertLines(t, after, `^VERSION\s+STATE\s+APPLIED AT\s+NAME$`, `^1\s+applied\s+\d{4}-\d{2}-\d{2}T\S+Z\s+00001_initial_schema\.sql$`)
+			assertLines(t, run("migrate", "status", "--log-format", "text"), done...)
 		})
 	}
 }
@@ -1386,6 +1418,35 @@ func get(t *testing.T, url string) (int, string) {
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body)
+}
+
+type migrationFile struct {
+	version int
+	name    string
+}
+
+func migrationVersionsOf(t *testing.T) []migrationFile {
+	t.Helper()
+	entries, err := os.ReadDir("../store/migrations")
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	var files []migrationFile
+	for _, e := range entries {
+		prefix, _, ok := strings.Cut(e.Name(), "_")
+		if !ok || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		version, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("migration %s has no numeric version: %v", e.Name(), err)
+		}
+		files = append(files, migrationFile{version: version, name: e.Name()})
+	}
+	if len(files) == 0 {
+		t.Fatal("found no migrations")
+	}
+	return files
 }
 
 func assertLines(t *testing.T, out string, patterns ...string) {
