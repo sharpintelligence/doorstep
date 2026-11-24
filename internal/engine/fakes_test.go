@@ -150,6 +150,8 @@ func (s *fakeStore) Transition(_ context.Context, t engine.Transition) (core.Dep
 		return core.Deployment{}, core.ErrNotFound
 	case d.State != t.From:
 		return core.Deployment{}, fmt.Errorf("%w: deployment %d is %s, expected %s", core.ErrStateConflict, t.ID, d.State, t.From)
+	case t.ExpectRetries != nil && s.retryState(t.ID).Retries != *t.ExpectRetries:
+		return core.Deployment{}, fmt.Errorf("%w: deployment %d has %d retries, expected %d", core.ErrStateConflict, t.ID, s.retryState(t.ID).Retries, *t.ExpectRetries)
 	}
 	if err := t.From.Transition(t.To); err != nil {
 		return core.Deployment{}, err
@@ -212,6 +214,10 @@ func (s *fakeStore) RetryState(_ context.Context, id core.DeploymentID) (engine.
 	if s.failRetry != nil {
 		return engine.RetryState{}, s.failRetry
 	}
+	return s.retryState(id), nil
+}
+
+func (s *fakeStore) retryState(id core.DeploymentID) engine.RetryState {
 	var state engine.RetryState
 	for _, tr := range s.transitions {
 		if tr.ID != id || tr.From != tr.To {
@@ -230,7 +236,7 @@ func (s *fakeStore) RetryState(_ context.Context, id core.DeploymentID) (engine.
 		state.Delay = time.Duration(data.Retry.DelayMS) * time.Millisecond
 		state.MaxAttempts = data.Retry.MaxAttempts
 	}
-	return state, nil
+	return state
 }
 
 func applyLineage(d *core.Deployment, l core.Lineage) {

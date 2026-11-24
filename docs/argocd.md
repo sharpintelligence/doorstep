@@ -86,7 +86,7 @@ Every non-ready status carries a `core.SyncFailure` with a stable reason, a clas
 
 | Reason | When | Class |
 | --- | --- | --- |
-| `sync_failed` | the current sync operation failed | `version` |
+| `sync_failed` | the current sync operation failed | `version` when a sync hook is in phase `Failed` or `Error`; `configuration` when the operation or a failed object says `... is invalid: ...`; otherwise `unknown` (an apply error can be a flaky API server or webhook) |
 | `untracked_revision` | Argo CD reports revisions, but none of the candidates is a Git commit, so the pin can never be reached | `configuration` |
 | `not_observed` | Argo CD has not reached a revision containing the pin | `transient` |
 | `sync_error` | the current operation is in phase `Error`, or a `ComparisonError`, `SyncError` or `InvalidSpecError` condition is set | `transient` |

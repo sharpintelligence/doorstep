@@ -453,3 +453,82 @@ func TestHandleNewWindowAfterRetry(t *testing.T) {
 		t.Errorf("transitions = %v, want one retry and no failure", got)
 	}
 }
+
+func TestHandleAfterGateFailureCountsEarlierAttempts(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	var waits atomic.Int32
+	h.sync.waitFn = func(ctx context.Context, revision string) (core.SyncStatus, error) {
+		if waits.Add(1) == 1 {
+			return degradedSync(ctx, revision)
+		}
+		return syncedStatus(), nil
+	}
+	h.policy.decide = func(f engine.Failure) engine.Decision {
+		if !f.Retryable() {
+			return engine.Decision{Action: engine.FailureActionFail, Reason: engine.DecisionNotRetryable, Class: f.Class}
+		}
+		return retryUpTo(0)(f)
+	}
+	h.gates.set(core.GatePhaseAfter, failedGate("soak", "degraded"))
+	d := h.store.add(in(core.StateSyncing, deploy()))
+
+	for range 3 {
+		if _, err := h.run(t, t.Context(), d.ID); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if h.store.deployment(d.ID).State.Terminal() {
+			break
+		}
+	}
+	if got := h.store.deployment(d.ID).State; got != core.StateFailed {
+		t.Fatalf("state = %s, want failed", got)
+	}
+	recorded := h.store.recorded()
+	last := recorded[len(recorded)-1]
+	if want := "failed while verifying after 2 attempts"; last.Message != want {
+		t.Errorf("failed message = %q, want %q", last.Message, want)
+	}
+	data := decodeEventData(t, last)
+	if data.Stage != core.StateVerifying || data.Attempts != 2 || data.Decision != engine.DecisionNotRetryable || !data.RollbackEligible {
+		t.Errorf("failure data = %+v", data)
+	}
+	decided := h.policy.decided()
+	if len(decided) != 2 || decided[1].Stage != core.StateVerifying || decided[1].Attempt != 2 {
+		t.Errorf("policy saw %+v, want the verifying failure as attempt 2", decided)
+	}
+}
+
+func TestHandleRetryRecordedByAnotherWorker(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	h.sync.waitFn = degradedSync
+	var id core.DeploymentID
+	h.policy.decide = func(f engine.Failure) engine.Decision {
+		retries := 0
+		if _, err := h.store.Transition(t.Context(), engine.Transition{
+			ID: id, From: core.StateSyncing, To: core.StateSyncing, Actor: "other-worker",
+			Data:          json.RawMessage(`{"retry":{"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":60000}}`),
+			ExpectRetries: &retries,
+		}); err != nil {
+			t.Errorf("other worker's retry: %v", err)
+		}
+		return retryUpTo(time.Minute)(f)
+	}
+	d := h.store.add(in(core.StateSyncing, deploy()))
+	id = d.ID
+
+	result, err := h.run(t, t.Context(), d.ID)
+	if err != nil || result != (engine.Result{}) {
+		t.Fatalf("Handle = %+v, %v, want a quiet stop", result, err)
+	}
+	recorded := h.store.recorded()
+	if len(recorded) != 1 || recorded[0].Actor != "other-worker" {
+		t.Errorf("transitions = %+v, want only the other worker's retry", recorded)
+	}
+	if len(h.notifier.kinds()) != 0 || len(h.metrics.retries()) != 0 {
+		t.Errorf("duplicate retry announced %v, counted %v", h.notifier.kinds(), h.metrics.retries())
+	}
+}

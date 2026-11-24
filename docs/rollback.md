@@ -139,6 +139,8 @@ Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollba
 
 Automatic rollback is bead doorstep-ehl.6.2. A deploy that does not become healthy is first [retried on the same pin](engine.md#retry-before-rollback); only once the retry budget is spent, or the failure is classified as caused by the version (or an after gate failed), does its `failed` event carry `"rollback_eligible": true` with the `decision` that led there. Automatic rollback acts only on such failures; configuration failures and deploys failed because a newer release was waiting are never eligible. A manual rollback is available for any failure.
 
+Retrying is passive: doorstep waits again, it does not move pods or re-run syncs. A pod that crash-loops on a bad node stays there, and Argo CD does not re-run a failed sync on its own, so for those failures the retry budget mostly delays the rollback rather than avoiding it. See [What a retry cannot fix](engine.md#what-a-retry-cannot-fix).
+
 > **Not active yet.** Nothing runs automatic rollbacks or gates until the engine (bead doorstep-ehl.4.4) lands; this section and the next describe what it must do. Until then flags, the confirmation prompt and the configuration are live, but no backup is taken.
 
 An automatic rollback after a failed gate must never cross a migration unattended. Before queuing one, the engine calls `MigrationsBetween` (or `(*rollback.Service).MigrationsCrossed`) with the target it picked and the failing deploy; when the answer is not empty it does not roll back and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, and notifies as for any failure. A person then decides.

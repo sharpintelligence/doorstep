@@ -11,10 +11,19 @@ import (
 )
 
 const (
-	digestNew = core.Digest("sha256:2222222222222222222222222222222222222222222222222222222222222222")
-	digestOld = core.Digest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
-	image     = "ghcr.io/example-user/blog@"
+	digestNew   = core.Digest("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+	digestOld   = core.Digest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	digestOther = core.Digest("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+	image       = "ghcr.io/example-user/blog@"
 )
+
+func crashed(verdict core.FailureClass, digest core.Digest, nodes ...string) retry.Diagnosis {
+	d := retry.Diagnosis{Verdict: verdict, Digest: digest, Nodes: nodes}
+	for _, node := range nodes {
+		d.Findings = append(d.Findings, retry.Finding{Signal: retry.SignalCrashLoop, Node: node, Reason: "Error", ExitCode: 1, Pods: 1})
+	}
+	return d
+}
 
 func deployment() core.Deployment {
 	return core.Deployment{ID: 42, Target: core.AppTarget("blog"), Kind: core.KindDeploy, State: core.StateSyncing, Digest: digestNew, PreviousDigest: digestOld, PinCommitSHA: "89abcdef0123456789abcdef0123456789abcdef"}
@@ -137,10 +146,27 @@ func TestClassify(t *testing.T) {
 			wantVerdict: core.FailureUnknown,
 		},
 		{
-			name:        "sync failed is the version even when pods look transient",
+			name:        "sync failed in a hook is the version even when pods look transient",
 			in:          retry.Input{Failure: syncFailure(core.SyncReasonFailed, core.FailureVersion, "migration hook failed"), Pods: []core.PodStatus{pod("a", "pi-1", digestNew, waiting("ImagePullBackOff"))}},
 			wantVerdict: core.FailureVersion,
 			wantSummary: "version: Argo CD sync failed: migration hook failed",
+		},
+		{
+			name:        "sync failed outside a hook falls through to pod signals",
+			in:          retry.Input{Failure: syncFailure(core.SyncReasonFailed, core.FailureUnknown, "one or more objects failed to apply"), Pods: []core.PodStatus{pod("a", "pi-1", digestNew, waiting("ImagePullBackOff"))}},
+			wantVerdict: core.FailureTransient,
+			wantSignals: []retry.Signal{retry.SignalImagePull},
+		},
+		{
+			name:        "sync failed outside a hook without signals is unknown",
+			in:          retry.Input{Failure: syncFailure(core.SyncReasonFailed, core.FailureUnknown, "failed calling webhook")},
+			wantVerdict: core.FailureUnknown,
+			wantSummary: "unknown: sync_failed: failed calling webhook",
+		},
+		{
+			name:        "sync failed on an invalid object is configuration",
+			in:          retry.Input{Failure: syncFailure(core.SyncReasonFailed, core.FailureConfiguration, "is invalid: spec.replicas")},
+			wantVerdict: core.FailureConfiguration,
 		},
 		{
 			name:        "degraded without signals is unknown",
@@ -246,11 +272,54 @@ func TestClassify(t *testing.T) {
 			in: retry.Input{
 				Failure: degraded("x"),
 				Pods:    []core.PodStatus{pod("a", "pi-3", digestNew, oomKilled)},
-				Recent:  []retry.Diagnosis{{Nodes: []string{"pi-3"}}},
+				Recent:  []retry.Diagnosis{crashed(core.FailureTransient, digestOther, "pi-3")},
 			},
 			wantVerdict:  core.FailureTransient,
 			wantSignals:  []retry.Signal{retry.SignalOOMKilled},
-			wantEvidence: "other versions failed on node pi-3 in the last 7 days",
+			wantEvidence: "other versions crashed on node pi-3 in the last 7 days",
+		},
+		{
+			name: "an unknown crash of another version points at the node",
+			in: retry.Input{
+				Failure: degraded("x"),
+				Pods:    []core.PodStatus{pod("a", "pi-3", digestNew, crashing(1))},
+				Recent:  []retry.Diagnosis{crashed(core.FailureUnknown, digestOther, "pi-3")},
+			},
+			wantVerdict: core.FailureTransient,
+		},
+		{
+			name: "a crash of another version later found version-caused does not blame the node",
+			in: retry.Input{
+				Failure: degraded("x"),
+				Pods:    []core.PodStatus{pod("a", "pi-1", digestNew, crashing(1))},
+				Recent: []retry.Diagnosis{
+					crashed(core.FailureUnknown, digestOther, "pi-1"),
+					crashed(core.FailureVersion, digestOther, "pi-1", "pi-2"),
+				},
+			},
+			wantVerdict:  core.FailureUnknown,
+			wantEvidence: "no evidence yet",
+		},
+		{
+			name: "non-crash findings of other versions do not blame the node",
+			in: retry.Input{
+				Failure: degraded("x"),
+				Pods:    []core.PodStatus{pod("a", "pi-3", digestNew, crashing(1))},
+				Recent: []retry.Diagnosis{{
+					Verdict: core.FailureTransient, Digest: digestOther, Nodes: []string{"pi-3"},
+					Findings: []retry.Finding{{Signal: retry.SignalImagePull, Node: "pi-3", Pods: 1}},
+				}},
+			},
+			wantVerdict: core.FailureUnknown,
+		},
+		{
+			name: "a terminating previous pod is not evidence against the node",
+			in: retry.Input{Failure: degraded("x"), Pods: []core.PodStatus{
+				pod("a", "pi-3", digestNew, crashing(1)),
+				pod("old", "pi-3", digestOld, terminating("Running")),
+			}},
+			wantVerdict:  core.FailureUnknown,
+			wantEvidence: "no evidence yet",
 		},
 		{
 			name: "same crash on two nodes in one attempt",
@@ -302,21 +371,43 @@ func TestClassify(t *testing.T) {
 			wantEvidence: "the previous version runs fine on node pi-1",
 		},
 		{
-			name: "hardware evidence wins over a repeated crash",
+			name: "a repeated crash wins over node history",
 			in: retry.Input{
 				Failure: degraded("x"),
 				Pods:    []core.PodStatus{pod("a", "pi-1", digestNew, crashing(1)), pod("b", "pi-2", digestNew, crashing(1))},
-				Recent:  []retry.Diagnosis{{Nodes: []string{"pi-2"}}},
+				Recent:  []retry.Diagnosis{crashed(core.FailureTransient, digestOther, "pi-2")},
+			},
+			wantVerdict:  core.FailureVersion,
+			wantEvidence: "on 2 nodes",
+		},
+		{
+			name: "the previous version failing on the node wins over a repeated crash",
+			in: retry.Input{
+				Failure: degraded("x"),
+				Pods: []core.PodStatus{
+					pod("a", "pi-1", digestNew, crashing(1)), pod("b", "pi-2", digestNew, crashing(1)),
+					pod("old", "pi-2", digestOld, crashing(1)),
+				},
 			},
 			wantVerdict:  core.FailureTransient,
-			wantEvidence: "pi-2",
+			wantEvidence: "the previous version is also unhealthy on node pi-2",
+		},
+		{
+			name: "the same crash across attempts wins over node history",
+			in: retry.Input{
+				Failure: degraded("x"),
+				Pods:    []core.PodStatus{pod("a", "pi-1", digestNew, crashing(1))},
+				Earlier: []retry.Diagnosis{crashed(core.FailureTransient, digestNew, "pi-2")},
+				Recent:  []retry.Diagnosis{crashed(core.FailureTransient, digestOther, "pi-1")},
+			},
+			wantVerdict: core.FailureVersion,
 		},
 		{
 			name: "single-node homelab with an earlier failure of another version",
 			in: retry.Input{
 				Failure: degraded("x"),
 				Pods:    []core.PodStatus{pod("a", "homelab", digestNew, crashing(1))},
-				Recent:  []retry.Diagnosis{{Nodes: []string{"homelab"}}},
+				Recent:  []retry.Diagnosis{crashed(core.FailureTransient, digestOther, "homelab")},
 			},
 			wantVerdict: core.FailureTransient,
 		},
@@ -355,11 +446,37 @@ func TestClassify(t *testing.T) {
 			in: retry.Input{Failure: engine.Failure{
 				Deployment: deployment(), Stage: core.StateSyncing, Class: core.FailureVersion, Attempt: 1,
 				Sync: &core.SyncFailure{Reason: core.SyncReasonDegraded, Class: core.FailureVersion, Message: "degraded", Resources: []core.ResourceStatus{
-					{Kind: "Deployment", Name: "blog", Message: "Back-off pulling image: ImagePullBackOff"},
+					{Group: "apps", Kind: "Deployment", Name: "blog", Message: "Back-off pulling image: ImagePullBackOff"},
 				}},
 			}},
 			wantVerdict: core.FailureTransient,
 			wantSignals: []retry.Signal{retry.SignalImagePull},
+		},
+		{
+			name: "text fallback ignores resources that are not pods or workloads",
+			in: retry.Input{Failure: engine.Failure{
+				Deployment: deployment(), Stage: core.StateSyncing, Class: core.FailureVersion, Attempt: 1,
+				Sync: &core.SyncFailure{Reason: core.SyncReasonDegraded, Class: core.FailureVersion, Message: "degraded", Resources: []core.ResourceStatus{
+					{Kind: "Service", Name: "blog", Message: "pods evicted from the endpoints"},
+					{Group: "networking.k8s.io", Kind: "Ingress", Name: "blog", Message: "backend unschedulable"},
+					{Group: "batch", Kind: "Job", Name: "report", Message: "CrashLoopBackOff"},
+				}},
+			}},
+			wantVerdict: core.FailureUnknown,
+			wantSignals: []retry.Signal{},
+		},
+		{
+			name: "text fallback reads pod, replica set and rollout messages",
+			in: retry.Input{Failure: engine.Failure{
+				Deployment: deployment(), Stage: core.StateSyncing, Class: core.FailureVersion, Attempt: 1,
+				Sync: &core.SyncFailure{Reason: core.SyncReasonDegraded, Class: core.FailureVersion, Message: "degraded", Resources: []core.ResourceStatus{
+					{Kind: "Pod", Name: "blog-1", Message: "The node was low on resource: memory. Evicted"},
+					{Group: "apps", Kind: "ReplicaSet", Name: "blog-1", Message: "ContainerCreating"},
+					{Group: "argoproj.io", Kind: "Rollout", Name: "blog", Message: "readiness probe failed"},
+				}},
+			}},
+			wantVerdict: core.FailureTransient,
+			wantSignals: []retry.Signal{retry.SignalEvicted, retry.SignalContainerCreating, retry.SignalNotReady},
 		},
 		{
 			name:        "text fallback for an invalid image",

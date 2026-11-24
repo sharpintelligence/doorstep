@@ -80,7 +80,7 @@ func Classify(in Input) Diagnosis {
 		d.Verdict = core.FailureConfiguration
 		d.Summary = summarize(d.Verdict, string(sync.Reason)+": "+cut(sync.Message))
 		return d
-	case sync.Reason == core.SyncReasonFailed:
+	case sync.Reason == core.SyncReasonFailed && sync.Class == core.FailureVersion:
 		d.Verdict = core.FailureVersion
 		d.Summary = summarize(d.Verdict, "Argo CD sync failed: "+cut(sync.Message))
 		return d
@@ -117,7 +117,7 @@ func configurationReason(f core.SyncFailure) bool {
 	if slices.Contains([]core.SyncFailureReason{core.SyncReasonNotFound, core.SyncReasonForbidden, core.SyncReasonUntracked}, f.Reason) {
 		return true
 	}
-	return f.Reason == core.SyncReasonOutOfSync && f.Class == core.FailureConfiguration
+	return (f.Reason == core.SyncReasonOutOfSync || f.Reason == core.SyncReasonFailed) && f.Class == core.FailureConfiguration
 }
 
 func judge(findings []Finding, previous []core.PodStatus, in Input) (core.FailureClass, []string) {
@@ -132,22 +132,19 @@ func judge(findings []Finding, previous []core.PodStatus, in Input) (core.Failur
 
 func crashEvidence(findings []Finding, previous []core.PodStatus, in Input) (core.FailureClass, []string) {
 	crashNodes := crashNodesOf(findings)
-	recentNodes := map[string]bool{}
-	for _, r := range in.Recent {
-		for _, node := range r.Nodes {
-			recentNodes[node] = true
-		}
-	}
 	for _, node := range crashNodes {
-		if slices.ContainsFunc(previous, func(p core.PodStatus) bool { return p.Node == node && !p.Healthy() }) {
+		if slices.ContainsFunc(previous, func(p core.PodStatus) bool { return p.Node == node && !p.Terminating && !p.Ready }) {
 			return core.FailureTransient, []string{"the previous version is also unhealthy on node " + node + " (hardware, not the release)"}
-		}
-		if recentNodes[node] {
-			return core.FailureTransient, []string{"other versions failed on node " + node + " in the last 7 days (hardware, not the release)"}
 		}
 	}
 	if key, nodes, ok := repeatedCrash(findings, in.Earlier); ok {
 		return core.FailureVersion, []string{fmt.Sprintf("the same %s on %d nodes: %s", key, len(nodes), strings.Join(limit(nodes, 3), ", "))}
+	}
+	suspect := suspectNodes(in.Recent)
+	for _, node := range crashNodes {
+		if suspect[node] {
+			return core.FailureTransient, []string{"other versions crashed on node " + node + " in the last 7 days (hardware, not the release)"}
+		}
 	}
 	for _, node := range crashNodes {
 		if slices.ContainsFunc(previous, func(p core.PodStatus) bool { return p.Node == node && p.Healthy() }) {
@@ -155,6 +152,27 @@ func crashEvidence(findings []Finding, previous []core.PodStatus, in Input) (cor
 		}
 	}
 	return core.FailureUnknown, []string{"no evidence yet whether the node or the release is at fault"}
+}
+
+func suspectNodes(recent []Diagnosis) map[string]bool {
+	condemned := map[core.Digest]bool{}
+	for _, r := range recent {
+		if r.Verdict == core.FailureVersion {
+			condemned[r.Digest] = true
+		}
+	}
+	nodes := map[string]bool{}
+	for _, r := range recent {
+		if condemned[r.Digest] || (r.Verdict != core.FailureTransient && r.Verdict != core.FailureUnknown) {
+			continue
+		}
+		for _, f := range r.Findings {
+			if f.Signal.crash() && f.Node != "" {
+				nodes[f.Node] = true
+			}
+		}
+	}
+	return nodes
 }
 
 func repeatedCrash(findings []Finding, earlier []Diagnosis) (string, []string, bool) {
@@ -316,7 +334,9 @@ func containerSignal(c core.ContainerStatus) (Finding, bool) {
 func textFindings(f core.SyncFailure) []Finding {
 	texts := []string{f.Message}
 	for _, r := range f.Resources {
-		texts = append(texts, r.Message)
+		if podOrWorkload(r) {
+			texts = append(texts, r.Message)
+		}
 	}
 	keywords := []struct {
 		signal Signal
@@ -343,6 +363,19 @@ func textFindings(f core.SyncFailure) []Finding {
 		}
 	}
 	return findings
+}
+
+func podOrWorkload(r core.ResourceStatus) bool {
+	switch r.Group {
+	case "":
+		return r.Kind == "Pod"
+	case "apps":
+		return slices.Contains([]string{"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"}, r.Kind)
+	case "argoproj.io":
+		return r.Kind == "Rollout"
+	default:
+		return false
+	}
 }
 
 func capFindings(findings []Finding) []Finding {

@@ -275,7 +275,7 @@ func TestAssess(t *testing.T) {
 			wantRevision:  pinSHA,
 			wantOperation: core.OperationFailed,
 			wantReason:    core.SyncReasonFailed,
-			wantClass:     core.FailureVersion,
+			wantClass:     core.FailureUnknown,
 			wantMessage:   "sync operation failed: ComparisonError: failed to generate manifest",
 		},
 		{
@@ -314,7 +314,7 @@ func TestAssess(t *testing.T) {
 			wantRevision:  "4.5.6, " + pinSHA,
 			wantOperation: core.OperationFailed,
 			wantReason:    core.SyncReasonFailed,
-			wantClass:     core.FailureVersion,
+			wantClass:     core.FailureUnknown,
 			wantMessage:   "manifest generation failed",
 		},
 		{
@@ -375,6 +375,70 @@ func TestAssess(t *testing.T) {
 			wantHealth:    core.HealthHealthy,
 			wantRevision:  pinSHA,
 			wantOperation: core.OperationSucceeded,
+		},
+		{
+			name: "failed apply without a failed hook is unknown",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Sync = "OutOfSync"
+				a.Operation = &argocdtest.Operation{
+					Phase: "Failed", Message: "one or more objects failed to apply", Revision: pinSHA,
+					Resources: []argocdtest.SyncResource{
+						{Group: "apps", Kind: "Deployment", Namespace: "blog", Name: "web", Status: "SyncFailed", Message: "Internal error occurred: failed calling webhook: context deadline exceeded"},
+						{Group: "batch", Kind: "Job", Namespace: "blog", Name: "migrate", Status: "Synced", HookPhase: "Succeeded"},
+					},
+				}
+			}),
+			wantReached:   true,
+			wantState:     core.SyncOutOfSync,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationFailed,
+			wantReason:    core.SyncReasonFailed,
+			wantClass:     core.FailureUnknown,
+			wantMessage:   "sync operation failed: one or more objects failed to apply",
+			wantResources: 1,
+		},
+		{
+			name: "failed apply of an invalid object is configuration",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Sync = "OutOfSync"
+				a.Operation = &argocdtest.Operation{
+					Phase: "Failed", Message: "one or more objects failed to apply", Revision: pinSHA,
+					Resources: []argocdtest.SyncResource{
+						{Group: "apps", Kind: "Deployment", Namespace: "blog", Name: "web", Status: "SyncFailed", Message: `Deployment.apps "web" is invalid: spec.replicas: Invalid value: -1`},
+					},
+				}
+			}),
+			wantReached:   true,
+			wantState:     core.SyncOutOfSync,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationFailed,
+			wantReason:    core.SyncReasonFailed,
+			wantClass:     core.FailureConfiguration,
+			wantMessage:   "sync operation failed: one or more objects failed to apply",
+			wantResources: 1,
+		},
+		{
+			name: "hook phase error is the version",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Sync = "OutOfSync"
+				a.Operation = &argocdtest.Operation{
+					Phase: "Failed", Message: "one or more synchronization tasks completed unsuccessfully", Revision: pinSHA,
+					Resources: []argocdtest.SyncResource{
+						{Kind: "Pod", Namespace: "blog", Name: "smoke", Status: "Synced", HookPhase: "Error", Message: "is invalid: but a hook"},
+					},
+				}
+			}),
+			wantReached:   true,
+			wantState:     core.SyncOutOfSync,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationFailed,
+			wantReason:    core.SyncReasonFailed,
+			wantClass:     core.FailureVersion,
+			wantMessage:   "sync operation failed: one or more synchronization tasks completed unsuccessfully",
+			wantResources: 1,
 		},
 		{
 			name: "failed operation on the pin",

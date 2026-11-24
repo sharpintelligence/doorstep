@@ -155,6 +155,7 @@ func (s engineStore) Transition(ctx context.Context, t engine.Transition) (core.
 		Data:          t.Data,
 		FailureReason: t.FailureReason,
 		Lineage:       t.Lineage,
+		ExpectRetries: t.ExpectRetries,
 	})
 }
 

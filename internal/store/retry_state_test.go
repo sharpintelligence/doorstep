@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,4 +125,65 @@ func texts(raw []json.RawMessage) []string {
 		out = append(out, string(r))
 	}
 	return out
+}
+
+func TestTransitionExpectRetries(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	d := mustCreateIn(t, st, newDeployment("web"), core.StateSyncing)
+	retry := func(expect int) error {
+		_, err := st.TransitionDeployment(t.Context(), store.Transition{
+			ID: d.ID, From: core.StateSyncing, To: core.StateSyncing, Actor: "doorstep", Message: "retry",
+			Data:          json.RawMessage(`{"retry":{"attempt":1,"delay_ms":0,"max_attempts":3}}`),
+			ExpectRetries: &expect,
+		})
+		return err
+	}
+
+	tests := []struct {
+		name     string
+		expect   int
+		conflict bool
+	}{
+		{name: "first retry", expect: 0},
+		{name: "stale count", expect: 0, conflict: true},
+		{name: "count ahead", expect: 5, conflict: true},
+		{name: "second retry", expect: 1},
+	}
+	for _, tt := range tests {
+		err := retry(tt.expect)
+		if got := errors.Is(err, core.ErrStateConflict); got != tt.conflict {
+			t.Fatalf("%s: error = %v, want conflict %v", tt.name, err, tt.conflict)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Go(func() { errs[i] = retry(2) })
+	}
+	wg.Wait()
+	succeeded := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case !errors.Is(err, core.ErrStateConflict):
+			t.Errorf("concurrent retry error = %v, want a conflict", err)
+		}
+	}
+	if succeeded != 1 {
+		t.Errorf("%d concurrent retries succeeded, want exactly 1", succeeded)
+	}
+	if got, err := st.RetryState(t.Context(), d.ID); err != nil || got.Retries != 3 {
+		t.Errorf("RetryState = %+v, %v, want 3 retries", got, err)
+	}
+
+	missing := 0
+	if _, err := st.TransitionDeployment(t.Context(), store.Transition{
+		ID: d.ID + 1000, From: core.StateSyncing, To: core.StateSyncing, Actor: "doorstep", ExpectRetries: &missing,
+	}); !errors.Is(err, core.ErrNotFound) {
+		t.Errorf("unknown deployment error = %v, want not found", err)
+	}
 }

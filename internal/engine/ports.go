@@ -27,6 +27,7 @@ type Transition struct {
 	Data          json.RawMessage
 	FailureReason string
 	Lineage       core.Lineage
+	ExpectRetries *int
 }
 
 type PinRequest struct {

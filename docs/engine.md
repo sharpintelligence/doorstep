@@ -122,6 +122,17 @@ A retry is a fresh observation window on the same pin: the same deployment, dige
 4. On `fail`, the deployment fails as described above, and the `deploy.failed` notification carries the final decision as its message: `<summary>; not retried` for a version-caused failure, `still failing after N attempts: <summary>` once the budget is spent, `not retried because a newer deployment is waiting: ...` or `not retried because retries are disabled: ...`.
 5. A deployment that succeeds after a retry says `succeeded on attempt N of M` in its `deploy.succeeded` or `deploy.rolled_back` message.
 
+The retry transition carries the retry count the engine read in step 1, and the store locks the deployment row and rejects the transition with a state conflict when the count has moved since. When a lease expires during a long wait and a second worker claims the deployment, only one of them records the retry, so attempts are not double-counted and `deploy.retrying` is not sent twice. Every failure, in any stage, reads the retry state, so an after-gate failure in `verifying` that followed retried sync attempts records `attempts` and says `failed while verifying after N attempts`.
+
+### What a retry cannot fix
+
+A retry is passive: doorstep waits again, but neither Kubernetes nor Argo CD does anything new because of it. It helps when the cluster is converging on its own: an image pull that Kubernetes retries, a pod that waits for capacity and is scheduled once a node frees up, a node that comes back, a slow start that finishes after the first window. It does not help when nothing on the cluster side will change:
+
+- **A crash-looping or not-ready pod stays on its node.** Kubernetes restarts the container in place; it does not move the pod to another node. When the node is the problem, a retry only waits longer for the same pod, unless something else (an eviction, a drained node, a person deleting the pod) gets it rescheduled.
+- **A failed sync operation is not re-run.** Argo CD does not sync a revision again after its operation failed, unless the Application sets `syncPolicy.retry` or someone syncs by hand, so a retried `sync_failed` waits for a sync that never comes.
+
+For those failures a retry mostly lengthens the time before the deploy fails, bounded by the attempt budget. doorstep holds no Argo CD token and never writes to the cluster ([ADR 0001](decisions/0001-go-and-core-design.md)), so it cannot trigger a sync or delete a pod itself; an opt-in active retry would need that grant. Set `syncPolicy.retry` on the Application if failed syncs should be retried, and lower `retry.max_attempts` for apps where waiting cannot help.
+
 The retry event's data is:
 
 ```json
@@ -150,31 +161,34 @@ Before retrying, the policy checks the target's queue. When another deployment o
 | --- | --- |
 | not an Argo CD wait failure in `syncing` | the engine's class, `not_retryable` |
 | `not_found`, `forbidden`, `untracked_revision`, or `out_of_sync` with manual sync | `configuration`, not retried |
-| `sync_failed` (failing hooks, migrations, objects that do not apply) | `version`, not retried |
+| `sync_failed` with a sync hook in phase `Failed` or `Error` (a failing migration or other hook Job) | `version`, not retried |
+| `sync_failed` where an object was rejected as invalid (`... is invalid: ...`) | `configuration`, not retried |
+| `sync_failed` otherwise (an apply error such as an API server timeout or an unavailable admission webhook) | like any other reason: pod signals below, else `unknown` |
 | any new-version pod waiting with `InvalidImageName` or `RunContainerError` | `version` |
 | pods that cannot be scheduled, `ErrImagePull`/`ImagePullBackOff` (the digest is already known to exist in the registry), a lost node (`NodeLost`, or terminating in phase `Unknown`), `Evicted`, containers stuck in `ContainerCreating`/`PodInitializing`, or running without restarts but not ready (a probe timeout) | `transient` |
 | `CrashLoopBackOff` or `OOMKilled` | decided by evidence, below |
 | no signal at all: `degraded` | `unknown` (application health alone cannot tell a slow node from a bad build) |
 | no signal at all: any other reason | the reason's class |
 
-Signals come from pod statuses when [pod diagnostics](#pod-diagnostics) are on, and otherwise, or when no pod shows one, from the same keywords in the Argo CD failure message and the unhealthy resources' messages. `transient` and `unknown` are retried while attempts remain; then the decision is `retries_exhausted`. `version` fails at once with `version_caused`.
+Signals come from pod statuses when [pod diagnostics](#pod-diagnostics) are on, and otherwise, or when no pod shows one, from the same keywords in the Argo CD failure message and the messages of unhealthy Pods, Deployments, StatefulSets, DaemonSets, ReplicaSets and Argo Rollouts (other resources' messages are ignored, so a Service or Ingress message cannot fake a signal). `transient` and `unknown` are retried while attempts remain; then the decision is `retries_exhausted`. `version` fails at once with `version_caused`.
 
 ### Evidence: the hardware or the release
 
 For a crash loop or an OOM kill, in order:
 
-1. **Hardware.** A pod of the previous digest is also unhealthy on the same node, or the node appears in the diagnoses of another digest of this target in the last 7 days (`store.Diagnoses`). Verdict `transient`: "hardware, not the release".
+1. **Hardware.** A pod of the previous digest is also not ready on the same node. Pods of the previous digest that are terminating (shut down by the rolling update) do not count. Verdict `transient`: "hardware, not the release".
 2. **The version.** The same termination reason and exit code on two or more distinct nodes, in this attempt or across this deployment's earlier attempts. Verdict `version`.
-3. **The version.** A pod of the previous digest is ready on the same node. Verdict `version`.
-4. Otherwise `unknown`, which is retried.
+3. **Hardware.** Another digest of this target crashed (`crash_loop` or `oom_killed`) on the same node in the last 7 days (`store.Diagnoses`), in a diagnosis whose verdict was `transient` or `unknown`. Diagnoses of a digest that any diagnosis found version-caused are ignored, as are other signals such as image pulls, so a bug that ships again in the next version is not blamed on the nodes it crashed on before. Verdict `transient`.
+4. **The version.** A pod of the previous digest is ready on the same node. Verdict `version`.
+5. Otherwise `unknown`, which is retried.
 
-New and previous pods are told apart by the `@<digest>` suffix of their images against the deployment's `digest` and `previous_digest`; when no pod matches either, all pods count as new. Live pods give the evidence while a rolling update leaves old pods running; stored diagnoses give it when they do not. On a single-node homelab, rule 1 can blame the hardware for a version that broke twice in a week; the attempt budget bounds the cost.
+New and previous pods are told apart by the `@<digest>` suffix of their images against the deployment's `digest` and `previous_digest`; when no pod matches either, all pods count as new. Live pods give the evidence while a rolling update leaves old pods running; stored diagnoses give it when they do not. On a single-node homelab, rule 3 can blame the hardware for a version that broke twice in a week; the attempt budget bounds the cost.
 
 Findings are capped at 10, nodes at 10, messages at 200 bytes and the summary at 300 characters.
 
 ### Pod diagnostics
 
-Argo CD's Application does not carry pods, and Argo CD 3 no longer persists resource health in it, so node-level evidence needs pod reads. They are opt-in: `kubernetes.pod_diagnostics: true` (`DOORSTEP_KUBE_POD_DIAGNOSTICS`), granted by the `components/pod-diagnostics` kustomize component ([install.md](install.md#pod-diagnostics)). On a failure, `argocd.Watcher.Workloads` reads the Deployments, StatefulSets, DaemonSets and Argo Rollouts from the Application's `status.resources`, and `internal/pods` lists pods with one `GET /api/v1/namespaces/{ns}/pods?limit=500` per namespace (at most five, 200 pods kept), matching them by controller owner reference (a ReplicaSet named `<workload>-<pod-template-hash>` or `<rollout>-<rollouts-pod-template-hash>`, or the StatefulSet or DaemonSet itself). Only node, images, phase, reason, conditions and container states are decoded, so environment values are never held or logged. A `403` or any other read error is logged at `warn` and the classification falls back to the Application; each lookup is bounded by 15 seconds.
+Argo CD's Application does not carry pods, and Argo CD 3 no longer persists resource health in it, so node-level evidence needs pod reads. They are opt-in: `kubernetes.pod_diagnostics: true` (`DOORSTEP_KUBE_POD_DIAGNOSTICS`), granted per namespace with a RoleBinding to the ClusterRole of the `components/pod-diagnostics` kustomize component, or cluster-wide with `components/pod-diagnostics-cluster-wide` ([install.md](install.md#pod-diagnostics)). On a failure, `argocd.Watcher.Workloads` reads the Deployments, StatefulSets, DaemonSets and Argo Rollouts from the Application's `status.resources`, and `internal/pods` lists pods with `GET /api/v1/namespaces/{ns}/pods?limit=500` per namespace (at most five), following `continue` tokens for at most 10 pages and logging a `warn` when a namespace has more, and keeps at most 200 pods, matching them by controller owner reference (a ReplicaSet named `<workload>-<pod-template-hash>` or `<rollout>-<rollouts-pod-template-hash>`, or the StatefulSet or DaemonSet itself). Only node, images, phase, reason, conditions and container states are decoded, so environment values are never held or logged. A `403` or any other read error is logged at `warn` and the classification falls back to the Application; each lookup is bounded by 15 seconds.
 
 ## Pins of stopped deployments
 

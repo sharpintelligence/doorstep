@@ -22,6 +22,7 @@ type Transition struct {
 	FailureReason  string
 	SupersededByID *core.DeploymentID
 	Lineage        core.Lineage
+	ExpectRetries  *int
 }
 
 const transitionDeploymentSQL = `
@@ -38,6 +39,8 @@ RETURNING app_id`
 const deleteQueueEntrySQL = `DELETE FROM queue_entries WHERE deployment_id = $1`
 
 const selectDeploymentStateSQL = `SELECT state FROM deployments WHERE id = $1`
+
+const lockDeploymentSQL = `SELECT id FROM deployments WHERE id = $1 FOR UPDATE`
 
 var (
 	errMisplacedFailureReason = errors.New("a failure reason is only recorded on a transition to failed")
@@ -57,6 +60,9 @@ func (s *Store) TransitionDeployment(ctx context.Context, t Transition) (core.De
 
 	var updated core.Deployment
 	err = s.InTx(ctx, func(tx *Store) error {
+		if err := tx.checkRetries(ctx, t); err != nil {
+			return err
+		}
 		var appID AppID
 		err := tx.db.QueryRow(ctx, transitionDeploymentSQL,
 			t.ID,
@@ -96,6 +102,28 @@ func (s *Store) TransitionDeployment(ctx context.Context, t Transition) (core.De
 		return core.Deployment{}, fmt.Errorf("transition deployment %d %s -> %s: %w", t.ID, t.From, t.To, err)
 	}
 	return updated, nil
+}
+
+func (s *Store) checkRetries(ctx context.Context, t Transition) error {
+	if t.ExpectRetries == nil {
+		return nil
+	}
+	var id core.DeploymentID
+	err := s.db.QueryRow(ctx, lockDeploymentSQL, t.ID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock deployment %d: %w", t.ID, err)
+	}
+	state, err := s.RetryState(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	if state.Retries != *t.ExpectRetries {
+		return fmt.Errorf("%w: deployment %d has recorded %d retries, expected %d", core.ErrStateConflict, t.ID, state.Retries, *t.ExpectRetries)
+	}
+	return nil
 }
 
 func (t Transition) validate() ([]byte, error) {

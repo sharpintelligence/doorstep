@@ -101,14 +101,11 @@ func (e *Engine) fail(ctx context.Context, d core.Deployment, f Failure) (core.D
 	f.Deployment = d
 	f.Stage = d.State
 	f.Reason = cleanReason(f.Reason)
-	f.Attempt = 1
-	if f.Stage == core.StateSyncing {
-		state, err := e.store.RetryState(ctx, d.ID)
-		if err != nil {
-			return d, Result{}, fmt.Errorf("read the retry state of deployment %d: %w", d.ID, err)
-		}
-		f.Attempt = state.Retries + 1
+	state, err := e.store.RetryState(ctx, d.ID)
+	if err != nil {
+		return d, Result{}, fmt.Errorf("read the retry state of deployment %d: %w", d.ID, err)
 	}
+	f.Attempt = state.Retries + 1
 	decision := e.decide(ctx, f)
 	if decision.Action == FailureActionRetry {
 		return e.retryAttempt(ctx, d, f, decision)
@@ -173,13 +170,15 @@ func (e *Engine) retryAttempt(ctx context.Context, d core.Deployment, f Failure,
 		return d, Result{}, fmt.Errorf("encode retry of deployment %d: %w", d.ID, err)
 	}
 	plan := fmt.Sprintf("retrying (attempt %d of %d) %s", next, maxAttempts, after(delay))
+	retries := f.Attempt - 1
 	retried, err := e.store.Transition(ctx, Transition{
-		ID:      d.ID,
-		From:    core.StateSyncing,
-		To:      core.StateSyncing,
-		Actor:   Actor,
-		Message: fmt.Sprintf("attempt %d failed; %s", f.Attempt, plan),
-		Data:    encoded,
+		ID:            d.ID,
+		From:          core.StateSyncing,
+		To:            core.StateSyncing,
+		Actor:         Actor,
+		Message:       fmt.Sprintf("attempt %d failed; %s", f.Attempt, plan),
+		Data:          encoded,
+		ExpectRetries: &retries,
 	})
 	if err != nil {
 		return d, Result{}, err

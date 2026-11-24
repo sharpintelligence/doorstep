@@ -236,7 +236,7 @@ func TestPolicyDecide(t *testing.T) {
 			failure:    degraded("x"),
 			settings:   defaultSettings(),
 			pods:       crash,
-			history:    fakeHistory{recent: []json.RawMessage{json.RawMessage(`{"verdict":"unknown","nodes":["pi-1"]}`)}},
+			history:    fakeHistory{recent: []json.RawMessage{json.RawMessage(`{"verdict":"unknown","digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","nodes":["pi-1"],"findings":[{"signal":"crash_loop","node":"pi-1","pods":1}]}`)}},
 			wantAction: engine.FailureActionRetry,
 			wantReason: engine.DecisionTransient,
 			wantClass:  core.FailureTransient,

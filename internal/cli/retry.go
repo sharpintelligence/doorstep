@@ -26,7 +26,7 @@ func newRetryPolicy(in engineInput) (engine.FailurePolicy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pod diagnostics: %w", err)
 		}
-		reader, err := pods.New(client)
+		reader, err := pods.New(client, in.logger)
 		if err != nil {
 			return nil, fmt.Errorf("pod diagnostics: %w", err)
 		}

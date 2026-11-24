@@ -128,7 +128,7 @@ func (r SyncFailureReason) Class(automatedSync bool) FailureClass {
 	switch r {
 	case SyncReasonNotObserved, SyncReasonError, SyncReasonUnavailable:
 		return FailureTransient
-	case SyncReasonFailed, SyncReasonDegraded:
+	case SyncReasonDegraded:
 		return FailureVersion
 	case SyncReasonNotFound, SyncReasonForbidden, SyncReasonUntracked:
 		return FailureConfiguration
@@ -137,7 +137,7 @@ func (r SyncFailureReason) Class(automatedSync bool) FailureClass {
 			return FailureUnknown
 		}
 		return FailureConfiguration
-	case SyncReasonRunning, SyncReasonProgressing, SyncReasonSuspended, SyncReasonMissing:
+	case SyncReasonFailed, SyncReasonRunning, SyncReasonProgressing, SyncReasonSuspended, SyncReasonMissing:
 		return FailureUnknown
 	default:
 		return FailureUnknown

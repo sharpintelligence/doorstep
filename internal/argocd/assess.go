@@ -235,12 +235,38 @@ func failure(app application, status core.SyncStatus, pin string, trackable bool
 	default:
 		reason, message = core.SyncReasonProgressing, healthMessage(status.Health)
 	}
+	class := reason.Class(automated)
+	if reason == core.SyncReasonFailed {
+		class = operationFailureClass(app, status.OperationMessage)
+	}
 	return &core.SyncFailure{
 		Reason:    reason,
-		Class:     reason.Class(automated),
+		Class:     class,
 		Message:   cut(message),
 		Resources: slices.Clone(status.Health.Resources),
 	}
+}
+
+func operationFailureClass(app application, message string) core.FailureClass {
+	messages := []string{message}
+	if op := currentOperation(app); op != nil && op.SyncResult != nil {
+		for _, r := range op.SyncResult.Resources {
+			if r.HookPhase == argoHookFailed || r.HookPhase == argoHookError {
+				return core.FailureVersion
+			}
+			if r.Status == argoSyncFailed {
+				messages = append(messages, r.Message)
+			}
+		}
+	}
+	if slices.ContainsFunc(messages, invalidObject) {
+		return core.FailureConfiguration
+	}
+	return core.FailureUnknown
+}
+
+func invalidObject(message string) bool {
+	return strings.Contains(message, " is invalid: ")
 }
 
 func notObserved(revision, pin string) string {

@@ -28,7 +28,11 @@ type fakeAPI struct {
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
-	body, ok := f.lists[r.URL.Path]
+	key := r.URL.Path
+	if token := r.URL.Query().Get("continue"); token != "" {
+		key += "#" + token
+	}
+	body, ok := f.lists[key]
 	status := f.status
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -57,7 +61,7 @@ func newReader(t *testing.T, api *fakeAPI) *pods.Reader {
 	if err != nil {
 		t.Fatalf("kube.New: %v", err)
 	}
-	reader, err := pods.New(client)
+	reader, err := pods.New(client, nil)
 	if err != nil {
 		t.Fatalf("pods.New: %v", err)
 	}
@@ -65,7 +69,11 @@ func newReader(t *testing.T, api *fakeAPI) *pods.Reader {
 }
 
 func list(items ...map[string]any) string {
-	body, err := json.Marshal(map[string]any{"kind": "PodList", "items": items})
+	return page("", items...)
+}
+
+func page(next string, items ...map[string]any) string {
+	body, err := json.Marshal(map[string]any{"kind": "PodList", "metadata": map[string]any{"continue": next}, "items": items})
 	if err != nil {
 		panic(err)
 	}
@@ -232,7 +240,81 @@ func TestReaderPodsErrors(t *testing.T) {
 	if _, err := reader.Pods(t.Context(), []core.Workload{{Kind: "Deployment", Namespace: "..", Name: "web"}}); err == nil {
 		t.Error("Pods accepted a namespace that escapes the path")
 	}
-	if _, err := pods.New(nil); err == nil {
+	if _, err := pods.New(nil, nil); err == nil {
 		t.Error("New(nil) succeeded")
+	}
+}
+
+func TestReaderPodsPages(t *testing.T) {
+	t.Parallel()
+
+	web := func(name string) map[string]any {
+		return podJSON(name, "blog", "ReplicaSet", "web-1", map[string]string{"pod-template-hash": "1"}, nil)
+	}
+	other := podJSON("cron-1", "blog", "Job", "cron", nil, nil)
+	workloads := []core.Workload{{Kind: "Deployment", Namespace: "blog", Name: "web"}}
+
+	tests := []struct {
+		name         string
+		lists        map[string]string
+		wantPods     []string
+		wantRequests []string
+	}{
+		{
+			name: "follows continue tokens",
+			lists: map[string]string{
+				"/api/v1/namespaces/blog/pods":         page("p2", other),
+				"/api/v1/namespaces/blog/pods#p2":      page("p3", web("web-1-a")),
+				"/api/v1/namespaces/blog/pods#p3":      page("", web("web-1-b")),
+				"/api/v1/namespaces/blog/pods#unknown": page("", web("never")),
+			},
+			wantPods: []string{"web-1-a", "web-1-b"},
+			wantRequests: []string{
+				"GET /api/v1/namespaces/blog/pods?limit=500",
+				"GET /api/v1/namespaces/blog/pods?continue=p2&limit=500",
+				"GET /api/v1/namespaces/blog/pods?continue=p3&limit=500",
+			},
+		},
+		{
+			name: "stops after the page limit",
+			lists: func() map[string]string {
+				lists := map[string]string{"/api/v1/namespaces/blog/pods": page("p1", other)}
+				for i := 1; i <= pods.MaxListPages+2; i++ {
+					lists[fmt.Sprintf("/api/v1/namespaces/blog/pods#p%d", i)] = page(fmt.Sprintf("p%d", i+1), web(fmt.Sprintf("web-1-%d", i)))
+				}
+				return lists
+			}(),
+			wantPods: func() []string {
+				var names []string
+				for i := 1; i < pods.MaxListPages; i++ {
+					names = append(names, fmt.Sprintf("web-1-%d", i))
+				}
+				return names
+			}(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			api := &fakeAPI{lists: tt.lists}
+			got, err := newReader(t, api).Pods(t.Context(), workloads)
+			if err != nil {
+				t.Fatalf("Pods: %v", err)
+			}
+			var names []string
+			for _, p := range got {
+				names = append(names, p.Name)
+			}
+			if !reflect.DeepEqual(names, tt.wantPods) {
+				t.Errorf("pods = %v, want %v", names, tt.wantPods)
+			}
+			requests := api.seen()
+			if tt.wantRequests != nil && !reflect.DeepEqual(requests, tt.wantRequests) {
+				t.Errorf("requests = %v, want %v", requests, tt.wantRequests)
+			}
+			if len(requests) > pods.MaxListPages {
+				t.Errorf("made %d requests, want at most %d", len(requests), pods.MaxListPages)
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ const (
 	MaxNamespaces   = 5
 	MaxPods         = 200
 	ListLimit       = 500
+	MaxListPages    = 10
 	MaxMessageBytes = 200
 
 	conditionTrue = "True"
@@ -28,42 +30,57 @@ type Getter interface {
 
 type Reader struct {
 	client Getter
+	logger *slog.Logger
 }
 
-func New(client Getter) (*Reader, error) {
+func New(client Getter, logger *slog.Logger) (*Reader, error) {
 	if client == nil {
 		return nil, errors.New("pods: a kubernetes client is required")
 	}
-	return &Reader{client: client}, nil
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &Reader{client: client, logger: logger}, nil
 }
 
 func (r *Reader) Pods(ctx context.Context, workloads []core.Workload) ([]core.PodStatus, error) {
 	var out []core.PodStatus
 	for _, namespace := range namespaces(workloads) {
-		list, err := r.list(ctx, namespace)
+		found, err := r.list(ctx, namespace, workloads, MaxPods-len(out))
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range owned(workloads, list) {
-			if len(out) == MaxPods {
-				return out, nil
-			}
-			out = append(out, p)
+		out = append(out, found...)
+		if len(out) == MaxPods {
+			break
 		}
 	}
 	return out, nil
 }
 
-func (r *Reader) list(ctx context.Context, namespace string) ([]pod, error) {
+func (r *Reader) list(ctx context.Context, namespace string, workloads []core.Workload, room int) ([]core.PodStatus, error) {
 	if !validSegment(namespace) {
 		return nil, fmt.Errorf("pods: invalid namespace %q", namespace)
 	}
-	var list podList
+	var out []core.PodStatus
 	query := url.Values{"limit": {strconv.Itoa(ListLimit)}}
-	if err := r.client.Get(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods", query, &list); err != nil {
-		return nil, fmt.Errorf("list pods in %s: %w", namespace, err)
+	for range MaxListPages {
+		var list podList
+		if err := r.client.Get(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods", query, &list); err != nil {
+			return nil, fmt.Errorf("list pods in %s: %w", namespace, err)
+		}
+		out = append(out, owned(workloads, list.Items)...)
+		if len(out) >= room {
+			return out[:room], nil
+		}
+		if list.Metadata.Continue == "" {
+			return out, nil
+		}
+		query.Set("continue", list.Metadata.Continue)
 	}
-	return list.Items, nil
+	r.logger.WarnContext(ctx, "namespace has more pods than doorstep reads; diagnosing from the pods found so far",
+		slog.String("namespace", namespace), slog.Int("pages", MaxListPages), slog.Int("page_size", ListLimit))
+	return out, nil
 }
 
 func namespaces(workloads []core.Workload) []string {
@@ -117,7 +134,12 @@ func owns(w core.Workload, owner ownerReference, labels map[string]string) bool 
 }
 
 type podList struct {
-	Items []pod `json:"items"`
+	Metadata listMeta `json:"metadata"`
+	Items    []pod    `json:"items"`
+}
+
+type listMeta struct {
+	Continue string `json:"continue"`
 }
 
 type pod struct {
