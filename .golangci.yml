@@ -1,0 +1,70 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - perfsprint
+    - revive
+    - rowserrcheck
+    - sloglint
+    - sqlclosecheck
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+  exclusions:
+    rules:
+      - path: internal/cli/
+        text: "Function `newRootCommand->"
+        linters:
+          - contextcheck
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: io/ioutil
+              desc: use io and os instead
+            - pkg: github.com/pkg/errors
+              desc: use errors and fmt.Errorf with %w
+            - pkg: github.com/stretchr/testify
+              desc: use the standard testing package
+            - pkg: github.com/sirupsen/logrus
+              desc: use log/slog
+            - pkg: go.uber.org/zap
+              desc: use log/slog
+            - pkg: github.com/rs/zerolog
+              desc: use log/slog
+    nolintlint:
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/sharpintelligence/doorstep
