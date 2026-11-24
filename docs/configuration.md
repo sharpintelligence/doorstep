@@ -142,7 +142,7 @@ Each entry under `auths` provides one of:
 
 ### Kubernetes
 
-The file has the same shape as the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret, so the Secret you already use as an `imagePullSecret` works:
+The file has the same shape as the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret, so the Secret you already use as an `imagePullSecret` works. The kustomize [registry-credentials component](install.md#registry-credentials) wires this up for you; the equivalent manual configuration is:
 
 ```sh
 kubectl create secret docker-registry doorstep-registry \
@@ -207,7 +207,7 @@ Prints the release version, VCS commit, commit time and Go version. `--json` pri
 
 ## Configuration file
 
-`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, notification targets and apps. `doorstep migrate` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep.
+`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, notification targets and apps. `doorstep migrate` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep. On Kubernetes, the [kustomize base](install.md#configuration) generates the ConfigMap with a content hash in its name, so changing the file rolls the Deployment automatically.
 
 Parsing is strict:
 

@@ -4,6 +4,8 @@ git-cliff = "2.14.2"
 go = "1.27.4"
 golangci-lint = "2.15.0"
 just = "1.59.0"
+kubeconform = "0.8.0"
+kustomize = "5.8.3"
 
 [env]
 GOTOOLCHAIN = "local"

@@ -1,0 +1,44 @@
+github:
+  app_id: "123456"
+  private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+
+notifications:
+  - name: ops
+    type: slack
+    webhook_url_file: /etc/doorstep/secrets/slack-webhook-url
+
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    notify: [ops]
+
+  - name: api-prod
+    source:
+      repo: example-org/api
+      required_checks: [test, lint]
+    image:
+      repository: ghcr.io/example-org/api
+    gitops:
+      repo: example-org/platform
+      path: charts/api
+    pin:
+      yaml:
+        file: values-prod.yaml
+        path: image.digest
+    deploy:
+      mode: pull_request
+    argocd:
+      application: api
+      namespace: argocd
+    gates:
+      after:
+        - type: health
+        - type: soak
+          duration: 30m
+    notify: [ops]

@@ -45,7 +45,7 @@ doorstep never talks to workloads directly and never mutates Argo CD. Git is the
 
 ## Package map
 
-There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so the module exposes no public Go API.
+There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so the module exposes no public Go API. Kubernetes install manifests live in `deploy/kustomize` (a base, an optional registry-credentials component and an example overlay) with a test that keeps them consistent with the code; see [install.md](install.md).
 
 | Package | Responsibility | Status |
 | --- | --- | --- |
@@ -343,7 +343,7 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 - Pins are written through the GitHub Contents API using the blob SHA for optimistic concurrency: no local clone, no git binary, no SSH keys, no writable volume. Only regular files of at most 1 MiB are read or written, and every value written into a commit message is checked for control characters, so trailers cannot be injected.
 - In pull request mode doorstep only merges its own pull request: the head must be a branch of the GitOps repository itself, the pull request must change exactly the pin file, that file must be byte-equal to doorstep's edit of the current base, and the merge is pinned to the head SHA that was checked. Anyone who can push to the branch therefore cannot use the App's write access to merge other changes.
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed.
-- Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications.
+- Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications. The install base grants exactly this; see [install.md](install.md#rbac).
 - Only image digests are pinned, never mutable tags.
 - Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.
 - Release images are signed with keyless cosign and carry provenance and SBOM attestations tied to the release workflow; verification steps are in [releasing.md](releasing.md).
