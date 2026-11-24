@@ -31,33 +31,53 @@ const insertTransitionEventSQL = `
 INSERT INTO deployment_events (deployment_id, app_id, type, to_state, actor, message)
 VALUES ($1, $2, 'transition', $3, $4, $5)`
 
-const selectDeploymentSQL = `
-SELECT
+const deploymentColumns = `
     d.id, a.name, a.environment, d.kind, d.state, d.source, d.requested_by,
     d.source_repository, d.commit_sha, d.image_repository, d.image_tag,
     COALESCE(d.image_digest, ''), COALESCE(d.previous_digest, ''), COALESCE(d.pin_commit_sha, ''),
     d.parent_id, d.rollback_of_id, d.superseded_by_id, d.failure_reason,
-    d.created_at, d.updated_at, d.started_at, d.finished_at
+    d.created_at, d.updated_at, d.started_at, d.finished_at`
+
+const selectDeploymentSQL = `
+SELECT` + deploymentColumns + `
 FROM deployments d
 JOIN apps a ON a.id = d.app_id
 WHERE d.id = $1`
 
-func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priority int) (core.Deployment, error) {
+func deploymentFields(d *core.Deployment) []any {
+	return []any{
+		&d.ID, &d.Target.App, &d.Target.Environment, &d.Kind, &d.State, &d.Source, &d.RequestedBy,
+		&d.Commit.Repository, &d.Commit.SHA, &d.Image.Repository, &d.Image.Tag,
+		&d.Digest, &d.PreviousDigest, &d.PinCommitSHA,
+		&d.ParentID, &d.RollbackOfID, &d.SupersededByID, &d.FailureReason,
+		&d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.FinishedAt,
+	}
+}
+
+func newDeployment(d core.Deployment) (core.Deployment, error) {
 	if d.State == "" {
 		d.State = core.StateQueued
 	}
 	if d.State != core.StateQueued {
-		return core.Deployment{}, fmt.Errorf("create deployment: new deployments start %s, got %s", core.StateQueued, d.State)
+		return core.Deployment{}, fmt.Errorf("new deployments start %s, got %s", core.StateQueued, d.State)
 	}
 	if d.SupersededByID != nil {
-		return core.Deployment{}, errors.New("create deployment: a new deployment cannot already be superseded")
+		return core.Deployment{}, errors.New("a new deployment cannot already be superseded")
 	}
 	if err := d.Validate(); err != nil {
+		return core.Deployment{}, err
+	}
+	return d, nil
+}
+
+func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priority int) (core.Deployment, error) {
+	d, err := newDeployment(d)
+	if err != nil {
 		return core.Deployment{}, fmt.Errorf("create deployment: %w", err)
 	}
 
 	var created core.Deployment
-	err := s.InTx(ctx, func(tx *Store) error {
+	err = s.InTx(ctx, func(tx *Store) error {
 		appID, err := tx.EnsureApp(ctx, d.Target)
 		if err != nil {
 			return err
@@ -89,13 +109,7 @@ func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priorit
 
 func (s *Store) GetDeployment(ctx context.Context, id core.DeploymentID) (core.Deployment, error) {
 	var d core.Deployment
-	err := s.db.QueryRow(ctx, selectDeploymentSQL, id).Scan(
-		&d.ID, &d.Target.App, &d.Target.Environment, &d.Kind, &d.State, &d.Source, &d.RequestedBy,
-		&d.Commit.Repository, &d.Commit.SHA, &d.Image.Repository, &d.Image.Tag,
-		&d.Digest, &d.PreviousDigest, &d.PinCommitSHA,
-		&d.ParentID, &d.RollbackOfID, &d.SupersededByID, &d.FailureReason,
-		&d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.FinishedAt,
-	)
+	err := s.db.QueryRow(ctx, selectDeploymentSQL, id).Scan(deploymentFields(&d)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Deployment{}, fmt.Errorf("deployment %d: %w", id, core.ErrNotFound)
 	}

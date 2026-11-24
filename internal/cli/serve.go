@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -13,10 +14,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sharpintelligence/doorstep/internal/api"
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
+	"github.com/sharpintelligence/doorstep/internal/queue"
 	"github.com/sharpintelligence/doorstep/internal/registry"
 	"github.com/sharpintelligence/doorstep/internal/server"
 )
@@ -134,9 +137,14 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	}
 	logger.InfoContext(ctx, "database ready", slog.Any("applied_migrations", migrationVersions(applied)))
 
+	apps := newCatalogApps(in.catalog)
+	q := queue.New(queue.Options{Store: st, MaxBatch: apps.MaxBatch, Logger: logger})
+	apiHandler := api.New(api.Options{Logger: logger, Queue: q, Apps: apps})
+
 	build := buildinfo.Read()
-	m := metrics.New(metrics.Options{Logger: logger, Build: build})
-	routes := map[string]http.Handler{"GET /metrics": m.Handler()}
+	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
+	mainRoutes := map[string]http.Handler{}
+	metricsRoutes := map[string]http.Handler{"GET /metrics": m.Handler()}
 	checks := map[string]server.Check{"postgres": st.Ping}
 	newServer := func(routes map[string]http.Handler) *server.Server {
 		return server.New(server.Options{
@@ -159,7 +167,9 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	)
 
 	if cfg.Server.MetricsListenAddr == "" {
-		if err := newServer(routes).Run(ctx, ln); err != nil {
+		logger.WarnContext(ctx, "API disabled; it is served only on the metrics listener until API authentication exists")
+		maps.Copy(mainRoutes, metricsRoutes)
+		if err := newServer(mainRoutes).Run(ctx, ln); err != nil {
 			return err
 		}
 		logger.InfoContext(ctx, "stopped")
@@ -171,9 +181,10 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
 	}
 	logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
+	metricsRoutes[api.Prefix] = apiHandler
 
-	mainServer := newServer(nil)
-	metricsServer := newServer(routes)
+	mainServer := newServer(mainRoutes)
+	metricsServer := newServer(metricsRoutes)
 	err = runServers(ctx,
 		func(ctx context.Context) error { return mainServer.Run(ctx, ln) },
 		func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) },

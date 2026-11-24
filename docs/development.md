@@ -53,7 +53,7 @@ Tests that only unit-test logic need none of this; `serve` and `migrate` command
 - `storetest.Open(t)` returns a `*store.Store` connected to a fresh schema with all migrations applied, closed when the test ends.
 - `storetest.DatabaseURL(t)` creates a fresh, empty schema and returns a URL whose `search_path` points at it (with `pool_max_conns=5`), for tests that open the store or run commands themselves.
 
-Each schema is named `t_<random hex>` and dropped with everything in it when the test finishes, so no `CREATEDB` privilege is needed. `storetest.Open` migrates with `store.WithoutSessionLock()`, because the migration advisory lock is database-wide and would serialise parallel tests; production code always takes the lock.
+Each schema is named `t_<random hex>` and dropped with everything in it when the test finishes, so no `CREATEDB` privilege is needed. Migrations take the same session advisory lock as production; its ID is derived from the schema, so parallel tests (and the `serve` and `migrate` command tests) never wait for each other. `store.WithoutSessionLock()` remains for tests that migrate one schema repeatedly.
 
 To run the binary locally, point it at the same container:
 

@@ -1,10 +1,12 @@
 package store_test
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/store"
 	"github.com/sharpintelligence/doorstep/internal/store/storetest"
@@ -169,4 +171,64 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestMigrationLockID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		a, b string
+		same bool
+	}{
+		{a: "public", b: "public", same: true},
+		{a: "public", b: "doorstep"},
+		{a: "t_0011", b: "t_0012"},
+		{a: "", b: "public"},
+	}
+	for _, tt := range tests {
+		if got := store.MigrationLockID(tt.a) == store.MigrationLockID(tt.b); got != tt.same {
+			t.Errorf("MigrationLockID(%q) == MigrationLockID(%q) is %v, want %v", tt.a, tt.b, got, tt.same)
+		}
+	}
+}
+
+func TestMigrateSessionLockIsPerSchema(t *testing.T) {
+	t.Parallel()
+
+	lockedURL := storetest.DatabaseURL(t)
+	freeURL := storetest.DatabaseURL(t)
+	holder := connectRaw(t, lockedURL)
+	lockID := store.MigrationLockID(schemaOf(t, lockedURL))
+	if _, err := holder.Exec(t.Context(), "SELECT pg_advisory_lock($1)", lockID); err != nil {
+		t.Fatalf("take migration lock: %v", err)
+	}
+
+	freeCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if _, err := openUnmigrated(t, freeURL).Migrate(freeCtx, discard()); err != nil {
+		t.Fatalf("Migrate of another schema while the lock is held: %v", err)
+	}
+
+	locked := openUnmigrated(t, lockedURL)
+	done := make(chan error, 1)
+	go func() {
+		_, err := locked.Migrate(t.Context(), discard())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Migrate finished while its schema's lock was held: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if _, err := holder.Exec(t.Context(), "SELECT pg_advisory_unlock($1)", lockID); err != nil {
+		t.Fatalf("release migration lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Migrate after the lock was released: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Migrate did not finish after the lock was released")
+	}
 }

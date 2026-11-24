@@ -56,8 +56,8 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
 | `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
-| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation and queue claims; see [database.md](database.md) | built |
-| `internal/queue` | durable work queue: `SELECT ... FOR UPDATE SKIP LOCKED` claims with leases and heartbeats | planned |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, queue claims with batching, leases and `LISTEN/NOTIFY`; see [database.md](database.md) | built |
+| `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
 | `internal/locks` | per-target deployment locks and manual freeze locks | planned |
 | `internal/history` | append-only transition log and its read models | planned |
 | `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
@@ -70,7 +70,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
 | `internal/notify` | Slack, ntfy and generic webhook notifications | planned |
 | `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
-| `internal/api` | HTTP JSON API (`/api/v1`) handlers | planned |
+| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication; see [api.md](api.md) | built |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
 | `internal/auth` | hashed API tokens for CLI/CI, OIDC login for the UI | planned |
 | `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener | built |
@@ -103,9 +103,12 @@ type DeploymentStore interface {
 }
 
 type Queue interface {
-	Claim(ctx context.Context, workerID string, lease time.Duration) (core.Deployment, bool, error)
-	Heartbeat(ctx context.Context, id core.DeploymentID, workerID string) error
-	Release(ctx context.Context, id core.DeploymentID, workerID string) error
+	Enqueue(ctx context.Context, d core.Deployment, opts queue.EnqueueOptions) (queue.EnqueueResult, error)
+	Expedite(ctx context.Context, id core.DeploymentID, actor string) error
+	Claim(ctx context.Context, workerID string) (queue.Claimed, bool, error)
+	Heartbeat(ctx context.Context, id core.DeploymentID, workerID string) (time.Time, error)
+	Release(ctx context.Context, id core.DeploymentID, workerID string, delay time.Duration) error
+	Complete(ctx context.Context, id core.DeploymentID, workerID string) error
 }
 
 type Locker interface {
@@ -140,6 +143,8 @@ type Clock interface {
 	Now() time.Time
 }
 ```
+
+`*queue.Queue` implements the `Queue` port today (see [queue.md](queue.md)); its `Claimed`, `EnqueueOptions` and `EnqueueResult` types live in `queue`, so the engine bead either moves them to `core` or declares the port over its own types with a thin adapter, keeping `engine` free of adapter imports. `queue.Runner` drives the engine through a `Handler` and is started by `serve` once the engine exists.
 
 `PinWriter` has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). Both preserve comments and formatting through the yaml v3 `Node` API.
 
@@ -193,7 +198,10 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - Every transition is a compare-and-set on `(id, from_state)` and is recorded in history.
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
 - Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
-- `LISTEN/NOTIFY` is only a wake-up hint; workers also poll, so a missed notification costs latency, not correctness.
+- A target's queue runs in-flight deployments first, then by priority (`normal` 0, `urgent` 100, `rollback` 200), then oldest first. An urgent deploy jumps queued work but never preempts an in-flight deployment.
+- Claiming a queued deploy batches it: the deploy with the newest commit among the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy of an older commit. Commit age is the order in which commits were first enqueued. Rollbacks never batch and are never superseded ([ADR 0003](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
+- Enqueueing a deploy is idempotent per app and commit SHA while a deploy of that commit is queued or in flight.
+- `LISTEN/NOTIFY` is only a wake-up hint: a trigger on `queue_entries` notifies on enqueue, completion, release and priority changes, and `queue.Runner` also polls every 5 seconds, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
 - Manual freeze locks are rows in a `locks` table, visible and removable in the UI and CLI.
 
@@ -267,9 +275,12 @@ One listener (default `:8080`) serves everything public:
 | `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
 | `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
 | `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) | built |
-| `/api/v1/...` | JSON API | planned |
+| `GET /api/v1/apps/{app}/queue` | an app's queue in run order; served only on the metrics listener until the auth work lands (see [api.md](api.md)) | built |
+| `/api/v1/...` | further JSON API resources; unknown API paths answer with a JSON `404` | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
+
+The JSON API is one handler from `api.New`, mounted at `api.Prefix` (`/api/v1/`) on the metrics listener only, and not at all when that listener is disabled, until authentication exists; its `Options.Middleware` wraps every API route, which is where authentication plugs in.
 
 Readiness checks are registered by name in `server.Options.Checks`; `serve` registers `postgres`, which pings the connection pool. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. Further handlers are mounted through `server.Options.Routes` (a map of `ServeMux` pattern to handler), which keeps them inside the request logging and panic recovery middleware; `/metrics` requests are logged at debug like probes.
 
@@ -285,4 +296,6 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 - Postgres integration tests read `DOORSTEP_TEST_DATABASE_URL` and call `t.Skip` when it is unset. Each test gets an isolated schema through `internal/store/storetest`.
 - CI runs a `postgres:18-alpine` service (pinned by digest), exports `DOORSTEP_TEST_DATABASE_URL` and sets `DOORSTEP_TEST_REQUIRE_DATABASE=true`, so integration tests run on every pull request and a missing database fails the build instead of skipping.
 
-See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [database.md](database.md) for the schema and [metrics.md](metrics.md) for the exported metrics.
+- The queue runner is tested with fakes inside `testing/synctest` bubbles, so wake-ups, polling, heartbeats and backoff run on a fake clock.
+
+See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [api.md](api.md) for the HTTP API and [metrics.md](metrics.md) for the exported metrics.

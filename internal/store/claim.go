@@ -37,11 +37,12 @@ WITH head AS (
                 o.lease_expires_at > now()
                 OR (
                     od.state = ANY($3::text[])
-                    AND (o.priority > q.priority OR (o.priority = q.priority AND o.deployment_id < q.deployment_id))
+                    AND (od.state <> 'queued', o.priority, -o.deployment_id)
+                        > (d.state <> 'queued', q.priority, -q.deployment_id)
                 )
             )
       )
-    ORDER BY q.priority DESC, q.deployment_id
+    ORDER BY (d.state <> 'queued') DESC, q.priority DESC, q.deployment_id
     LIMIT 1
     FOR NO KEY UPDATE OF q, a SKIP LOCKED
 )
@@ -68,29 +69,42 @@ type claimResult struct {
 	deployment core.Deployment
 	claim      Claim
 	appID      AppID
+	superseded []core.DeploymentID
 	found      bool
 }
 
 func (s *Store) Claim(ctx context.Context, workerID string, lease time.Duration) (core.Deployment, Claim, bool, error) {
-	if strings.TrimSpace(workerID) == "" {
-		return core.Deployment{}, Claim{}, false, errors.New("claim: worker ID must not be empty")
-	}
-	if lease <= 0 {
-		return core.Deployment{}, Claim{}, false, fmt.Errorf("claim: lease must be positive, got %s", lease)
+	if err := validateClaimArgs(workerID, lease); err != nil {
+		return core.Deployment{}, Claim{}, false, fmt.Errorf("claim: %w", err)
 	}
 
+	r, err := s.claimRetrying(ctx, workerID, lease, nil)
+	return r.deployment, r.claim, r.found, err
+}
+
+func validateClaimArgs(workerID string, lease time.Duration) error {
+	if strings.TrimSpace(workerID) == "" {
+		return errors.New("worker ID must not be empty")
+	}
+	if lease <= 0 {
+		return fmt.Errorf("lease must be positive, got %s", lease)
+	}
+	return nil
+}
+
+func (s *Store) claimRetrying(ctx context.Context, workerID string, lease time.Duration, limit BatchLimit) (claimResult, error) {
 	excluded := []AppID{}
 	for {
-		r, err := s.claimOnce(ctx, workerID, lease, excluded)
+		r, err := s.claimOnce(ctx, workerID, lease, excluded, limit)
 		if errors.Is(err, errLostClaimRace) {
 			excluded = append(excluded, r.appID)
 			continue
 		}
-		return r.deployment, r.claim, r.found, err
+		return r, err
 	}
 }
 
-func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Duration, excluded []AppID) (claimResult, error) {
+func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Duration, excluded []AppID, limit BatchLimit) (claimResult, error) {
 	var r claimResult
 	err := s.InTx(ctx, func(tx *Store) error {
 		var id core.DeploymentID
@@ -116,7 +130,10 @@ func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Durat
 			return err
 		}
 		r.found = true
-		return nil
+		if limit == nil {
+			return nil
+		}
+		return tx.batch(ctx, &r, workerID, lease, limit)
 	})
 	if errors.Is(err, errLostClaimRace) {
 		return claimResult{appID: r.appID}, err

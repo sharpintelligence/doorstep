@@ -58,7 +58,7 @@ func Open(tb testing.TB) *store.Store {
 		tb.Fatalf("open store: %v", err)
 	}
 	tb.Cleanup(st.Close)
-	if _, err := st.Migrate(tb.Context(), slog.New(slog.DiscardHandler), store.WithoutSessionLock()); err != nil {
+	if _, err := st.Migrate(tb.Context(), slog.New(slog.DiscardHandler)); err != nil {
 		tb.Fatalf("migrate: %v", err)
 	}
 	return st

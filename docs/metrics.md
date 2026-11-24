@@ -8,7 +8,7 @@ By default `/metrics` is served on a dedicated listener, `--metrics-listen-addr`
 
 The main listener is the one that receives public GitHub webhooks. Metrics reveal application names and build information and the endpoint is unauthenticated, so authentication is left to network placement: keep the metrics port off the public ingress.
 
-To serve `/metrics` on the main listener instead, opt in explicitly with an empty address (`--metrics-listen-addr=""` or `DOORSTEP_METRICS_LISTEN_ADDR=""`). Do that only when the main listener is not reachable from the internet.
+To serve `/metrics` on the main listener instead, opt in explicitly with an empty address (`--metrics-listen-addr=""` or `DOORSTEP_METRICS_LISTEN_ADDR=""`). Do that only when the main listener is not reachable from the internet. Until API authentication exists, the dedicated listener also serves the `/api/v1/` JSON API ([api.md](api.md)); with an empty address the API is disabled.
 
 Prometheus `scrape_config`:
 
@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment, rollback, gate and queue series appear once the engine and queue features record into them. Until then only `doorstep_build_info`, the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event.
+Deployment, rollback and gate series appear once the engine records into them. Until then `doorstep_build_info`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -46,7 +46,7 @@ Deployment, rollback, gate and queue series appear once the engine and queue fea
 | `doorstep_deployment_duration_seconds` | histogram | `app`, `outcome` | Time from deployment start to a final outcome. Its `_count` is the number of finished deployments per outcome. |
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
 | `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time spent evaluating a gate. Its `_count` is the number of evaluations. |
-| `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time. The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
+| `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time: queue entries whose deployment is `queued` and not leased, across all apps. In-flight deployments are not counted ([queue.md](queue.md#observability)). The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
 | `doorstep_queue_depth_errors_total` | counter | none | Scrapes where the queue depth could not be read. The first failure of a streak is logged at `warn` and the recovery at `info`; further failures are only counted. |
 | `doorstep_build_info` | gauge | `version`, `commit`, `go_version` | Always 1; identifies the running build. |
 | `go_*`, `process_*` | various | | Standard Go runtime and process collectors. `process_*` is only available on platforms that support it (Linux). |
