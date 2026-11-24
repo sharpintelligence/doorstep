@@ -89,7 +89,7 @@ func TestDiagnoses(t *testing.T) {
 	record(cur, `{"diagnosis":{"attempt":1}}`, 20*time.Minute)
 	record(cur, `{"retry":{"attempt":2}}`, 10*time.Minute)
 	record(cur, `{"diagnosis":{"attempt":2}}`, 5*time.Minute)
-	later := withDigest("web", otherDigest, core.StateSyncing)
+	later := withDigest("web", otherDigest, core.StateCancelled)
 	record(later, `{"diagnosis":{"nodes":["pi-6"]}}`, time.Minute)
 
 	got, err := st.Diagnoses(t.Context(), cur.ID, 0, 0)
