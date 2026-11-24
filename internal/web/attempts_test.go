@@ -53,10 +53,15 @@ func TestAttemptsFrom(t *testing.T) {
 			}},
 		},
 		{
+			name:   "failure class wins over the retry reason when there is no diagnosis",
+			events: []core.Event{retryEvent(`{"failure_class":"unknown","retry":{"attempt":1,"reason":"transient"}}`)},
+			want:   []attemptView{{Number: 1, OccurredAt: testNow, Verdict: "unknown", Message: "retrying"}},
+		},
+		{
 			name: "retries then a final failure",
 			events: []core.Event{
-				retryEvent(`{"retry":{"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1000,"reason":"unknown"}}`),
-				retryEvent(`{"retry":{"attempt":2,"next_attempt":3,"max_attempts":3,"delay_ms":2000,"reason":"unknown"}}`),
+				retryEvent(`{"retry":{"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1000,"reason":"transient"},"failure_class":"unknown"}`),
+				retryEvent(`{"retry":{"attempt":2,"next_attempt":3,"max_attempts":3,"delay_ms":2000,"reason":"transient"},"failure_class":"unknown"}`),
 				failedEvent(core.StateSyncing, `{"attempts":3,"decision":"retries_exhausted","rollback_eligible":true,"diagnosis":{"verdict":"version","summary":"crash loop","pods_inspected":false}}`),
 			},
 			want: []attemptView{

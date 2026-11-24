@@ -39,7 +39,6 @@ type retryData struct {
 }
 
 type attemptEventData struct {
-	Stage            string         `json:"stage"`
 	FailureClass     string         `json:"failure_class"`
 	SyncReason       string         `json:"sync_reason"`
 	Retry            *retryData     `json:"retry"`
@@ -127,7 +126,9 @@ func retryAttempt(attempt attemptView, data attemptEventData) attemptView {
 		attempt.NextAttempt = data.Retry.NextAttempt
 		attempt.Delay = time.Duration(data.Retry.DelayMS) * time.Millisecond
 		attempt.Summary = data.Retry.Summary
-		attempt.Verdict = data.Retry.Reason
+	}
+	if data.FailureClass != "" {
+		attempt.Verdict = data.FailureClass
 	}
 	attempt.SyncReason = data.SyncReason
 	return withDiagnosis(attempt, data.Diagnosis)
