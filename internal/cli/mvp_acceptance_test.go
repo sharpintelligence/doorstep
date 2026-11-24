@@ -371,6 +371,7 @@ func TestMVPDeploysAMergedPullRequestAndRollsBack(t *testing.T) {
 	})
 
 	deployer := s.token(core.RoleDeployer)
+	viewer := s.token(core.RoleViewer)
 	code, out, errOut := s.cli(deployer, "rollback", "blog", "--reason", "checkout errors", "-o", "json")
 	if code != 0 {
 		t.Fatalf("doorstep rollback = %d: %s", code, errOut)
@@ -419,7 +420,7 @@ func TestMVPDeploysAMergedPullRequestAndRollsBack(t *testing.T) {
 		t.Errorf("GET /api/v1/apps/blog/deployments = %v, want %v newest first", ids, want)
 	}
 
-	code, out, errOut = s.cli(deployer, "deployments", "blog", "-o", "json", "--kind", "rollback")
+	code, out, errOut = s.cli(viewer, "deployments", "blog", "-o", "json", "--kind", "rollback")
 	if code != 0 {
 		t.Fatalf("doorstep deployments = %d: %s", code, errOut)
 	}
@@ -432,7 +433,7 @@ func TestMVPDeploysAMergedPullRequestAndRollsBack(t *testing.T) {
 	if len(cliHistory.Items) != 1 || cliHistory.Items[0].ID != rollbackID || cliHistory.Items[0].RollbackOfID == nil || *cliHistory.Items[0].RollbackOfID != second {
 		t.Errorf("doorstep deployments --kind rollback = %+v, want only rollback %d of %d", cliHistory.Items, rollbackID, second)
 	}
-	code, out, errOut = s.cli(deployer, "deployment", strconv.FormatInt(int64(rollbackID), 10))
+	code, out, errOut = s.cli(viewer, "deployment", strconv.FormatInt(int64(rollbackID), 10))
 	if code != 0 {
 		t.Fatalf("doorstep deployment = %d: %s", code, errOut)
 	}

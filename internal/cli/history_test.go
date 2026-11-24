@@ -28,7 +28,7 @@ const (
 		`"created_at":"2026-11-23T12:00:00Z","started_at":"2026-11-23T12:01:00Z","finished_at":"2026-11-23T12:10:00Z"},` +
 		`"events":[` +
 		`{"type":"transition","from":"queued","to":"running","actor":"engine","data":{},"occurred_at":"2026-11-23T12:01:00Z"},` +
-		`{"type":"retry","actor":"engine","data":{"retry":{"attempt":1,"max_attempts":3,"summary":"transient: image pull failing"}},"occurred_at":"2026-11-23T12:05:00Z"},` +
+		`{"type":"transition","from":"syncing","to":"syncing","actor":"engine","message":"retry 1\/3: transient: image pull failing","data":{"retry":{"attempt":1,"max_attempts":3,"summary":"transient: image pull failing"}},"occurred_at":"2026-11-23T12:05:00Z"},` +
 		`{"type":"note","message":"note\u0007 text","data":{"x":1},"occurred_at":"2026-11-23T12:06:00Z"},` +
 		`{"type":"note","data":{"retry":"bad"},"occurred_at":"2026-11-23T12:07:00Z"}],` +
 		`"events_truncated":false,` +
@@ -149,7 +149,7 @@ func TestDeploymentCommand(t *testing.T) {
 			"  digest:           " + cliBadDigest + "\n",
 			"  previous digest:  " + cliGoodDigest + "\n",
 			"  failure:          sync failed [31m: degraded second line\n",
-			"\nGATES\n", "all [2J green", "\nEVENTS\n", "retry 1/3: transient: image pull failing", "note  text",
+			"\nGATES\n", "all [2J green", "\nEVENTS\n", "syncing -> syncing", "retry 1/3: transient: image pull failing", "note  text",
 			"\nROLLBACKS\n", "\nRETRIES\n",
 		}},
 		{
@@ -218,7 +218,7 @@ func TestDeploymentDetailTable(t *testing.T) {
 		"  migration:        yes: label db-migration",
 		"checks  before  required_checks  passed   2026-11-23T12:00:40Z  all [2J green",
 		"errors  after   prometheus       running  -                     -",
-		"2026-11-23T12:01:00Z  transition  queued -> running  engine  -",
+		"2026-11-23T12:01:00Z  transition  queued -> running   engine  -",
 		"44  succeeded  sha256:bbbbbbbbbbbb  2026-11-23T12:20:00Z",
 		"45  queued  -       2026-11-23T12:30:00Z",
 	} {

@@ -26,8 +26,6 @@ const (
 	flagDigest      = "digest"
 	flagLimit       = "limit"
 	flagCursor      = "cursor"
-
-	defaultHistoryLimit = 50
 )
 
 type deploymentInfo struct {
@@ -221,7 +219,7 @@ func newDeploymentsCommand(lookupEnv LookupEnv) *cobra.Command {
 	flags.StringSliceVar(&opts.kinds, flagKind, nil, "only deployments of this kind: deploy or rollback (repeat or comma-separate)")
 	flags.StringVar(&opts.commit, flagCommit, "", "only deployments of this full commit SHA")
 	flags.StringVar(&opts.digest, flagDigest, "", "only deployments of this image digest")
-	flags.IntVar(&opts.limit, flagLimit, defaultHistoryLimit, "deployments per page, 1 to "+strconv.Itoa(store.MaxPageSize))
+	flags.IntVar(&opts.limit, flagLimit, store.DefaultPageSize, "deployments per page, 1 to "+strconv.Itoa(store.MaxPageSize))
 	flags.StringVar(&opts.cursor, flagCursor, "", "continue after the next_cursor of the previous page")
 	flags.StringVarP(&output, flagOutput, "o", outputTable, "output format: table or json")
 	return cmd
@@ -292,7 +290,7 @@ func writeDeploymentTable(out io.Writer, app string, items []deploymentInfo) err
 	for _, d := range items {
 		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			d.ID, valueOrDash(printable(d.Environment)), valueOrDash(printable(d.Kind)), valueOrDash(printable(d.State)),
-			valueOrDash(shortSHA(d.Commit.SHA)), valueOrDash(shortDigest(d.Image.Digest)),
+			valueOrDash(shortSHA(printable(d.Commit.SHA))), valueOrDash(shortDigest(printable(d.Image.Digest))),
 			valueOrDash(printable(d.Trigger.Source)), valueOrDash(printable(d.Trigger.RequestedBy)),
 			d.CreatedAt.UTC().Format(time.RFC3339), timeOrDash(d.FinishedAt))
 	}
@@ -334,11 +332,11 @@ func lineageFields(d deploymentInfo) [][2]string {
 	}
 	return [][2]string{
 		{"trigger", joinNonEmpty(" by ", printable(d.Trigger.Source), printable(d.Trigger.RequestedBy))},
-		{"commit", atText(d.Commit.Repository, d.Commit.SHA)},
-		{"image", joinNonEmpty(":", d.Image.Repository, d.Image.Tag)},
-		{"digest", d.Image.Digest},
-		{"previous digest", d.Image.PreviousDigest},
-		{"gitops", atText(d.GitOps.Repository, d.GitOps.CommitSHA)},
+		{"commit", atText(printable(d.Commit.Repository), printable(d.Commit.SHA))},
+		{"image", joinNonEmpty(":", printable(d.Image.Repository), printable(d.Image.Tag))},
+		{"digest", printable(d.Image.Digest)},
+		{"previous digest", printable(d.Image.PreviousDigest)},
+		{"gitops", atText(printable(d.GitOps.Repository), printable(d.GitOps.CommitSHA))},
 		{"argocd revision", printable(d.ArgoCD.Revision)},
 		{"rollback of", idText(d.RollbackOfID)},
 		{"retry of", idText(d.ParentID)},
@@ -353,11 +351,13 @@ func lineageFields(d deploymentInfo) [][2]string {
 
 func writeDeploymentDetail(out io.Writer, detail deploymentDetail) error {
 	d := detail.Deployment
-	header := fmt.Sprintf("deployment %d: %s of %s", d.ID, valueOrDash(printable(d.Kind)), d.App)
+	header := fmt.Sprintf("deployment %d: %s of %s", d.ID, valueOrDash(printable(d.Kind)), printable(d.App))
 	if d.Environment != "" {
 		header += " (" + printable(d.Environment) + ")"
 	}
-	_, _ = fmt.Fprintf(out, "%s %s\n", header, printable(d.State))
+	if _, err := fmt.Fprintf(out, "%s %s\n", header, printable(d.State)); err != nil {
+		return err
+	}
 
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	for _, f := range lineageFields(d) {
@@ -368,45 +368,60 @@ func writeDeploymentDetail(out io.Writer, detail deploymentDetail) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	writeSection(out, "GATES", len(detail.Gates), func(w io.Writer) {
+	gates := func(w io.Writer) {
 		_, _ = fmt.Fprintln(w, "NAME\tPHASE\tTYPE\tSTATUS\tFINISHED\tMESSAGE")
 		for _, g := range detail.Gates {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", printable(g.Name), printable(g.Phase), printable(g.Type),
 				printable(g.Status), timeOrDash(g.FinishedAt), valueOrDash(printable(g.Message)))
 		}
-	})
+	}
 	eventsHeading := "EVENTS"
 	if detail.EventsTruncated {
 		eventsHeading += " (older events omitted)"
 	}
-	writeSection(out, eventsHeading, len(detail.Events), func(w io.Writer) {
+	events := func(w io.Writer) {
 		_, _ = fmt.Fprintln(w, "TIME\tTYPE\tTRANSITION\tACTOR\tMESSAGE")
 		for _, e := range detail.Events {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.OccurredAt.UTC().Format(time.RFC3339), printable(e.Type),
 				transitionText(e), valueOrDash(printable(e.Actor)), valueOrDash(eventMessage(e)))
 		}
-	})
+	}
 	related := func(items []deploymentInfo) func(io.Writer) {
 		return func(w io.Writer) {
 			_, _ = fmt.Fprintln(w, "ID\tSTATE\tDIGEST\tCREATED")
 			for _, r := range items {
-				_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.ID, printable(r.State), valueOrDash(shortDigest(r.Image.Digest)), r.CreatedAt.UTC().Format(time.RFC3339))
+				_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.ID, printable(r.State), valueOrDash(shortDigest(printable(r.Image.Digest))), r.CreatedAt.UTC().Format(time.RFC3339))
 			}
 		}
 	}
-	writeSection(out, "ROLLBACKS", len(detail.Rollbacks), related(detail.Rollbacks))
-	writeSection(out, "RETRIES", len(detail.Retries), related(detail.Retries))
+	sections := []struct {
+		heading string
+		rows    int
+		body    func(io.Writer)
+	}{
+		{"GATES", len(detail.Gates), gates},
+		{eventsHeading, len(detail.Events), events},
+		{"ROLLBACKS", len(detail.Rollbacks), related(detail.Rollbacks)},
+		{"RETRIES", len(detail.Retries), related(detail.Retries)},
+	}
+	for _, section := range sections {
+		if err := writeSection(out, section.heading, section.rows, section.body); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func writeSection(out io.Writer, heading string, rows int, body func(io.Writer)) {
+func writeSection(out io.Writer, heading string, rows int, body func(io.Writer)) error {
 	if rows == 0 {
-		return
+		return nil
 	}
-	_, _ = fmt.Fprintf(out, "\n%s\n", heading)
+	if _, err := fmt.Fprintf(out, "\n%s\n", heading); err != nil {
+		return err
+	}
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	body(w)
-	_ = w.Flush()
+	return w.Flush()
 }
 
 func transitionText(e eventInfo) string {
@@ -417,18 +432,5 @@ func transitionText(e eventInfo) string {
 }
 
 func eventMessage(e eventInfo) string {
-	if e.Message != "" {
-		return printable(e.Message)
-	}
-	var data struct {
-		Retry struct {
-			Attempt     int    `json:"attempt"`
-			MaxAttempts int    `json:"max_attempts"`
-			Summary     string `json:"summary"`
-		} `json:"retry"`
-	}
-	if len(e.Data) == 0 || json.Unmarshal(e.Data, &data) != nil || data.Retry.Attempt == 0 {
-		return ""
-	}
-	return fmt.Sprintf("retry %d/%d: %s", data.Retry.Attempt, data.Retry.MaxAttempts, printable(data.Retry.Summary))
+	return printable(e.Message)
 }

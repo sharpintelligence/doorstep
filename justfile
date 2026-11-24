@@ -41,7 +41,7 @@ vuln:
 deadcode:
     #!/usr/bin/env bash
     set -euo pipefail
-    unused=$(go run golang.org/x/tools/cmd/deadcode@{{deadcode_version}} -test ./...)
+    unused=$(go run golang.org/x/tools/cmd/deadcode@{{deadcode_version}} ./... | grep -vE '(^|/)[a-z]*test[a-z]*/|unreachable func: (Metrics\.Gatherer|WithoutSessionLock)$' || true)
     if [ -n "$unused" ]; then
         echo "$unused"
         exit 1
