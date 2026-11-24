@@ -15,6 +15,7 @@ import (
 
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/github"
 )
 
 func TestConfigRoleNamesMatchCore(t *testing.T) {
@@ -135,7 +136,6 @@ auth:
 `,
 			env:          map[string]string{"TEST_GITHUB_SECRET": "s3cret-github", config.EnvPublicURL: "https://doorstep.example.com"},
 			wantProvider: "github",
-			wantLogin:    "https://github.com/login/oauth/authorize",
 		},
 	}
 	for _, tt := range tests {
@@ -143,8 +143,17 @@ auth:
 			t.Parallel()
 			var stdout bytes.Buffer
 			var stderr lockedBuffer
+			f := newEngineFixture(t)
+			wantLogin := tt.wantLogin
+			if tt.wantProvider == "github" {
+				authURL, _, err := github.OAuthEndpoints(f.github.URL)
+				if err != nil {
+					t.Fatalf("OAuthEndpoints: %v", err)
+				}
+				wantLogin = authURL
+			}
 			args, env := withDatabase(t, databaseURLEnv,
-				[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--config", writeConfig(t, tt.config)}, tt.env)
+				[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--config", writeConfig(t, f.config(tt.config))}, f.env(tt.env))
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan int, 1)
@@ -154,14 +163,14 @@ auth:
 			metricsAddr := waitForMetricsAddr(t, &stderr, done)
 
 			login := noRedirectGet(t, "http://"+addr+"/auth/login?return_to=%2Fqueue", nil)
-			if tt.wantLogin == "" {
+			if wantLogin == "" {
 				if login.code != http.StatusNotFound {
 					t.Errorf("GET /auth/login = %d, want 404 without a provider", login.code)
 				}
 			} else {
 				location, err := url.Parse(login.header.Get("Location"))
-				if login.code != http.StatusFound || err != nil || !strings.HasPrefix(location.String(), tt.wantLogin+"?") {
-					t.Errorf("GET /auth/login = %d Location %q, want a redirect to %s", login.code, login.header.Get("Location"), tt.wantLogin)
+				if login.code != http.StatusFound || err != nil || !strings.HasPrefix(location.String(), wantLogin+"?") {
+					t.Errorf("GET /auth/login = %d Location %q, want a redirect to %s", login.code, login.header.Get("Location"), wantLogin)
 				}
 				if len(login.cookies) != 1 {
 					t.Errorf("login cookies = %v", login.cookies)
@@ -169,7 +178,7 @@ auth:
 			}
 
 			bad := http.Header{"Authorization": {"Bearer dsp_not-a-real-token"}}
-			if tt.wantLogin != "" {
+			if wantLogin != "" {
 				if resp := noRedirectGet(t, "http://"+addr+"/auth/login", bad); resp.code != http.StatusUnauthorized {
 					t.Errorf("auth route with a bad token = %d, want 401", resp.code)
 				}
@@ -228,9 +237,10 @@ auth:
     client_secret_env: TEST_OIDC_SECRET
 `
 	var stderr lockedBuffer
+	f := newEngineFixture(t)
 	args, env := withDatabase(t, databaseURLEnv,
-		[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s", "--config", writeConfig(t, cfg)},
-		map[string]string{"TEST_OIDC_SECRET": "x"})
+		[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s", "--config", writeConfig(t, f.config(cfg))},
+		f.env(map[string]string{"TEST_OIDC_SECRET": "x"}))
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan int, 1)
@@ -286,8 +296,9 @@ func TestServeAPIRequiresRoles(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuffer
+	f := newEngineFixture(t)
 	args, env := withDatabase(t, databaseURLEnv,
-		[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--config", writeConfig(t, authApp)}, nil)
+		[]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s", "--config", writeConfig(t, f.config(authApp))}, f.env(nil))
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan int, 1)

@@ -21,6 +21,7 @@ func TestDefault(t *testing.T) {
 		GitHub: GitHub{APIURL: "https://api.github.com"},
 		Locks:  Locks{ReminderInterval: 24 * time.Hour},
 		Intake: Intake{PollInterval: time.Minute},
+		Engine: Engine{Concurrency: 4},
 	}
 	got := Default()
 	if got != want {
@@ -140,6 +141,17 @@ func TestFromEnv(t *testing.T) {
 			name: "polling disabled",
 			env:  map[string]string{EnvPollInterval: "0"},
 			want: func(c *Config) { c.Intake.PollInterval = 0 },
+		},
+		{
+			name: "engine concurrency",
+			env:  map[string]string{EnvEngineConcurrency: " 16 "},
+			want: func(c *Config) { c.Engine.Concurrency = 16 },
+		},
+		{
+			name:    "unparseable engine concurrency",
+			env:     map[string]string{EnvEngineConcurrency: "many"},
+			want:    func(*Config) {},
+			wantErr: []string{EnvEngineConcurrency, `"many"`},
 		},
 		{
 			name:    "unparseable poll interval",
@@ -360,6 +372,18 @@ func TestValidate(t *testing.T) {
 			wantErr: []string{"poll interval: must not be negative, got -1m0s"},
 		},
 		{name: "lock reminder at minimum", mutate: func(c *Config) { c.Locks.ReminderInterval = time.Minute }},
+		{name: "one engine worker", mutate: func(c *Config) { c.Engine.Concurrency = 1 }},
+		{name: "most engine workers", mutate: func(c *Config) { c.Engine.Concurrency = MaxEngineConcurrency }},
+		{
+			name:    "no engine workers",
+			mutate:  func(c *Config) { c.Engine.Concurrency = 0 },
+			wantErr: []string{"engine concurrency: must be between 1 and 256, got 0"},
+		},
+		{
+			name:    "too many engine workers",
+			mutate:  func(c *Config) { c.Engine.Concurrency = MaxEngineConcurrency + 1 },
+			wantErr: []string{"engine concurrency: must be between 1 and 256, got 257"},
+		},
 		{
 			name:    "lock reminder below minimum",
 			mutate:  func(c *Config) { c.Locks.ReminderInterval = 59 * time.Second },

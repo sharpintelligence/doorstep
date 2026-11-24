@@ -24,6 +24,7 @@ type File struct {
 	Locks         FileLocks      `yaml:"locks"`
 	Kubernetes    FileKubernetes `yaml:"kubernetes"`
 	Intake        FileIntake     `yaml:"intake"`
+	Engine        FileEngine     `yaml:"engine"`
 	Auth          Auth           `yaml:"auth"`
 	Notifications []Notification `yaml:"notifications"`
 	Apps          []App          `yaml:"apps"`
@@ -68,6 +69,10 @@ type FileKubernetes struct {
 
 type FileIntake struct {
 	PollInterval *Duration `yaml:"poll_interval"`
+}
+
+type FileEngine struct {
+	Concurrency *int `yaml:"concurrency"`
 }
 
 func Parse(r io.Reader) (File, error) {
@@ -153,6 +158,9 @@ func (f File) Apply(base Config) Config {
 	}
 	if f.Intake.PollInterval != nil {
 		cfg.Intake.PollInterval = f.Intake.PollInterval.Std()
+	}
+	if f.Engine.Concurrency != nil {
+		cfg.Engine.Concurrency = *f.Engine.Concurrency
 	}
 	return cfg
 }

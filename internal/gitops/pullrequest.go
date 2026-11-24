@@ -69,8 +69,11 @@ func (r *pullRun) once(ctx context.Context) (Result, error) {
 		return r.alreadyPinned(ctx, existing)
 	}
 	if existing != nil && existing.Merged {
-		return Result{}, fmt.Errorf("%w: #%d was merged as %s, but %s no longer holds %s",
-			ErrPinOverwritten, existing.Number, existing.MergeCommitSHA, t.Branch, r.desired)
+		if !r.req.Repin {
+			return Result{}, fmt.Errorf("%w: #%d was merged as %s, but %s no longer holds %s",
+				ErrPinOverwritten, existing.Number, existing.MergeCommitSHA, t.Branch, r.desired)
+		}
+		existing = nil
 	}
 	previous := t.digestOf(current)
 	expected, err := writeValue(editorFor(t), base.Content, r.desired)

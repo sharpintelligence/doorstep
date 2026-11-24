@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -60,6 +61,13 @@ FROM deployment_events
 WHERE deployment_id = $1
 ORDER BY id DESC
 LIMIT $2`
+
+const selectTimeInStateSQL = `
+SELECT (EXTRACT(EPOCH FROM now() - occurred_at) * 1000000)::bigint
+FROM deployment_events
+WHERE deployment_id = $1 AND type = 'transition' AND to_state = $2
+ORDER BY id DESC
+LIMIT 1`
 
 const selectRelatedDeploymentsSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE d.rollback_of_id = $1 OR d.parent_id = $1
@@ -257,4 +265,16 @@ func (s *Store) CurrentDeployment(ctx context.Context, t core.Target) (core.Depl
 		return core.Deployment{}, fmt.Errorf("current deployment of %s: %w", t, err)
 	}
 	return d, nil
+}
+
+func (s *Store) TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {
+	var micros int64
+	err := s.db.QueryRow(ctx, selectTimeInStateSQL, id, state).Scan(&micros)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("deployment %d never entered %s: %w", id, state, core.ErrNotFound)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read how long deployment %d has been %s: %w", id, state, err)
+	}
+	return time.Duration(micros) * time.Microsecond, nil
 }

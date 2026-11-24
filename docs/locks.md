@@ -57,7 +57,7 @@ Every change is a `core.LockEvent` with an action, the lock, the actor and the t
 
 `internal/locks` hands each event to a `locks.Notifier` after the change has committed. The notifier gets a context that is detached from the request, so a client that disconnects does not cancel the notification of a change that has already happened, and bounded by `locks.NotifyTimeout` (10 seconds), so a slow channel cannot hold a request or the sweep indefinitely. A notifier error is logged and never fails the request or the sweep.
 
-Every event is also logged at info level, the default, whether or not a notifier is configured: `locked` and `unlocked` (with scope, owner, reason or actor), `lock expired` and `lock still held` (with scope, owner and reason). Until the notification channels (Slack, ntfy, webhooks) are wired in, `serve` configures no notifier, and these log lines are where lock events, including reminders, appear.
+Every event is also logged at info level, the default: `locked` and `unlocked` (with scope, owner, reason or actor), `lock expired` and `lock still held` (with scope, owner and reason). `serve` passes the same notifier to the service and the reminder; it turns `locked` into `lock.changed` (acquired), `unlocked` and `expired` into `lock.changed` (released) and `reminded` into `lock.reminder`, and sends a global freeze to every app's targets once ([notifications.md](notifications.md#events)).
 
 Independently of notifications, every change is written to the append-only `lock_events` table in the same transaction as the change itself ([database.md](database.md#lock_events)), so who locked or unlocked what, when and why survives after the lock row is gone. `Store.ListLockEvents` reads it newest first; the history and UI work exposes it.
 

@@ -37,6 +37,8 @@ kubernetes:
   context: homelab
 intake:
   poll_interval: 2m
+engine:
+  concurrency: 8
 notifications:
   - name: ops
     type: slack
@@ -113,6 +115,7 @@ func TestParse(t *testing.T) {
 		Registry:   FileRegistry{CredentialsFile: strPtr("/etc/doorstep/registry/.dockerconfigjson")},
 		Locks:      FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
 		Intake:     FileIntake{PollInterval: durPtr(2 * time.Minute)},
+		Engine:     FileEngine{Concurrency: intPtr(8)},
 		Kubernetes: FileKubernetes{Kubeconfig: strPtr("/etc/doorstep/kube/config"), Context: strPtr("homelab")},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
@@ -367,6 +370,7 @@ func TestFileApply(t *testing.T) {
 				Registry:   FileRegistry{CredentialsFile: strPtr("/secrets/config.json")},
 				Locks:      FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
 				Intake:     FileIntake{PollInterval: durPtr(30 * time.Second)},
+				Engine:     FileEngine{Concurrency: intPtr(12)},
 				Kubernetes: FileKubernetes{Kubeconfig: strPtr("/kube/config"), Context: strPtr("lab")},
 			},
 			want: func(c *Config) {
@@ -378,6 +382,7 @@ func TestFileApply(t *testing.T) {
 				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
 				c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "lab"}
 				c.Intake = Intake{PollInterval: 30 * time.Second}
+				c.Engine = Engine{Concurrency: 12}
 			},
 		},
 		{

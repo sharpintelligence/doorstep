@@ -2,7 +2,7 @@
 
 A rollback puts an app back on its previous good image digest. It is not a special mode: doorstep queues a new deployment of kind `rollback` that re-pins the earlier digest through the same queue, pin, Argo CD and verification path as any deploy ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)), and it records a **block** on the version it replaced so that version is not deployed again automatically. Blocks live in Postgres and are mirrored into the GitOps repository as commit trailers ([ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)).
 
-In the MVP a rollback is requested from the API or the CLI. The UI button comes later. `internal/rollback` implements everything on this page; the deploy engine executes the queued rollback deployment.
+In the MVP a rollback is requested from the API or the CLI. The UI button comes later. `internal/rollback` implements everything on this page; the [deployment engine](engine.md#rollbacks) executes the queued rollback deployment.
 
 ## Requesting a rollback
 
@@ -68,20 +68,21 @@ Postgres is the operational source of truth: a block or unblock takes effect in 
 
 The lag is harmless for unblocks: until the unblock reaches git, git still says "blocked", which is the safe side. A block that never reaches git (because the app is never pinned again) exists only in Postgres; restoring doorstep from git alone would lose it. An explicit flush with an empty commit and a command that rebuilds blocks from the git history are possible follow-ups.
 
-## What the engine must do
+## What the engine does
 
-The engine (bead doorstep-ehl.4.4) executes queued rollbacks like deploys and calls the `BlockList` port, which `*rollback.Service` implements ([architecture.md](architecture.md#engine-ports)):
+The [engine](engine.md) executes queued rollbacks like deploys and calls the `BlockList` port, which `*rollback.Service` implements ([architecture.md](architecture.md#engine-ports)):
 
-- For kind `deploy`, call `Blocked(target, commit, digest)` right after resolving the digest; when it reports a block, fail the deployment with a reason that names the block.
-- Before `Pin`, call `PendingTrailers(target)` and pass them as `gitops.Request.Blocks` and `Unblocks`; after a `Pin` whose result has `Changed`, call `MarkMirrored(target, trailers, result.Commit)`.
-- For kind `rollback`, use the preset digest without resolving, skip the CI and soak gates, and still wait for Argo CD to report synced and healthy.
-- Stop as soon as a transition returns `core.ErrStateConflict` or the context is cancelled.
+- For kind `deploy`, it calls `Blocked(target, commit, digest)` right after resolving the digest; when it reports a block, it fails the deployment with a reason that names the block.
+- Before `Pin`, it calls `PendingTrailers(target)` and passes them as `gitops.Request.Blocks` and `Unblocks`; after a `Pin` whose result has `Changed`, it calls `MarkMirrored(target, trailers, result.Commit)`. A `MarkMirrored` error is logged at `warn` and the trailers ride on the next pin commit again.
+- For kind `rollback`, it uses the preset digest without resolving, the `checks`, `lock` and `soak` gates (and `schedule` without `apply_to_rollbacks`) record `skipped` ([gates.md](gates.md#rollbacks)), and it still waits for Argo CD to report synced and healthy.
+- It stops as soon as a transition returns `core.ErrStateConflict` or the context is cancelled.
+- `deploy.queued` for the rollback and `deploy.cancelled` for the deployments the request cancelled are announced by `cli` right after the request commits, through `Engine.Queued` and `Engine.Cancelled`; `Cancelled` also closes the pull request of a cancelled deployment that had started pinning.
 
 ### The late-pin race
 
 When a rollback cancels an in-flight deploy, the cancel is authoritative in Postgres: the worker's next transition fails with `ErrStateConflict`, and its next heartbeat loses the lease, which cancels the handler context in `queue.Runner`. But a worker already inside `Pin` can still land its commit for up to one heartbeat interval. Because the cancel removed its queue entry, the rollback does not wait for that lease and may run its own pin first, as a no-op if the target digest is still pinned; the cancelled worker's pin would then overwrite the rollback.
 
-The engine closes the window cheaply: before a rollback moves to `succeeded`, it reads `PinWriter.Current` and, if the pinned digest is not the rollback's digest, pins again (and waits for sync again). Delaying every rollback by a lease length was rejected; a final check costs one read.
+The engine closes the window cheaply: before a rollback moves to `succeeded`, it calls `Pin` again with `Repin` set ([gitops.md](gitops.md#restarts)). When the rollback's digest is still pinned, nothing is written and `Pin` returns the rollback's newest pin commit; if that is the one already recorded, the rollback succeeds. Otherwise (a late pin replaced the digest and `Pin` wrote it again, or an earlier claim wrote it again and was interrupted) the engine waits for Argo CD to sync that commit, runs the `after` gates again with `Reevaluate` (their verdicts are sticky, so `Evaluate` would only return the passes recorded for the replaced pin), records the commit and evaluates the gates for the new pin, all while staying in `verifying` (there is no transition back to `syncing`). The commit is recorded only after the gates were run again, so an interrupted claim repeats the wait and the re-evaluation instead of trusting the old verdicts. Re-pins are bounded by the 1 hour verify deadline ([engine.md](engine.md#error-classification-and-deadlines)). Delaying every rollback by a lease length was rejected; a final check costs one read of the pin file and its history. The interrupted worker also abandons its pull request when it sees that its deployment was cancelled.
 
 ## API
 
