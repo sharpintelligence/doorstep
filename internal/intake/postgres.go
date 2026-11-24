@@ -26,7 +26,7 @@ func (p *PostgresCommits) Tracked(ctx context.Context, repository, sha string) (
 
 func (p *PostgresCommits) Settle(ctx context.Context, id core.TrackedCommitID, eval core.ChecksEvaluation, enqueue EnqueueFunc) (core.TrackedCommit, bool, error) {
 	return p.store.SettleTrackedCommit(ctx, id, eval, func(tx *store.Store) (core.DeploymentID, error) {
-		return enqueue(ctx, p.queueFor(tx))
+		return enqueue(ctx, p.queueFor(tx), tx)
 	})
 }
 

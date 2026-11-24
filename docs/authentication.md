@@ -217,10 +217,12 @@ The `audit_log` table records who asked doorstep to do something. It complements
 | `auth.login`, `auth.logout` | the sign-in handler |
 | `token.create`, `token.revoke` | `doorstep token`, and later the token API |
 | `session.revoke` | `doorstep session revoke` |
-| `deploy.request`, `deploy.cancel`, `rollback.request` | the API and UI, when they land |
+| `rollback.request` | `POST /api/v1/apps/{app}/rollback` ([rollback.md](rollback.md)), in the same transaction as the rollback deployment and its block |
+| `block.create`, `block.clear` | `POST /api/v1/apps/{app}/blocks` (only when a new block is created) and `DELETE /api/v1/apps/{app}/blocks/{ref}` |
+| `deploy.request`, `deploy.cancel` | the API and UI, when they land |
 | `lock.acquire`, `lock.release` | the locks feature, when it lands |
 
-The `deploy`, `rollback` and `lock` actions are reserved constants only: nothing records them yet, because their endpoints do not exist. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
+Rollback and block requests need the `deployer` role and record the caller's actor and role. The `deploy` and `lock` actions are reserved constants only: nothing records them yet. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
 
 Each row holds the time, the actor (kind, ID and display name), the actor's role when known, the action, the target app and environment and the deployment ID when they apply, and a JSON object with details. Actions are dot-separated lowercase words; new features add constants to `core` without a schema change.
 

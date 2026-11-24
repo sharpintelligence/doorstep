@@ -73,27 +73,27 @@ func toLockResponse(l core.Lock) lockResponse {
 	return resp
 }
 
-func (a *api) lockApp(w http.ResponseWriter, r *http.Request, actor string) {
+func (a *api) lockApp(w http.ResponseWriter, r *http.Request, caller Caller) {
 	app := r.PathValue("app")
 	if !a.known(app) {
 		writeError(w, http.StatusNotFound, codeNotFound, "unknown app "+app)
 		return
 	}
 	target := core.AppTarget(app)
-	a.lock(w, r, actor, &target)
+	a.lock(w, r, caller.Actor.String(), &target)
 }
 
-func (a *api) lockGlobal(w http.ResponseWriter, r *http.Request, actor string) {
-	a.lock(w, r, actor, nil)
+func (a *api) lockGlobal(w http.ResponseWriter, r *http.Request, caller Caller) {
+	a.lock(w, r, caller.Actor.String(), nil)
 }
 
-func (a *api) unlockApp(w http.ResponseWriter, r *http.Request, actor string) {
+func (a *api) unlockApp(w http.ResponseWriter, r *http.Request, caller Caller) {
 	target := core.AppTarget(r.PathValue("app"))
-	a.unlock(w, r, actor, &target)
+	a.unlock(w, r, caller.Actor.String(), &target)
 }
 
-func (a *api) unlockGlobal(w http.ResponseWriter, r *http.Request, actor string) {
-	a.unlock(w, r, actor, nil)
+func (a *api) unlockGlobal(w http.ResponseWriter, r *http.Request, caller Caller) {
+	a.unlock(w, r, caller.Actor.String(), nil)
 }
 
 func (a *api) lock(w http.ResponseWriter, r *http.Request, actor string, target *core.Target) {
@@ -157,7 +157,7 @@ func (a *api) unlock(w http.ResponseWriter, r *http.Request, actor string, targe
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *api) listLocks(w http.ResponseWriter, r *http.Request, _ string) {
+func (a *api) listLocks(w http.ResponseWriter, r *http.Request, _ Caller) {
 	locks, err := a.locks.List(r.Context())
 	if err != nil {
 		a.internalError(w, r, err)

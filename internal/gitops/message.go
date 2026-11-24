@@ -55,6 +55,7 @@ func FormatMessage(req Request, previous core.Digest, url string) (string, strin
 		Digest:         req.Digest,
 		PreviousDigest: previous,
 		Blocks:         req.Blocks,
+		Unblocks:       req.Unblocks,
 		URL:            url,
 	}
 	if req.RollbackOf != nil {

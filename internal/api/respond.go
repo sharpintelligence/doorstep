@@ -21,6 +21,9 @@ const (
 	codeMethodNotAllowed     = "method_not_allowed"
 	codeLocked               = "locked"
 	codeContended            = "contended"
+	codeNoRollbackTarget     = "no_rollback_target"
+	codeRollbackInProgress   = "rollback_in_progress"
+	codeBlocked              = "blocked"
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeInternal             = "internal"
 )

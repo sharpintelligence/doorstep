@@ -33,6 +33,7 @@ type Push struct {
 type Result struct {
 	Commit   core.TrackedCommit
 	Enqueued bool
+	Blocked  *core.Block
 }
 
 type Service struct {
@@ -261,7 +262,17 @@ func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSna
 	app := s.targets[c.Target]
 	state, checks := Evaluate(app.RequiredChecks, read.snapshot)
 	eval := core.ChecksEvaluation{State: state, Checks: checks, ReadAt: read.readAt}
-	settled, enqueued, err := s.commits.Settle(ctx, c.ID, eval, func(ctx context.Context, q Queue) (core.DeploymentID, error) {
+	var blocked *core.Block
+	settled, enqueued, err := s.commits.Settle(ctx, c.ID, eval, func(ctx context.Context, q Queue, b Blocks) (core.DeploymentID, error) {
+		blocked = nil
+		block, found, err := b.Blocked(ctx, c.Target, c.Commit)
+		if err != nil {
+			return 0, fmt.Errorf("check blocks: %w", err)
+		}
+		if found {
+			blocked = &block
+			return 0, &core.BlockedError{Block: block}
+		}
 		d, err := q.Enqueue(ctx, app.deployment(c))
 		return d.ID, err
 	})
@@ -270,10 +281,14 @@ func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSna
 		log.WarnContext(ctx, "settling commit checks failed", "error", err)
 		return Result{Commit: c}, fmt.Errorf("settle %s: %w", c.Commit.SHA, err)
 	}
-	if enqueued {
+	switch {
+	case enqueued:
 		log.InfoContext(ctx, "evaluated commit checks", "enqueued", true, "deployment_id", int64(*settled.DeploymentID))
-	} else {
+	case blocked != nil:
+		log.InfoContext(ctx, "commit is blocked; not enqueued",
+			"block_id", int64(blocked.ID), "reason", blocked.Reason, "created_by", blocked.CreatedBy)
+	default:
 		log.InfoContext(ctx, "evaluated commit checks", "enqueued", false, "saved_state", string(settled.ChecksState))
 	}
-	return Result{Commit: settled, Enqueued: enqueued}, nil
+	return Result{Commit: settled, Enqueued: enqueued, Blocked: blocked}, nil
 }

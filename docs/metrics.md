@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment, rollback and gate series appear once the engine records into them. Until then `doorstep_build_info`, `doorstep_notifications_total`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total` series is created at zero on start.
+Deployment and gate series appear once the engine records into them; `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). Until then `doorstep_build_info`, `doorstep_notifications_total`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total` series is created at zero on start.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |

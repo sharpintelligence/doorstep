@@ -53,6 +53,8 @@ func TestRequestValidate(t *testing.T) {
 		{name: "rollback without target", mutate: func(r *Request) { r.Kind = core.KindRollback }, wantErr: true},
 		{name: "deploy with rollback target", mutate: func(r *Request) { *r = rollbackRequest(); r.Kind = core.KindDeploy }, wantErr: true},
 		{name: "bad block", mutate: func(r *Request) { r.Blocks = []core.Digest{"sha256:x"} }, wantErr: true},
+		{name: "bad unblock", mutate: func(r *Request) { r.Unblocks = []core.Digest{"sha256:x"} }, wantErr: true},
+		{name: "valid unblock", mutate: func(r *Request) { r.Unblocks = []core.Digest{digestA} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

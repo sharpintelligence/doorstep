@@ -60,6 +60,8 @@ If the request is urgent and the existing deploy is still `queued` at a lower pr
 
 Enqueue serialises on the app's row (`SELECT ... FOR NO KEY UPDATE`), so concurrent requests for the same commit create one deployment.
 
+A rollback request ([rollback.md](rollback.md)) queues its rollback at `rollback` priority and, in the same transaction, cancels the in-flight deploy it replaces and every queued deploy of the commit it blocks. Other queued deploys stay and run after the rollback. The enqueue itself never refuses a blocked version: intake refuses blocked commits before enqueueing, and the engine refuses blocked digests after resolving.
+
 ## Leases
 
 A claim leases the entry to a worker for `queue.Options.Lease` (default 60 s), measured on the database clock.

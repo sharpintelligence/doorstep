@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -628,6 +629,34 @@ func TestSettleTrackedCommitRollsBackOnEnqueueError(t *testing.T) {
 
 	if _, ok := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt)); !ok {
 		t.Error("retry with the same snapshot did not enqueue")
+	}
+}
+
+func TestSettleTrackedCommitKeepsBlockedCommitOpen(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	c := mustTrack(t, st, newTrackedCommit("blog", shaOf('a')))
+	blocked := &core.BlockedError{Block: core.Block{Target: c.Target, Commit: c.Commit, CreatedBy: "user:alice"}}
+
+	got, ok, err := st.SettleTrackedCommit(t.Context(), c.ID, evaluation(core.ChecksSuccess, evaluatedAt), func(tx *store.Store) (core.DeploymentID, error) {
+		if _, err := enqueueDeployment(t, c)(tx); err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("refused: %w", blocked)
+	})
+	if err != nil || ok {
+		t.Fatalf("SettleTrackedCommit = %v, %v, want no error and not enqueued", ok, err)
+	}
+	if !got.Open() || got.ChecksState != core.ChecksSuccess || got.EvaluatedAt == nil || got.DeploymentID != nil {
+		t.Errorf("tracked commit = %+v, want it open with the evaluation saved", got)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM deployments"); n != 0 {
+		t.Errorf("%d deployments left after a blocked enqueue, want 0", n)
+	}
+
+	if _, ok := mustSettle(t, st, c, evaluation(core.ChecksSuccess, evaluatedAt.Add(time.Minute))); !ok {
+		t.Error("settling again once unblocked did not enqueue")
 	}
 }
 

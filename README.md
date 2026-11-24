@@ -44,6 +44,7 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 - [HTTP API](docs/api.md)
 - [GitHub App](docs/github-app.md)
 - [Locks](docs/locks.md)
+- [Rollback and blocks](docs/rollback.md)
 - [Notifications](docs/notifications.md)
 - [Metrics](docs/metrics.md)
 - [Development](docs/development.md)

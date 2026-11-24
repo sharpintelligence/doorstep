@@ -10,7 +10,11 @@ type Queue interface {
 	Enqueue(ctx context.Context, d core.Deployment) (core.Deployment, error)
 }
 
-type EnqueueFunc func(ctx context.Context, q Queue) (core.DeploymentID, error)
+type Blocks interface {
+	Blocked(ctx context.Context, t core.Target, commit core.Commit) (core.Block, bool, error)
+}
+
+type EnqueueFunc func(ctx context.Context, q Queue, b Blocks) (core.DeploymentID, error)
 
 type HeadCheck func(ctx context.Context) (bool, error)
 

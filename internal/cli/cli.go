@@ -41,6 +41,10 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newLockCommand(lookupEnv),
 		newUnlockCommand(lookupEnv),
 		newLocksCommand(lookupEnv),
+		newRollbackCommand(lookupEnv),
+		newBlockCommand(lookupEnv),
+		newUnblockCommand(lookupEnv),
+		newBlocksCommand(lookupEnv),
 		newNotifyCommand(lookupEnv),
 		newArgoCDCommand(lookupEnv),
 	)

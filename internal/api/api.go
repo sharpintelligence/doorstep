@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
@@ -17,20 +18,35 @@ var (
 	ErrForbidden       = errors.New("forbidden")
 )
 
+type Caller struct {
+	Actor core.Actor
+	Role  core.Role
+}
+
 type Authenticator interface {
-	Authenticate(r *http.Request, required core.Role) (actor string, err error)
+	Authenticate(r *http.Request, required core.Role) (Caller, error)
 }
 
 type RejectAll struct{}
 
-func (RejectAll) Authenticate(*http.Request, core.Role) (string, error) {
-	return "", ErrUnauthenticated
+func (RejectAll) Authenticate(*http.Request, core.Role) (Caller, error) {
+	return Caller{}, ErrUnauthenticated
 }
 
 type LockService interface {
 	Lock(ctx context.Context, req core.LockRequest) (core.Lock, error)
 	Unlock(ctx context.Context, target *core.Target, actor string) (core.Lock, error)
 	List(ctx context.Context) ([]core.Lock, error)
+}
+
+type RollbackService interface {
+	Rollback(ctx context.Context, req rollback.Request) (rollback.Result, error)
+}
+
+type BlockService interface {
+	Block(ctx context.Context, req rollback.BlockRequest) (core.Block, bool, error)
+	Unblock(ctx context.Context, t core.Target, ref core.BlockRef, actor core.Actor, role core.Role) ([]core.Block, error)
+	ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error)
 }
 
 type KnownApp func(app string) bool
@@ -46,30 +62,36 @@ type Options struct {
 	Queue         QueueReader
 	Apps          AppCatalog
 	Locks         LockService
+	Rollbacks     RollbackService
+	Blocks        BlockService
 	KnownApp      KnownApp
 	Authenticator Authenticator
 	Middleware    func(http.Handler) http.Handler
 }
 
 type api struct {
-	logger  *slog.Logger
-	history History
-	queue   QueueReader
-	apps    AppCatalog
-	locks   LockService
-	known   KnownApp
-	auth    Authenticator
+	logger    *slog.Logger
+	history   History
+	queue     QueueReader
+	apps      AppCatalog
+	locks     LockService
+	rollbacks RollbackService
+	blocks    BlockService
+	known     KnownApp
+	auth      Authenticator
 }
 
 func New(opts Options) http.Handler {
 	a := &api{
-		logger:  opts.Logger,
-		history: opts.History,
-		queue:   opts.Queue,
-		apps:    opts.Apps,
-		locks:   opts.Locks,
-		known:   opts.KnownApp,
-		auth:    opts.Authenticator,
+		logger:    opts.Logger,
+		history:   opts.History,
+		queue:     opts.Queue,
+		apps:      opts.Apps,
+		locks:     opts.Locks,
+		rollbacks: opts.Rollbacks,
+		blocks:    opts.Blocks,
+		known:     opts.KnownApp,
+		auth:      opts.Authenticator,
 	}
 	if a.logger == nil {
 		a.logger = slog.New(slog.DiscardHandler)
@@ -85,6 +107,12 @@ func New(opts Options) http.Handler {
 	if a.locks != nil && a.known != nil && a.auth != nil {
 		a.registerLocks(mux)
 	}
+	if a.rollbacks != nil && a.known != nil && a.auth != nil {
+		a.registerRollback(mux)
+	}
+	if a.blocks != nil && a.known != nil && a.auth != nil {
+		a.registerBlocks(mux)
+	}
 	mux.HandleFunc(Prefix, func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such API endpoint")
 	})
@@ -96,18 +124,18 @@ func New(opts Options) http.Handler {
 	return handler
 }
 
-func (a *api) authenticated(required core.Role, next func(w http.ResponseWriter, r *http.Request, actor string)) http.Handler {
+func (a *api) authenticated(required core.Role, next func(w http.ResponseWriter, r *http.Request, caller Caller)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actor, err := a.auth.Authenticate(r, required)
+		caller, err := a.auth.Authenticate(r, required)
 		if errors.Is(err, ErrForbidden) {
 			writeError(w, http.StatusForbidden, codeForbidden, "your role does not allow this")
 			return
 		}
-		if err != nil || actor == "" {
+		if err != nil || caller.Actor.Validate() != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="doorstep"`)
 			writeError(w, http.StatusUnauthorized, codeUnauthorized, "authentication required")
 			return
 		}
-		next(w, r, actor)
+		next(w, r, caller)
 	})
 }

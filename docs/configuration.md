@@ -204,6 +204,18 @@ Thin clients of the [lock API](locks.md#api) on a running server. `lock` freezes
 
 The lock owner is the identity the server derives from the token, never a command-line value. Requests time out after 30 seconds, redirects are not followed (so the token is never forwarded to another host), and responses larger than 1 MiB are rejected. When the server refuses a request, the command prints the server's error message, for example `doorstep: blog is already locked by alice: database migration`, and exits 1.
 
+## `doorstep rollback`, `block`, `unblock` and `blocks`
+
+```sh
+doorstep rollback blog
+doorstep rollback blog --to 41 --reason "checkout errors" -o json
+doorstep blocks blog
+doorstep block blog sha256:4f1c... --reason "leaks memory"
+doorstep unblock blog 0123456789abcdef0123456789abcdef01234567
+```
+
+Thin clients of the [rollback and block API](rollback.md#api), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above. `rollback` queues a rollback of the app to its previous good version, or to the successful deployment given with `--to`, and blocks the version it replaces; `--reason` is optional and recorded on the block. `block` blocks a digest or a 40-character commit SHA by hand and needs `--reason`; `unblock` clears the matching blocks; `blocks` lists the active ones as a table or, with `-o json`, as JSON. The semantics are described in [rollback.md](rollback.md).
+
 ## `doorstep version`
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.

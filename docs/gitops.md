@@ -100,9 +100,11 @@ A rollback uses `rollback(<app>)` in the subject and explains which deployment i
 | `Doorstep-Digest` | always | the digest now pinned |
 | `Doorstep-Previous-Digest` | when the file held a digest before | the digest this commit replaced |
 | `Doorstep-Rollback-Of` | rollbacks | id of the deployment being reverted |
-| `Doorstep-Block` | rollbacks that block digests, one per digest | a digest that must not be deployed again until unblocked |
-| `Doorstep-Unblock` | unblock commits, one per digest | a digest whose block is cleared |
+| `Doorstep-Block` | `Request.Blocks`, one per digest | a digest that must not be deployed again until unblocked |
+| `Doorstep-Unblock` | `Request.Unblocks`, one per digest | a digest whose block is cleared |
 | `Doorstep-URL` | when doorstep knows its public URL | link to the deployment in doorstep |
+
+Blocks and unblocks are recorded in Postgres first and ride on the app's next pin commit: the engine passes the app's pending block trailers as `Request.Blocks` and `Request.Unblocks` on every pin, deploy or rollback, so a rollback's own pin commit normally carries the `Doorstep-Block` of the digest it replaces and an unblock appears on a later deploy's commit. No commit is written only to carry a trailer ([rollback.md](rollback.md#blocks-in-git), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)).
 
 These trailers are a durable contract: doorstep reads previous digests and blocks back from the GitOps branch's history, so the history survives losing doorstep's database. Values containing a newline or other control character are rejected, so a trailer cannot be forged through an app name or URL.
 

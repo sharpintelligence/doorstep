@@ -61,6 +61,31 @@ func TestPinCommitRepinReturnsPrevious(t *testing.T) {
 	}
 }
 
+func TestPinCommitCarriesBlockAndUnblockTrailers(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t, Options{})
+	f.repo.Seed("main", kustomizationPath, kustomization(digestA))
+	req := deployRequest()
+	req.Blocks = []core.Digest{digestC}
+	req.Unblocks = []core.Digest{digestA}
+
+	got, err := f.writer.Pin(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Pin() error = %v", err)
+	}
+	if !got.Changed {
+		t.Fatalf("Pin() = %+v, want a new commit", got)
+	}
+	trailers := ParseMessage(f.mainMessage(t))
+	if len(trailers.Blocks) != 1 || trailers.Blocks[0] != digestC {
+		t.Errorf("Doorstep-Block = %v, want [%s]", trailers.Blocks, digestC)
+	}
+	if len(trailers.Unblocks) != 1 || trailers.Unblocks[0] != digestA {
+		t.Errorf("Doorstep-Unblock = %v, want [%s]", trailers.Unblocks, digestA)
+	}
+}
+
 func TestPinCommitResumeAfterWrite(t *testing.T) {
 	t.Parallel()
 

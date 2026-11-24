@@ -2,7 +2,7 @@
 
 doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mounted once by `serve`.
 
-> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Taking or releasing a freeze lock needs `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
+> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Taking or releasing a freeze lock, requesting a rollback and adding or clearing a block need `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
 
 ## Conventions
 
@@ -22,10 +22,14 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | 404 | `not_found` | unknown resource or unknown API path |
   | 405 | `method_not_allowed` | wrong method; the `Allow` header lists the right ones |
   | 409 | `locked` | the app or the global scope is already frozen |
+  | 409 | `no_rollback_target` | a rollback has nothing to roll back, or no earlier successful, unblocked version to roll back to |
+  | 409 | `rollback_in_progress` | a rollback of the app is already queued or in flight; the body also carries `deployment` |
+  | 409 | `blocked` | the requested rollback target is blocked; the body also carries `block` |
   | 415 | `unsupported_media_type` | a request body that is not `application/json` |
   | 500 | `internal` | anything else; details are logged, never returned |
+  | 503 | `contended` | a lock or the app's deployments changed while the request ran; retry after `Retry-After` |
 
-The lock endpoints (`/api/v1/apps/{app}/lock`, `/api/v1/lock`, `/api/v1/locks`) are documented in [locks.md](locks.md#api).
+The lock endpoints (`/api/v1/apps/{app}/lock`, `/api/v1/lock`, `/api/v1/locks`) are documented in [locks.md](locks.md#api). The rollback and block endpoints (`POST /api/v1/apps/{app}/rollback`, `GET` and `POST /api/v1/apps/{app}/blocks`, `DELETE /api/v1/apps/{app}/blocks/{ref}`) are documented in [rollback.md](rollback.md#api).
 
 ## `GET /api/v1/apps/{app}/queue`
 
@@ -188,4 +192,4 @@ Optional fields and empty strings are omitted. `gitops` and `argocd` are always 
 
 ## Extending the API
 
-Each resource registers its routes in its own file (`queue.go` has `registerQueue`) with full-path `ServeMux` patterns under `api.Prefix`, and depends on small interfaces declared next to it, so handlers are tested with fakes and without Postgres. Shared helpers (`writeJSON`, `writeError`, `methodNotAllowed`) are in `respond.go`. `api.Options.Middleware` wraps the whole API in one place; `serve` applies `RequireRole(viewer)` there, and routes that change state ask `api.Authenticator` for a higher role.
+Each resource registers its routes in its own file (`queue.go` has `registerQueue`) with full-path `ServeMux` patterns under `api.Prefix`, and depends on small interfaces declared next to it, so handlers are tested with fakes and without Postgres. Shared helpers (`writeJSON`, `writeError`, `methodNotAllowed`) are in `respond.go`. `api.Options.Middleware` wraps the whole API in one place; `serve` applies `RequireRole(viewer)` there, and routes that change state ask `api.Authenticator` for a higher role. It returns an `api.Caller` with the structured `core.Actor` and `core.Role`, which handlers pass on for audit rows (`caller.Actor.String()` is the owner or requester string).

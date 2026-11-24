@@ -29,16 +29,18 @@ var (
 
 type fakeAuth struct{}
 
-func (fakeAuth) Authenticate(r *http.Request, _ core.Role) (string, error) {
+var alice = core.Actor{Kind: core.ActorUser, ID: "alice"}
+
+func (fakeAuth) Authenticate(r *http.Request, required core.Role) (Caller, error) {
 	if r.Header.Get("Authorization") == goodToken {
-		return "alice", nil
+		return Caller{Actor: alice, Role: required}, nil
 	}
-	return "", ErrUnauthenticated
+	return Caller{}, ErrUnauthenticated
 }
 
 type emptyActorAuth struct{}
 
-func (emptyActorAuth) Authenticate(*http.Request, core.Role) (string, error) { return "", nil }
+func (emptyActorAuth) Authenticate(*http.Request, core.Role) (Caller, error) { return Caller{}, nil }
 
 type fakeLocks struct {
 	mu        sync.Mutex
@@ -237,11 +239,11 @@ func TestAuthentication(t *testing.T) {
 
 type roleAuth struct{ role core.Role }
 
-func (a roleAuth) Authenticate(_ *http.Request, required core.Role) (string, error) {
+func (a roleAuth) Authenticate(_ *http.Request, required core.Role) (Caller, error) {
 	if !a.role.Allows(required) {
-		return "", ErrForbidden
+		return Caller{}, ErrForbidden
 	}
-	return "alice", nil
+	return Caller{Actor: alice, Role: a.role}, nil
 }
 
 func TestAuthorization(t *testing.T) {
@@ -304,10 +306,10 @@ func TestLock(t *testing.T) {
 			name:       "app lock",
 			req:        request{method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"database migration"}`},
 			wantStatus: http.StatusCreated,
-			wantBody:   map[string]any{"scope": "app", "app": "web", "owner": "alice", "reason": "database migration", "created_at": "2026-11-23T12:00:00Z", "expires_at": nil},
+			wantBody:   map[string]any{"scope": "app", "app": "web", "owner": "user:alice", "reason": "database migration", "created_at": "2026-11-23T12:00:00Z", "expires_at": nil},
 			wantReq: func(t *testing.T, req core.LockRequest) {
 				t.Helper()
-				if req.Target == nil || *req.Target != web || req.Owner != "alice" || req.ExpiresIn != nil || req.ExpiresAt != nil {
+				if req.Target == nil || *req.Target != web || req.Owner != "user:alice" || req.ExpiresIn != nil || req.ExpiresAt != nil {
 					t.Errorf("request = %+v", req)
 				}
 			},
@@ -316,7 +318,7 @@ func TestLock(t *testing.T) {
 			name:       "global lock with expires_in",
 			req:        request{method: http.MethodPost, path: "/api/v1/lock", body: `{"reason":"holiday","expires_in":"2h"}`, contentType: "application/json; charset=utf-8"},
 			wantStatus: http.StatusCreated,
-			wantBody:   map[string]any{"scope": "global", "owner": "alice", "reason": "holiday", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
+			wantBody:   map[string]any{"scope": "global", "owner": "user:alice", "reason": "holiday", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
 			wantReq: func(t *testing.T, req core.LockRequest) {
 				t.Helper()
 				if req.Target != nil || req.ExpiresIn == nil || *req.ExpiresIn != 2*time.Hour {
@@ -328,7 +330,7 @@ func TestLock(t *testing.T) {
 			name:       "expires_at",
 			req:        request{method: http.MethodPost, path: "/api/v1/apps/api/lock", body: `{"reason":"r","expires_at":"2026-11-23T16:00:00+02:00"}`},
 			wantStatus: http.StatusCreated,
-			wantBody:   map[string]any{"scope": "app", "app": "api", "owner": "alice", "reason": "r", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
+			wantBody:   map[string]any{"scope": "app", "app": "api", "owner": "user:alice", "reason": "r", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
 			wantReq: func(t *testing.T, req core.LockRequest) {
 				t.Helper()
 				if req.ExpiresAt == nil || !req.ExpiresAt.Equal(expiresAt) || req.ExpiresIn != nil {
@@ -552,14 +554,14 @@ func TestUnlock(t *testing.T) {
 		wantCode    string
 		wantUnlocks []string
 	}{
-		{name: "app", path: "/api/v1/apps/web/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"web by alice"}},
-		{name: "global", path: "/api/v1/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"global by alice"}},
-		{name: "not locked", path: "/api/v1/apps/web/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"web by alice"}},
-		{name: "global not locked", path: "/api/v1/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"global by alice"}},
-		{name: "app removed from the configuration", path: "/api/v1/apps/gone/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"gone by alice"}},
-		{name: "unknown app not locked", path: "/api/v1/apps/nope/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"nope by alice"}},
-		{name: "invalid", path: "/api/v1/lock", unlockErr: core.ErrInvalidLock, wantStatus: http.StatusBadRequest, wantCode: "invalid_request", wantUnlocks: []string{"global by alice"}},
-		{name: "internal error", path: "/api/v1/lock", unlockErr: errBoom, wantStatus: http.StatusInternalServerError, wantCode: "internal", wantUnlocks: []string{"global by alice"}},
+		{name: "app", path: "/api/v1/apps/web/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"web by user:alice"}},
+		{name: "global", path: "/api/v1/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"global by user:alice"}},
+		{name: "not locked", path: "/api/v1/apps/web/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"web by user:alice"}},
+		{name: "global not locked", path: "/api/v1/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"global by user:alice"}},
+		{name: "app removed from the configuration", path: "/api/v1/apps/gone/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"gone by user:alice"}},
+		{name: "unknown app not locked", path: "/api/v1/apps/nope/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"nope by user:alice"}},
+		{name: "invalid", path: "/api/v1/lock", unlockErr: core.ErrInvalidLock, wantStatus: http.StatusBadRequest, wantCode: "invalid_request", wantUnlocks: []string{"global by user:alice"}},
+		{name: "internal error", path: "/api/v1/lock", unlockErr: errBoom, wantStatus: http.StatusInternalServerError, wantCode: "internal", wantUnlocks: []string{"global by user:alice"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
