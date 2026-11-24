@@ -8,20 +8,21 @@ Small teams and homelabs that run Argo CD usually deploy by editing an image pin
 
 ## How it works
 
-doorstep sits upstream of Argo CD. It observes merges and CI results on GitHub, queues each commit per app and environment, resolves the image tag to an immutable digest and commits that digest to your GitOps repository. Git is the only thing doorstep writes: Argo CD stays the only thing that applies manifests, and doorstep only reads its `Application` resources. It waits for the Application to sync and become healthy, evaluates gates, and rolls back by re-pinning the previous digest.
+doorstep sits upstream of Argo CD. It observes merges and CI results on GitHub, queues each commit per app and environment, resolves the image tag to an immutable digest and commits that digest to your GitOps repository. Git is the only thing doorstep writes: Argo CD stays the only thing that applies manifests, and doorstep only reads its `Application` resources (plus pods, if you opt in to retry diagnostics). It waits for the Application to sync and become healthy, evaluates gates, and rolls back by re-pinning the previous digest.
 
 ```mermaid
 flowchart TD
     merge["Merge + green CI"] --> intake["Intake: webhook or poll"]
     intake --> queue["Queue + locks: one deploy per app"]
     queue --> before["Before gates"]
-    before --> resolve["Resolve tag to digest"]
+    before -->|fail| failed(["Failed"])
+    before -->|pass| resolve["Resolve tag to digest"]
     resolve --> pin["Commit the pin to the GitOps repo"]
     pin --> sync["Argo CD syncs the pin"]
     sync -->|not healthy, transient| sync
     sync --> after["After gates"]
     after -->|pass| succeeded(["Succeeded"])
-    after -->|fail| failed(["Failed"])
+    after -->|fail| failed
     failed -.->|optional| rollback["Automatic rollback: re-pin the previous digest"]
 ```
 

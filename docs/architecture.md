@@ -12,7 +12,7 @@ doorstep is a deployment engine that sits upstream of [Argo CD](https://argo-cd.
 - it watches Argo CD until the commit is synced and healthy, evaluates gates (health, metrics, soak time) and rolls back by re-pinning the previous digest when a gate fails;
 - it notifies people and records every transition in a queryable history.
 
-doorstep never talks to workloads directly and never mutates Argo CD. Git is the only thing it writes to; Argo CD remains the only thing that applies manifests to the cluster. doorstep only observes Argo CD `Application` resources and, when the `job` gate is enabled, validation Jobs that Argo CD runs as PostSync hooks ([ADR 0016](decisions/0016-validation-job-gate.md)).
+doorstep never talks to workloads directly and never mutates Argo CD. Git is the only thing it writes to; Argo CD remains the only thing that applies manifests to the cluster. doorstep only observes Argo CD `Application` resources and, when the `job` gate is enabled, validation Jobs that Argo CD runs as PostSync hooks ([ADR 0016](decisions/0016-validation-job-gate.md)). With the opt-in pod diagnostics it also lists pods to tell transient failures from bad versions ([ADR 0017](decisions/0017-retry-before-rollback.md)).
 
 ```mermaid
 flowchart LR
@@ -35,9 +35,10 @@ flowchart LR
 ```mermaid
 flowchart TD
     intake["Intake: webhook, poll, API, CLI"] --> queue["Queue + lock: one active deployment per app and environment, freeze locks"]
-    queue --> resolve["Registry: resolve tag to digest"]
-    resolve --> before["Before gates: checks, lock, schedule, external, backup webhook for migrations"]
-    before --> pin["GitOps: commit pin via GitHub API"]
+    queue --> before["Before gates: checks, lock, schedule, external, backup webhook for migrations"]
+    before -->|fail| failed
+    before -->|pass| resolve["Registry: resolve tag to digest"]
+    resolve --> pin["GitOps: commit pin via GitHub API"]
     pin --> sync["Argo CD: wait until the Application is synced to the revision"]
     sync -->|not healthy in time: classify| retry{"Transient or unknown, budget left?"}
     retry -->|yes: wait with backoff| sync
@@ -50,9 +51,11 @@ flowchart TD
     migration -->|yes| withheld(["Rollback withheld: a person decides"])
 ```
 
+Notifications report queued, started and every terminal state (Slack, webhooks, GitHub deployment statuses) and lock changes. Every gate result is mirrored to a GitHub commit status, and history records every transition.
+
 ## Package map
 
-There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so the module exposes no public Go API. Kubernetes install manifests live in `deploy/kustomize` (a base, optional registry-credentials and job-gate components and an example overlay) with a test that keeps them consistent with the code; see [install.md](install.md).
+There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so the module exposes no public Go API. Kubernetes install manifests live in `deploy/kustomize` (a base, optional registry-credentials, job-gate and pod-diagnostics components and an example overlay) with a test that keeps them consistent with the code; see [install.md](install.md).
 
 | Package | Responsibility |
 | --- | --- |
@@ -440,7 +443,7 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 - In pull request mode doorstep only merges its own pull request: the head must be a branch of the GitOps repository itself, the pull request must change exactly the pin file, that file must be byte-equal to doorstep's edit of the current base, and the merge is pinned to the head SHA that was checked. Anyone who can push to the branch therefore cannot use the App's write access to merge other changes.
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed or anything is stored; the body is capped at 5 MiB, there is no unsigned mode (without a secret the route is not mounted), and the secret is redacted like the App key.
 - Outbound notifications use one HTTP client with a 10 s timeout that never follows redirects, so signed payloads and secret webhook URLs stay on the configured host. Slack webhook URLs (and webhook URLs from `url_env`/`url_file`) are credentials: they are read per send, never logged, and removed from transport errors. Generic webhooks are signed with HMAC-SHA256 over the raw body (`X-Doorstep-Signature-256`). Targets on private addresses are allowed, since they are operator-configured and usually on the home network. Response bodies are read through a 4 KiB limit and only 256 bytes are quoted in logs.
-- Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only; doorstep uses `get` and `watch`. doorstep never patches, syncs or refreshes Applications. The install base grants exactly this; see [install.md](install.md#rbac). The opt-in `job-gate` component adds `get` on `batch/v1` Jobs for the `job` gate, and nothing that writes, lists or reads Pods, pod logs or Secrets ([install.md](install.md#validation-jobs)); `internal/kube` has no write methods.
+- Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources by default; doorstep uses `get` and `watch`. doorstep never patches, syncs or refreshes Applications. The install base grants exactly this; see [install.md](install.md#rbac). The opt-in `job-gate` component adds `get` on `batch/v1` Jobs for the `job` gate, and nothing that writes or reads Secrets or pod logs ([install.md](install.md#validation-jobs)). The opt-in `pod-diagnostics` component adds `list` on Pods for retry diagnostics ([ADR 0017](decisions/0017-retry-before-rollback.md)); `internal/kube` has no write methods.
 - The Kubernetes client sends the ServiceAccount token (re-read from its file for every request, so bound tokens rotate) only to the configured API server, refuses redirects, trusts only the cluster CA bundle, ignores proxy environment variables and bounds every read. A kubeconfig is used only when named explicitly, and credential plugins are never executed ([argocd.md](argocd.md#connecting-to-the-cluster)).
 - Only image digests are pinned, never mutable tags.
 - Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.

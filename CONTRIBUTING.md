@@ -19,7 +19,7 @@ Run commands inside the mise environment, either an activated shell or `mise exe
 just check
 ```
 
-This runs the formatting check, `go vet`, `golangci-lint`, `actionlint`, the `go mod tidy` check and the tests, and is what CI runs. CI also runs `just lint-manifests` (kustomize and kubeconform), `just vuln` (govulncheck) and an image build; both need network access.
+This runs the formatting check, `go vet`, `golangci-lint`, `actionlint`, the `go mod tidy` check and the tests, and is what CI runs. CI also runs `just lint-manifests` (kustomize and kubeconform), `just vuln` (govulncheck) and an image build; all three need network access.
 
 ## Tests
 

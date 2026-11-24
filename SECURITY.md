@@ -4,7 +4,7 @@
 
 | Version | Receives security fixes |
 | --- | --- |
-| Before 1.0 | The latest tagged release and `main`. Fixes are not backported. |
+| Before 1.0 | `main`, and the latest tagged release once one exists. Fixes are not backported. |
 | From 1.0 | The latest minor release. |
 
 ## Reporting a vulnerability

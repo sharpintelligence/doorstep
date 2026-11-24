@@ -15,7 +15,10 @@ import (
 )
 
 var (
-	linkPattern      = regexp.MustCompile(`\]\(([^)\s]+)\)`)
+	linkPattern      = regexp.MustCompile(`\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)`)
+	definitionLink   = regexp.MustCompile(`^\s{0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?`)
+	hrefPattern      = regexp.MustCompile(`href="([^"]+)"`)
+	envTableRow      = regexp.MustCompile("(?m)^\\| `(DOORSTEP_[A-Z0-9_]+)` \\|")
 	schemePattern    = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
 	headingPattern   = regexp.MustCompile(`^#{1,6}\s+(.*?)\s*#*\s*$`)
 	inlineLink       = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
@@ -115,6 +118,45 @@ func anchorsOf(content string) map[string]bool {
 	return anchors
 }
 
+func linkTargets(line string) []string {
+	var targets []string
+	for _, match := range linkPattern.FindAllStringSubmatch(line, -1) {
+		targets = append(targets, match[1])
+	}
+	if match := definitionLink.FindStringSubmatch(line); match != nil {
+		targets = append(targets, match[1])
+	}
+	for _, match := range hrefPattern.FindAllStringSubmatch(line, -1) {
+		targets = append(targets, match[1])
+	}
+	return targets
+}
+
+func TestLinkTargets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"inline", "see [a](docs/a.md#x) now", []string{"docs/a.md#x"}},
+		{"titled", `see [a](docs/a.md "Title") now`, []string{"docs/a.md"}},
+		{"angle brackets", "see [a](<docs/a.md>)", []string{"docs/a.md"}},
+		{"definition", "[ref]: docs/a.md", []string{"docs/a.md"}},
+		{"html", `<a href="docs/a.md">a</a>`, []string{"docs/a.md"}},
+		{"none", "plain text", nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := linkTargets(test.line); !slices.Equal(got, test.want) {
+				t.Errorf("linkTargets(%q) = %v, want %v", test.line, got, test.want)
+			}
+		})
+	}
+}
+
 func TestLinksResolve(t *testing.T) {
 	t.Parallel()
 
@@ -134,8 +176,7 @@ func TestLinksResolve(t *testing.T) {
 		content := readFile(t, file)
 		var problems []string
 		for _, line := range proseLines(content) {
-			for _, match := range linkPattern.FindAllStringSubmatch(line, -1) {
-				target := match[1]
+			for _, target := range linkTargets(line) {
 				if schemePattern.MatchString(target) {
 					continue
 				}
@@ -295,15 +336,47 @@ func stringConstants(files []*ast.File) map[string]string {
 	return constants
 }
 
-func isFlagSet(expr ast.Expr) bool {
-	switch receiver := expr.(type) {
-	case *ast.Ident:
-		return receiver.Name == "flags"
-	case *ast.CallExpr:
-		selector, ok := receiver.Fun.(*ast.SelectorExpr)
-		return ok && (selector.Sel.Name == "Flags" || selector.Sel.Name == "PersistentFlags")
+func isFlagSetCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
 	}
-	return false
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && (selector.Sel.Name == "Flags" || selector.Sel.Name == "PersistentFlags" || selector.Sel.Name == "NewFlagSet")
+}
+
+func flagSetNames(file *ast.File) map[string]bool {
+	names := map[string]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.Field:
+			star, ok := typed.Type.(*ast.StarExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := star.X.(*ast.SelectorExpr)
+			if ok && selector.Sel.Name == "FlagSet" {
+				for _, name := range typed.Names {
+					names[name.Name] = true
+				}
+			}
+		case *ast.AssignStmt:
+			for i, right := range typed.Rhs {
+				if ident, ok := typed.Lhs[min(i, len(typed.Lhs)-1)].(*ast.Ident); ok && isFlagSetCall(right) {
+					names[ident.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return names
+}
+
+func isFlagSet(expr ast.Expr, names map[string]bool) bool {
+	if ident, ok := expr.(*ast.Ident); ok {
+		return names[ident.Name]
+	}
+	return isFlagSetCall(expr)
 }
 
 func collectSurface(t *testing.T) configurationSurface {
@@ -341,13 +414,14 @@ func collectSurface(t *testing.T) configurationSurface {
 
 	constants := stringConstants(cliFiles)
 	for _, file := range cliFiles {
+		flagSets := flagSetNames(file)
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !flagFuncPattern.MatchString(selector.Sel.Name) || !isFlagSet(selector.X) {
+			if !ok || !flagFuncPattern.MatchString(selector.Sel.Name) || !isFlagSet(selector.X, flagSets) {
 				return true
 			}
 			for _, arg := range call.Args {
@@ -389,19 +463,24 @@ func TestConfigurationReferenceIsComplete(t *testing.T) {
 		}
 	}
 
+	indexed := map[string]bool{}
+	for _, match := range envTableRow.FindAllStringSubmatch(reference, -1) {
+		indexed[match[1]] = true
+	}
 	for env := range surface.envs {
 		t.Run(env, func(t *testing.T) {
 			t.Parallel()
-			if !strings.Contains(reference, env) {
-				t.Errorf("docs/configuration.md does not mention %s", env)
+			if !indexed[env] {
+				t.Errorf("docs/configuration.md has no row for %s in the environment variable index", env)
 			}
 		})
 	}
 	for key := range surface.keys {
+		documented := regexp.MustCompile("(?m)^\\|[^|]*`" + regexp.QuoteMeta(key) + "`[^|]*\\||^\\s*(- )?" + regexp.QuoteMeta(key) + ":|`[A-Za-z0-9_.\\[\\]]*\\." + regexp.QuoteMeta(key) + "(\\[\\])?`")
 		t.Run("yaml "+key, func(t *testing.T) {
 			t.Parallel()
-			if !strings.Contains(reference, "`"+key+"`") && !strings.Contains(reference, key+":") && !strings.Contains(reference, "."+key) {
-				t.Errorf("docs/configuration.md does not mention the key %s", key)
+			if !documented.MatchString(reference) {
+				t.Errorf("docs/configuration.md does not document the key %s in a table row, YAML example or dotted path", key)
 			}
 		})
 	}
