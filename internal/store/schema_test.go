@@ -174,6 +174,7 @@ func TestSchemaRejectsInvalidIntakeRows(t *testing.T) {
 		{name: "empty delivery id", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES ('', 'push')", constraint: "webhook_deliveries_delivery_id_check"},
 		{name: "delivery id too long", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES (repeat('x', 129), 'push')", constraint: "webhook_deliveries_delivery_id_check"},
 		{name: "empty event", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES ('d', '')", constraint: "webhook_deliveries_event_check"},
+		{name: "completed before claimed", sql: "INSERT INTO webhook_deliveries (delivery_id, event, completed_at) VALUES ('d', 'push', now() - interval '1 second')", constraint: "webhook_deliveries_completed_at_check"},
 		{name: "second poll state row", sql: "INSERT INTO intake_poll_state (id) VALUES (false)", constraint: "intake_poll_state_id_check"},
 		{name: "duplicate poll state row", sql: "INSERT INTO intake_poll_state DEFAULT VALUES", constraint: "intake_poll_state_pkey"},
 	}

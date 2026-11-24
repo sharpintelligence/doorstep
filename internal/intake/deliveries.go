@@ -23,8 +23,12 @@ func NewPostgresDeliveries(st *store.Store) *PostgresDeliveries {
 	return &PostgresDeliveries{store: st}
 }
 
-func (p *PostgresDeliveries) Claim(ctx context.Context, id, event string) (bool, error) {
-	return p.store.ClaimWebhookDelivery(ctx, id, event)
+func (p *PostgresDeliveries) Claim(ctx context.Context, id, event string, staleAfter time.Duration) (store.DeliveryClaim, error) {
+	return p.store.ClaimWebhookDelivery(ctx, id, event, staleAfter)
+}
+
+func (p *PostgresDeliveries) Complete(ctx context.Context, id string) error {
+	return p.store.CompleteWebhookDelivery(ctx, id)
 }
 
 func (p *PostgresDeliveries) Release(ctx context.Context, id string) error {

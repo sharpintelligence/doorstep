@@ -105,8 +105,11 @@ func TestPollerReadsEachBranchOnce(t *testing.T) {
 	if !slices.Equal(pushes, wantPushes) {
 		t.Errorf("pushes = %+v, want %+v", pushes, wantPushes)
 	}
-	if h.claims.every != time.Minute {
-		t.Errorf("claim interval = %s, want 1m", h.claims.every)
+	if h.claims.lease != time.Minute+5*time.Second || h.poller.Lease() != h.claims.lease {
+		t.Errorf("claim lease = %s, want the cycle timeout plus time to finish", h.claims.lease)
+	}
+	if finished := h.claims.finishedLeases(); !slices.Equal(finished, []time.Time{fakeLease}) || h.claims.every != time.Minute {
+		t.Errorf("finished leases %v with interval %s, want the claimed lease and 1m", finished, h.claims.every)
 	}
 	if _, cycles := h.observer.recorded(); !slices.Equal(cycles, []intake.PollResult{intake.PollSucceeded}) {
 		t.Errorf("cycles = %v, want one success", cycles)
@@ -120,18 +123,24 @@ func TestPollerHandlesOnlyChangedHeads(t *testing.T) {
 	steps := []struct {
 		name       string
 		head       string
+		webhook    string
 		wantPushes []intake.Push
 	}{
 		{name: "first cycle handles the head", head: shaA, wantPushes: []intake.Push{polledPush("Example-User/blog", "main", shaA)}},
 		{name: "unchanged head is not handled again", head: shaA},
 		{name: "new head is handled", head: shaB, wantPushes: []intake.Push{polledPush("Example-User/blog", "main", shaB)}},
 		{name: "force-push back is handled", head: shaA, wantPushes: []intake.Push{polledPush("Example-User/blog", "main", shaA)}},
+		{name: "head a webhook already tracked is not handled again", head: shaB, webhook: shaB},
+		{name: "lost force-push back after a webhook is handled", head: shaA, wantPushes: []intake.Push{polledPush("Example-User/blog", "main", shaA)}},
 		{name: "deleted branch is skipped", head: ""},
 		{name: "recreated branch is handled", head: shaC, wantPushes: []intake.Push{polledPush("Example-User/blog", "main", shaC)}},
 	}
 	for _, step := range steps {
 		h.intake.reset()
 		h.branches.set("example-user/blog", "main", step.head)
+		if step.webhook != "" {
+			h.intake.track("Example-User/blog", "main", step.webhook)
+		}
 		if err := h.poller.RunOnce(t.Context()); err != nil {
 			t.Fatalf("%s: RunOnce: %v", step.name, err)
 		}
@@ -317,9 +326,26 @@ func TestPollerErrors(t *testing.T) {
 			wantCycles: []intake.PollResult{intake.PollFailed},
 		},
 		{
+			name: "checking the tracked head fails",
+			setup: func(h *pollerHarness) {
+				h.branches.set("example-user/blog", "main", shaA)
+				h.intake.mu.Lock()
+				h.intake.tracksErr = errBoom
+				h.intake.mu.Unlock()
+			},
+			wantErr:    "boom",
+			wantCycles: []intake.PollResult{intake.PollFailed},
+		},
+		{
 			name:    "claim fails",
 			setup:   func(h *pollerHarness) { h.claims.err = errBoom },
 			wantErr: "claim intake poll: boom",
+		},
+		{
+			name:       "finish fails",
+			setup:      func(h *pollerHarness) { h.claims.finishErr = errBoom },
+			wantErr:    "finish intake poll: boom",
+			wantCycles: []intake.PollResult{intake.PollFailed},
 		},
 	}
 	for _, tt := range tests {
@@ -335,6 +361,161 @@ func TestPollerErrors(t *testing.T) {
 				t.Errorf("cycles = %v, want %v", cycles, tt.wantCycles)
 			}
 		})
+	}
+}
+
+func TestPollerFinishesTheLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		lost       bool
+		cancelled  bool
+		wantCycles []intake.PollResult
+	}{
+		{name: "held lease", wantCycles: []intake.PollResult{intake.PollSucceeded}},
+		{name: "lease taken over mid-cycle", lost: true, wantCycles: []intake.PollResult{intake.PollSucceeded}},
+		{name: "cancelled cycle still finishes", cancelled: true, wantCycles: []intake.PollResult{intake.PollFailed}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newPollerHarness(t, blogApp("prod"))
+			h.claims.lost = tt.lost
+			ctx := t.Context()
+			if tt.cancelled {
+				h.intake.mu.Lock()
+				h.intake.openErr = context.Canceled
+				h.intake.mu.Unlock()
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			err := h.poller.RunOnce(ctx)
+			if (err != nil) != tt.cancelled {
+				t.Errorf("RunOnce = %v", err)
+			}
+			if finished := h.claims.finishedLeases(); !slices.Equal(finished, []time.Time{fakeLease}) {
+				t.Errorf("finished leases = %v, want the claimed lease", finished)
+			}
+			if _, cycles := h.observer.recorded(); !slices.Equal(cycles, tt.wantCycles) {
+				t.Errorf("cycles = %v, want %v", cycles, tt.wantCycles)
+			}
+		})
+	}
+}
+
+func TestPollerLeaseCoversTheCycleTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{interval: 10 * time.Second, want: intake.MinPollCycleTimeout + 5*time.Second},
+		{interval: time.Minute, want: time.Minute + 5*time.Second},
+		{interval: 10 * time.Minute, want: 10*time.Minute + 5*time.Second},
+	}
+	for _, tt := range tests {
+		poller, err := intake.NewPoller(intake.PollerOptions{Intake: &fakeIntake{}, Branches: newFakeBranches(), Claims: &fakeClaims{}, Interval: tt.interval})
+		if err != nil {
+			t.Fatalf("NewPoller: %v", err)
+		}
+		if got := poller.Lease(); got != tt.want {
+			t.Errorf("Lease() with interval %s = %s, want %s", tt.interval, got, tt.want)
+		}
+	}
+}
+
+func TestPollerRecoversLostForcePushBack(t *testing.T) {
+	t.Parallel()
+
+	for _, replicas := range []int{1, 3} {
+		t.Run(fmt.Sprintf("%d replicas", replicas), func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, blogApp("prod", "test"))
+			pollers := make([]*intake.Poller, replicas)
+			for i := range pollers {
+				p, err := intake.NewPoller(intake.PollerOptions{
+					Apps:     []intake.App{blogApp("prod", "test")},
+					Intake:   h.svc,
+					Branches: h.branches,
+					Claims:   &fakeClaims{},
+					Interval: time.Minute,
+				})
+				if err != nil {
+					t.Fatalf("NewPoller: %v", err)
+				}
+				pollers[i] = p
+			}
+			poll := func(i int) {
+				t.Helper()
+				if err := pollers[i%replicas].RunOnce(t.Context()); err != nil {
+					t.Fatalf("RunOnce: %v", err)
+				}
+			}
+
+			h.branches.set("example-user/blog", "main", shaA)
+			for i := range replicas {
+				poll(i)
+			}
+			first := h.commits.get(1)
+			if first.Commit.SHA != shaA || !first.Open() {
+				t.Fatalf("polled head = %+v, want %s open", first, shaA)
+			}
+
+			h.push(t, push(shaB))
+			if got := h.commits.get(1); got.SupersededByID == nil {
+				t.Fatalf("webhook push of %s did not supersede %s", shaB, shaA)
+			}
+
+			h.branches.set("example-user/blog", "main", shaA)
+			h.checks.set("example-user/blog", shaA, green("test"))
+			h.checks.set("example-user/blog", shaB, green("test"))
+			poll(replicas - 1)
+
+			if got := h.commits.get(1); !got.Open() && got.EnqueuedAt == nil {
+				t.Errorf("%s after the lost force-push back = %+v, want it tracked again", shaA, got)
+			}
+			if got := h.commits.get(2); got.SupersededByID == nil || got.EnqueuedAt != nil {
+				t.Errorf("%s after the lost force-push back = %+v, want it superseded", shaB, got)
+			}
+			deployments := h.commits.queue.all()
+			if len(deployments) != 1 || deployments[0].Commit.SHA != shaA {
+				t.Errorf("deployments = %+v, want only %s", deployments, shaA)
+			}
+		})
+	}
+}
+
+func TestPollerSupersedesOpenCommitWhenHeadReturnsToAnEnqueuedCommit(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, blogApp("prod", "test"))
+	poller, err := intake.NewPoller(intake.PollerOptions{
+		Apps:     []intake.App{blogApp("prod", "test")},
+		Intake:   h.svc,
+		Branches: h.branches,
+		Claims:   &fakeClaims{},
+		Interval: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewPoller: %v", err)
+	}
+	h.checks.set("example-user/blog", shaA, green("test"))
+	h.push(t, push(shaA))
+	h.push(t, push(shaB))
+	h.branches.set("example-user/blog", "main", shaA)
+	h.checks.set("example-user/blog", shaB, green("test"))
+
+	if err := poller.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := h.commits.get(2); got.SupersededByID == nil || got.EnqueuedAt != nil {
+		t.Errorf("%s = %+v, want it superseded once the branch returned to the enqueued %s", shaB, got, shaA)
+	}
+	if deployments := h.commits.queue.all(); len(deployments) != 1 || deployments[0].Commit.SHA != shaA {
+		t.Errorf("deployments = %+v, want only %s", deployments, shaA)
 	}
 }
 

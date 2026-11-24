@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/github"
@@ -196,7 +197,6 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			body:              `{"action":"completed","check_run":{"head_sha":"` + shaA + `","name":"test"},"repository":{"full_name":"example-user/blog"}}`,
 			wantStatus:        "processed",
 			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaA}},
-			wantClaimed:       true,
 		},
 		{
 			name:              "check run of any action",
@@ -204,7 +204,6 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			body:              `{"action":"rerequested","check_run":{"head_sha":"` + shaB + `"},"repository":{"full_name":"example-user/blog"}}`,
 			wantStatus:        "processed",
 			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaB}},
-			wantClaimed:       true,
 		},
 		{
 			name:              "check suite",
@@ -212,7 +211,6 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			body:              `{"action":"completed","check_suite":{"head_sha":"` + shaA + `"},"repository":{"full_name":"example-user/blog"}}`,
 			wantStatus:        "processed",
 			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaA}},
-			wantClaimed:       true,
 		},
 		{
 			name:              "commit status",
@@ -220,7 +218,6 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			body:              `{"sha":"` + shaA + `","state":"success","context":"ci","repository":{"full_name":"example-user/blog"}}`,
 			wantStatus:        "processed",
 			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaA}},
-			wantClaimed:       true,
 		},
 		{
 			name:              "installation evicts the installation",
@@ -282,6 +279,9 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			claimed, _ := h.deliveries.state()
 			if _, ok := claimed["delivery-1"]; ok != tt.wantClaimed {
 				t.Errorf("delivery claimed = %t, want %t", ok, tt.wantClaimed)
+			}
+			if completed := h.deliveries.completedIDs(); (len(completed) == 1) != tt.wantClaimed {
+				t.Errorf("completed deliveries = %v, want the claim completed: %t", completed, tt.wantClaimed)
 			}
 			installations, repositories := h.installations.evicted()
 			if !slices.Equal(installations, tt.wantInstallations) || !slices.Equal(repositories, tt.wantRepositories) {
@@ -479,17 +479,96 @@ func TestWebhookDuplicateDeliveryIsNotHandledTwice(t *testing.T) {
 	if code, body := h.send(t, d); code != http.StatusOK || body["status"] != "duplicate" {
 		t.Fatalf("redelivery = %d %v, want 200 duplicate", code, body)
 	}
-	status := delivery{event: "status", id: "delivery-2", body: `{"sha":"` + shaA + `","repository":{"full_name":"example-user/blog"}}`}
-	if code, body := h.send(t, status); code != http.StatusOK || body["status"] != "processed" {
-		t.Fatalf("other delivery = %d %v", code, body)
-	}
-	pushes, reevaluations, _ := h.intake.recorded()
-	if len(pushes) != 1 || len(reevaluations) != 1 {
-		t.Errorf("pushes %v, reevaluations %v, want one each", pushes, reevaluations)
+	pushes, _, _ := h.intake.recorded()
+	if len(pushes) != 1 {
+		t.Errorf("pushes %v, want one", pushes)
 	}
 	deliveries, _ := h.observer.recorded()
-	if want := []string{"push/processed", "push/duplicate", "status/processed"}; !slices.Equal(deliveries, want) {
+	if want := []string{"push/processed", "push/duplicate"}; !slices.Equal(deliveries, want) {
 		t.Errorf("observed %v, want %v", deliveries, want)
+	}
+	if want := []time.Duration{intake.DefaultWebhookTimeout + 10*time.Second, intake.DefaultWebhookTimeout + 10*time.Second}; !slices.Equal(h.deliveries.staleAfter, want) {
+		t.Errorf("claims treat a claim as stranded after %v, want %v", h.deliveries.staleAfter, want)
+	}
+}
+
+func TestWebhookCommitEventsAreNotDeduplicated(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	status := delivery{event: "status", id: "delivery-1", body: `{"sha":"` + shaA + `","repository":{"full_name":"example-user/blog"}}`}
+	for range 2 {
+		if code, body := h.send(t, status); code != http.StatusOK || body["status"] != "processed" {
+			t.Fatalf("status delivery = %d %v, want processed", code, body)
+		}
+	}
+	_, reevaluations, _ := h.intake.recorded()
+	if want := slices.Repeat([]reevaluation{{repository: "example-user/blog", sha: shaA}}, 2); !slices.Equal(reevaluations, want) {
+		t.Errorf("reevaluations = %v, want %v", reevaluations, want)
+	}
+	if claimed, _ := h.deliveries.state(); len(claimed) != 0 || len(h.deliveries.staleAfter) != 0 {
+		t.Errorf("commit events claimed deliveries: %v", claimed)
+	}
+}
+
+func TestWebhookDeliveryInProgressIsAConflict(t *testing.T) {
+	t.Parallel()
+
+	h := newWebhookHarness(t)
+	h.deliveries.claimed["delivery-1"] = "push"
+	code, body := h.send(t, delivery{event: "push", id: "delivery-1", body: pushBody("refs/heads/main", shaA, false, "octocat", "")})
+	if code != http.StatusConflict || body["error"] != "delivery is already being handled" {
+		t.Fatalf("response = %d %v, want 409", code, body)
+	}
+	if pushes, _, _ := h.intake.recorded(); len(pushes) != 0 {
+		t.Errorf("pushes = %v, want none", pushes)
+	}
+	if _, released := h.deliveries.state(); len(released) != 0 {
+		t.Errorf("released %v, want the other attempt's claim kept", released)
+	}
+	if deliveries, _ := h.observer.recorded(); !slices.Equal(deliveries, []string{"push/in_progress"}) {
+		t.Errorf("observed %v, want push/in_progress", deliveries)
+	}
+}
+
+func TestWebhookRecordingErrorsKeepTheOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		setup      func(*webhookHarness)
+		wantCode   int
+		wantResult string
+	}{
+		{
+			name:       "completing fails after success",
+			setup:      func(h *webhookHarness) { h.deliveries.completeErr = errBoom },
+			wantCode:   http.StatusOK,
+			wantResult: "push/processed",
+		},
+		{
+			name: "releasing fails after failure",
+			setup: func(h *webhookHarness) {
+				h.deliveries.releaseErr = errBoom
+				h.intake.failPushes(errBoom)
+			},
+			wantCode:   http.StatusInternalServerError,
+			wantResult: "push/failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newWebhookHarness(t)
+			tt.setup(h)
+			code, _ := h.send(t, delivery{event: "push", id: "delivery-1", body: pushBody("refs/heads/main", shaA, false, "octocat", "")})
+			if code != tt.wantCode {
+				t.Errorf("response = %d, want %d", code, tt.wantCode)
+			}
+			if deliveries, _ := h.observer.recorded(); !slices.Equal(deliveries, []string{tt.wantResult}) {
+				t.Errorf("observed %v, want %s", deliveries, tt.wantResult)
+			}
+		})
 	}
 }
 
@@ -497,19 +576,21 @@ func TestWebhookFailureReleasesTheClaim(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		event string
-		body  string
-		fail  func(*fakeIntake)
+		name         string
+		event        string
+		body         string
+		fail         func(*fakeIntake)
+		wantReleased []string
 	}{
 		{
-			name:  "push",
-			event: "push",
-			body:  pushBody("refs/heads/main", shaA, false, "octocat", ""),
-			fail:  func(f *fakeIntake) { f.failPushes(errBoom) },
+			name:         "push",
+			event:        "push",
+			body:         pushBody("refs/heads/main", shaA, false, "octocat", ""),
+			fail:         func(f *fakeIntake) { f.failPushes(errBoom) },
+			wantReleased: []string{"delivery-1"},
 		},
 		{
-			name:  "status",
+			name:  "status has no claim to release",
 			event: "status",
 			body:  `{"sha":"` + shaA + `","repository":{"full_name":"example-user/blog"}}`,
 			fail: func(f *fakeIntake) {
@@ -533,8 +614,8 @@ func TestWebhookFailureReleasesTheClaim(t *testing.T) {
 				t.Errorf("response leaks the error: %v", body)
 			}
 			claimed, released := h.deliveries.state()
-			if len(claimed) != 0 || !slices.Equal(released, []string{"delivery-1"}) {
-				t.Errorf("claimed %v released %v, want the claim released", claimed, released)
+			if len(claimed) != 0 || !slices.Equal(released, tt.wantReleased) {
+				t.Errorf("claimed %v released %v, want released %v", claimed, released, tt.wantReleased)
 			}
 
 			h.intake.mu.Lock()

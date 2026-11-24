@@ -6,6 +6,7 @@ const (
 	WebhookProcessed    WebhookResult = "processed"
 	WebhookIgnored      WebhookResult = "ignored"
 	WebhookDuplicate    WebhookResult = "duplicate"
+	WebhookInProgress   WebhookResult = "in_progress"
 	WebhookRejected     WebhookResult = "rejected"
 	WebhookUnauthorized WebhookResult = "unauthorized"
 	WebhookFailed       WebhookResult = "failed"

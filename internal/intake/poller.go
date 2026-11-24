@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
 const (
-	PollOpenLimit = 100
-	PollerActor   = "doorstep-poller"
-	MaxPollTick   = 15 * time.Second
+	PollOpenLimit       = 100
+	PollerActor         = "doorstep-poller"
+	MaxPollTick         = 15 * time.Second
+	MinPollCycleTimeout = time.Minute
+
+	finishPollTimeout = 5 * time.Second
 )
 
 type Opener interface {
@@ -25,10 +27,12 @@ type Opener interface {
 type PollIntake interface {
 	Pusher
 	Opener
+	TracksHead(ctx context.Context, repository, branch, sha string) (bool, error)
 }
 
 type PollClaims interface {
-	ClaimPoll(ctx context.Context, every time.Duration) (bool, error)
+	ClaimPoll(ctx context.Context, lease time.Duration) (time.Time, bool, error)
+	FinishPoll(ctx context.Context, leasedUntil time.Time, every time.Duration) (bool, error)
 }
 
 type PollerOptions struct {
@@ -53,12 +57,10 @@ type Poller struct {
 	source   Branches
 	claims   PollClaims
 	interval time.Duration
+	timeout  time.Duration
 	observer Observer
 	logger   *slog.Logger
 	now      func() time.Time
-
-	mu       sync.Mutex
-	lastSeen map[string]string
 }
 
 func NewPoller(opts PollerOptions) (*Poller, error) {
@@ -77,10 +79,10 @@ func NewPoller(opts PollerOptions) (*Poller, error) {
 		source:   opts.Branches,
 		claims:   opts.Claims,
 		interval: opts.Interval,
+		timeout:  max(opts.Interval, MinPollCycleTimeout),
 		observer: opts.Observer,
 		logger:   opts.Logger,
 		now:      opts.Now,
-		lastSeen: map[string]string{},
 	}
 	if p.observer == nil {
 		p.observer = nopObserver{}
@@ -122,10 +124,12 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 }
 
+func (p *Poller) Lease() time.Duration {
+	return p.timeout + finishPollTimeout
+}
+
 func (p *Poller) RunOnce(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	claimed, err := p.claims.ClaimPoll(ctx, p.interval)
+	leasedUntil, claimed, err := p.claims.ClaimPoll(ctx, p.Lease())
 	if err != nil {
 		return fmt.Errorf("claim intake poll: %w", err)
 	}
@@ -133,7 +137,12 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		return nil
 	}
 	started := p.now()
-	err = p.cycle(ctx)
+	cycleCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	err = p.cycle(cycleCtx)
+	cancel()
+	if finishErr := p.finish(ctx, leasedUntil); finishErr != nil {
+		err = errors.Join(err, finishErr)
+	}
 	result := PollSucceeded
 	if err != nil {
 		result = PollFailed
@@ -144,6 +153,19 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 		slog.Duration("duration", p.now().Sub(started)),
 	)
 	return err
+}
+
+func (p *Poller) finish(ctx context.Context, leasedUntil time.Time) error {
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishPollTimeout)
+	defer cancel()
+	held, err := p.claims.FinishPoll(finishCtx, leasedUntil, p.interval)
+	if err != nil {
+		return fmt.Errorf("finish intake poll: %w", err)
+	}
+	if !held {
+		p.logger.WarnContext(ctx, "intake poll cycle outlived its lease", slog.Duration("lease", p.Lease()))
+	}
+	return nil
 }
 
 func (p *Poller) cycle(ctx context.Context) error {
@@ -185,8 +207,11 @@ func (p *Poller) pollBranch(ctx context.Context, b polledBranch, evaluated map[s
 		log.WarnContext(ctx, "polled branch does not exist")
 		return nil
 	}
-	key := branchKey(b.repository, b.branch)
-	if p.lastSeen[key] == head {
+	tracked, err := p.intake.TracksHead(ctx, b.repository, b.branch, head)
+	if err != nil {
+		return err
+	}
+	if tracked {
 		return nil
 	}
 	evaluated[snapshotKey{strings.ToLower(b.repository), head}] = true
@@ -200,7 +225,6 @@ func (p *Poller) pollBranch(ctx context.Context, b polledBranch, evaluated map[s
 	if err != nil {
 		return fmt.Errorf("handle polled head %s of %s branch %s: %w", head, b.repository, b.branch, err)
 	}
-	p.lastSeen[key] = head
 	log.DebugContext(ctx, "polled branch head handled", slog.String("sha", head), slog.Int("tracked", len(results)))
 	return nil
 }

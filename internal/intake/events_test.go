@@ -120,7 +120,10 @@ func TestParseInstallation(t *testing.T) {
 			name:  "repositories removed",
 			event: EventInstallationRepositories,
 			body:  `{"installation":{"id":9},"repositories_removed":[{"full_name":"acme/web"},{"full_name":"acme/api"}]}`,
-			want:  installationChange{ID: 9, Removed: []string{"acme/web", "acme/api"}},
+			want: installationChange{ID: 9, Removed: []repositoryName{
+				{FullName: "acme/web", Owner: "acme", Name: "web"},
+				{FullName: "acme/api", Owner: "acme", Name: "api"},
+			}},
 		},
 		{name: "repositories added", event: EventInstallationRepositories, body: `{"installation":{"id":9},"repositories_added":[{"full_name":"acme/web"}]}`, want: installationChange{ID: 9}},
 		{name: "missing id", event: EventInstallation, body: `{"installation":{}}`, wantErr: "missing installation id"},

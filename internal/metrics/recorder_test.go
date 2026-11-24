@@ -136,6 +136,7 @@ func TestRecorderWebhookDeliveries(t *testing.T) {
 		"other/ignored":    2,
 		"ping/unknown":     1,
 		"push/failed":      0,
+		"push/in_progress": 0,
 		"other/rejected":   0,
 	}
 	for key, value := range want {

@@ -58,6 +58,7 @@ func TestLabels(t *testing.T) {
 		{"webhook processed", WebhookProcessed.label(), "processed"},
 		{"webhook ignored", WebhookIgnored.label(), "ignored"},
 		{"webhook duplicate", WebhookDuplicate.label(), "duplicate"},
+		{"webhook in progress", WebhookInProgress.label(), "in_progress"},
 		{"webhook rejected", WebhookRejected.label(), "rejected"},
 		{"webhook unauthorized", WebhookUnauthorized.label(), "unauthorized"},
 		{"webhook failed", WebhookFailed.label(), "failed"},

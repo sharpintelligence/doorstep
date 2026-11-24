@@ -18,7 +18,7 @@ const (
 	MaxWebhookBytes       = 5 << 20
 	DefaultWebhookTimeout = 25 * time.Second
 
-	releaseTimeout = 5 * time.Second
+	recordTimeout = 5 * time.Second
 )
 
 type Pusher interface {
@@ -27,7 +27,8 @@ type Pusher interface {
 }
 
 type Deliveries interface {
-	Claim(ctx context.Context, id, event string) (bool, error)
+	Claim(ctx context.Context, id, event string, staleAfter time.Duration) (store.DeliveryClaim, error)
+	Complete(ctx context.Context, id string) error
 	Release(ctx context.Context, id string) error
 }
 
@@ -160,7 +161,7 @@ func (h *WebhookHandler) dispatch(ctx context.Context, d delivery, body []byte) 
 			return h.malformed(ctx, d, err)
 		}
 		log := d.log.With(slog.String("repository", ref.Repository), slog.String("sha", ref.SHA))
-		return h.claimAndRun(ctx, d, log, func(ctx context.Context) ([]Result, error) {
+		return h.run(ctx, log, func(ctx context.Context) ([]Result, error) {
 			return h.intake.Reevaluate(ctx, ref.Repository, ref.SHA)
 		})
 	case EventInstallation, EventInstallationRepositories:
@@ -177,22 +178,42 @@ func (h *WebhookHandler) dispatch(ctx context.Context, d delivery, body []byte) 
 }
 
 func (h *WebhookHandler) claimAndRun(ctx context.Context, d delivery, log *slog.Logger, work func(context.Context) ([]Result, error)) (int, WebhookResult, string) {
-	claimed, err := h.deliveries.Claim(ctx, d.id, d.event)
+	claim, err := h.deliveries.Claim(ctx, d.id, d.event, h.staleClaim())
 	if err != nil {
 		log.ErrorContext(ctx, "recording github webhook delivery failed", slog.Any("error", err))
 		return http.StatusInternalServerError, WebhookFailed, "could not record delivery"
 	}
-	if !claimed {
+	switch claim {
+	case store.DeliveryCompleted:
 		log.InfoContext(ctx, "ignoring duplicate github webhook delivery")
 		return http.StatusOK, WebhookDuplicate, ""
+	case store.DeliveryInProgress:
+		log.InfoContext(ctx, "github webhook delivery is already being handled")
+		return http.StatusConflict, WebhookInProgress, "delivery is already being handled"
+	case store.DeliveryClaimed:
 	}
+	status, result, message := h.run(ctx, log, work)
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if result == WebhookFailed {
+		if err := h.deliveries.Release(recordCtx, d.id); err != nil {
+			log.ErrorContext(ctx, "releasing github webhook delivery failed", slog.Any("error", err))
+		}
+		return status, result, message
+	}
+	if err := h.deliveries.Complete(recordCtx, d.id); err != nil {
+		log.WarnContext(ctx, "recording github webhook delivery as completed failed", slog.Any("error", err))
+	}
+	return status, result, message
+}
+
+func (h *WebhookHandler) staleClaim() time.Duration {
+	return h.timeout + 2*recordTimeout
+}
+
+func (h *WebhookHandler) run(ctx context.Context, log *slog.Logger, work func(context.Context) ([]Result, error)) (int, WebhookResult, string) {
 	results, err := work(ctx)
 	if err != nil {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
-		defer cancel()
-		if releaseErr := h.deliveries.Release(releaseCtx, d.id); releaseErr != nil {
-			log.ErrorContext(ctx, "releasing github webhook delivery failed", slog.Any("error", releaseErr))
-		}
 		log.WarnContext(ctx, "handling github webhook failed", slog.Any("error", err))
 		return http.StatusInternalServerError, WebhookFailed, "handling failed"
 	}
@@ -209,9 +230,8 @@ func (h *WebhookHandler) claimAndRun(ctx context.Context, d delivery, log *slog.
 func (h *WebhookHandler) evict(ctx context.Context, d delivery, change installationChange) {
 	h.installations.EvictInstallation(change.ID)
 	for _, repository := range change.Removed {
-		owner, name, _ := splitRepository(repository)
-		if err := h.installations.EvictRepository(owner, name); err != nil {
-			d.log.WarnContext(ctx, "evicting repository from the installation cache failed", slog.String("repository", repository), slog.Any("error", err))
+		if err := h.installations.EvictRepository(repository.Owner, repository.Name); err != nil {
+			d.log.WarnContext(ctx, "evicting repository from the installation cache failed", slog.String("repository", repository.FullName), slog.Any("error", err))
 		}
 	}
 	d.log.InfoContext(ctx, "github installation changed, cache evicted",

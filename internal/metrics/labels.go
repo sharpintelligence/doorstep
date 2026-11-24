@@ -155,6 +155,7 @@ const (
 	WebhookProcessed    WebhookResult = "processed"
 	WebhookIgnored      WebhookResult = "ignored"
 	WebhookDuplicate    WebhookResult = "duplicate"
+	WebhookInProgress   WebhookResult = "in_progress"
 	WebhookRejected     WebhookResult = "rejected"
 	WebhookUnauthorized WebhookResult = "unauthorized"
 	WebhookFailed       WebhookResult = "failed"
@@ -162,7 +163,7 @@ const (
 
 func (r WebhookResult) label() string {
 	switch r {
-	case WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookRejected, WebhookUnauthorized, WebhookFailed:
+	case WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookInProgress, WebhookRejected, WebhookUnauthorized, WebhookFailed:
 		return string(r)
 	default:
 		return unknownLabel
@@ -199,6 +200,6 @@ var (
 		WebhookEventPush, WebhookEventCheckRun, WebhookEventCheckSuite, WebhookEventStatus,
 		WebhookEventInstallation, WebhookEventInstallationRepositories, WebhookEventPing, WebhookEventOther,
 	}
-	allWebhookResults = []WebhookResult{WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookRejected, WebhookUnauthorized, WebhookFailed}
+	allWebhookResults = []WebhookResult{WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookInProgress, WebhookRejected, WebhookUnauthorized, WebhookFailed}
 	allPollResults    = []PollResult{PollSucceeded, PollFailed}
 )

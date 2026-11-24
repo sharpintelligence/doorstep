@@ -71,9 +71,15 @@ type commitRef struct {
 	SHA        string
 }
 
+type repositoryName struct {
+	FullName string
+	Owner    string
+	Name     string
+}
+
 type installationChange struct {
 	ID      int64
-	Removed []string
+	Removed []repositoryName
 }
 
 func parsePush(body []byte) (Push, bool, error) {
@@ -150,18 +156,27 @@ func parseInstallation(event string, body []byte) (installationChange, error) {
 		return change, nil
 	}
 	for i, r := range p.RepositoriesRemoved {
-		if err := validateRepositoryName(r.FullName); err != nil {
+		name, err := parseRepositoryName(r.FullName)
+		if err != nil {
 			return installationChange{}, fmt.Errorf("%s payload: repositories_removed[%d]: %w", event, i, err)
 		}
-		change.Removed = append(change.Removed, r.FullName)
+		change.Removed = append(change.Removed, name)
 	}
 	return change, nil
 }
 
 func validateRepositoryName(fullName string) error {
-	if fullName == "" {
-		return errors.New("missing repository full_name")
-	}
-	_, _, err := splitRepository(fullName)
+	_, err := parseRepositoryName(fullName)
 	return err
+}
+
+func parseRepositoryName(fullName string) (repositoryName, error) {
+	if fullName == "" {
+		return repositoryName{}, errors.New("missing repository full_name")
+	}
+	owner, name, err := splitRepository(fullName)
+	if err != nil {
+		return repositoryName{}, err
+	}
+	return repositoryName{FullName: fullName, Owner: owner, Name: name}, nil
 }

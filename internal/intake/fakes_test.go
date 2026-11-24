@@ -11,6 +11,7 @@ import (
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/intake"
+	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
 type fakeCommits struct {
@@ -362,11 +363,17 @@ type fakeIntake struct {
 	pushes        []intake.Push
 	reevaluations []reevaluation
 	open          []core.TrackedCommit
+	heads         map[string]string
 	pushErr       error
 	reevaluateErr error
 	openErr       error
+	tracksErr     error
 	ctxErrs       []error
 	openCalls     int
+}
+
+func fakeHeadKey(repository, branch string) string {
+	return strings.ToLower(repository) + ":" + branch
 }
 
 func (f *fakeIntake) HandlePush(ctx context.Context, p intake.Push) ([]intake.Result, error) {
@@ -377,6 +384,7 @@ func (f *fakeIntake) HandlePush(ctx context.Context, p intake.Push) ([]intake.Re
 	if f.pushErr != nil {
 		return nil, f.pushErr
 	}
+	f.trackLocked(p.Repository, p.Branch, p.SHA)
 	return []intake.Result{{Commit: core.TrackedCommit{Commit: core.Commit{Repository: p.Repository, SHA: p.SHA}}, Enqueued: true}}, nil
 }
 
@@ -399,6 +407,28 @@ func (f *fakeIntake) Open(_ context.Context, limit int) ([]core.TrackedCommit, e
 		return nil, f.openErr
 	}
 	return slices.Clone(f.open[:min(limit, len(f.open))]), nil
+}
+
+func (f *fakeIntake) TracksHead(_ context.Context, repository, branch, sha string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.tracksErr != nil {
+		return false, f.tracksErr
+	}
+	return f.heads[fakeHeadKey(repository, branch)] == sha, nil
+}
+
+func (f *fakeIntake) track(repository, branch, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.trackLocked(repository, branch, sha)
+}
+
+func (f *fakeIntake) trackLocked(repository, branch, sha string) {
+	if f.heads == nil {
+		f.heads = map[string]string{}
+	}
+	f.heads[fakeHeadKey(repository, branch)] = sha
 }
 
 func (f *fakeIntake) setOpen(commits ...core.TrackedCommit) {
@@ -426,34 +456,55 @@ func (f *fakeIntake) reset() {
 }
 
 type fakeDeliveries struct {
-	mu       sync.Mutex
-	claimed  map[string]string
-	released []string
-	claimErr error
+	mu          sync.Mutex
+	claimed     map[string]string
+	completed   map[string]bool
+	released    []string
+	staleAfter  []time.Duration
+	claimErr    error
+	completeErr error
+	releaseErr  error
 }
 
 func newFakeDeliveries() *fakeDeliveries {
-	return &fakeDeliveries{claimed: map[string]string{}}
+	return &fakeDeliveries{claimed: map[string]string{}, completed: map[string]bool{}}
 }
 
-func (f *fakeDeliveries) Claim(_ context.Context, id, event string) (bool, error) {
+func (f *fakeDeliveries) Claim(_ context.Context, id, event string, staleAfter time.Duration) (store.DeliveryClaim, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.staleAfter = append(f.staleAfter, staleAfter)
 	if f.claimErr != nil {
-		return false, f.claimErr
+		return "", f.claimErr
 	}
 	if _, ok := f.claimed[id]; ok {
-		return false, nil
+		if f.completed[id] {
+			return store.DeliveryCompleted, nil
+		}
+		return store.DeliveryInProgress, nil
 	}
 	f.claimed[id] = event
-	return true, nil
+	return store.DeliveryClaimed, nil
+}
+
+func (f *fakeDeliveries) Complete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completeErr != nil {
+		return f.completeErr
+	}
+	f.completed[id] = true
+	return nil
 }
 
 func (f *fakeDeliveries) Release(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.claimed, id)
 	f.released = append(f.released, id)
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	delete(f.claimed, id)
 	return nil
 }
 
@@ -461,6 +512,12 @@ func (f *fakeDeliveries) state() (map[string]string, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return maps.Clone(f.claimed), slices.Clone(f.released)
+}
+
+func (f *fakeDeliveries) completedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(maps.Keys(f.completed))
 }
 
 type fakeInstallations struct {
@@ -513,22 +570,51 @@ func (f *fakeObserver) recorded() ([]string, []intake.PollResult) {
 }
 
 type fakeClaims struct {
-	mu     sync.Mutex
-	every  time.Duration
-	err    error
-	calls  int
-	refuse bool
+	mu        sync.Mutex
+	lease     time.Duration
+	every     time.Duration
+	err       error
+	finishErr error
+	lost      bool
+	calls     int
+	finished  []time.Time
+	refuse    bool
 }
 
-func (f *fakeClaims) ClaimPoll(_ context.Context, every time.Duration) (bool, error) {
+var fakeLease = time.Date(2026, 11, 24, 12, 1, 0, 0, time.UTC)
+
+func (f *fakeClaims) ClaimPoll(_ context.Context, lease time.Duration) (time.Time, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	f.every = every
+	f.lease = lease
 	if f.err != nil {
-		return false, f.err
+		return time.Time{}, false, f.err
 	}
-	return !f.refuse, nil
+	if f.refuse {
+		return time.Time{}, false, nil
+	}
+	return fakeLease, true, nil
+}
+
+func (f *fakeClaims) FinishPoll(ctx context.Context, leasedUntil time.Time, every time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	f.finished = append(f.finished, leasedUntil)
+	f.every = every
+	if f.finishErr != nil {
+		return false, f.finishErr
+	}
+	return !f.lost, nil
+}
+
+func (f *fakeClaims) finishedLeases() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.finished)
 }
 
 func (f *fakeClaims) callCount() int {

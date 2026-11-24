@@ -163,6 +163,43 @@ func (s *Service) Open(ctx context.Context, limit int) ([]core.TrackedCommit, er
 	return s.commits.Open(ctx, s.followed, limit)
 }
 
+func (s *Service) TracksHead(ctx context.Context, repository, branch, sha string) (bool, error) {
+	var followed []core.FollowedBranch
+	for _, app := range s.apps {
+		if app.matches(repository, branch) {
+			followed = append(followed, core.FollowedBranch{Target: app.Target, Repository: app.Repository, Branch: app.Branch})
+		}
+	}
+	if len(followed) == 0 {
+		return true, nil
+	}
+	tracked, err := s.commits.Tracked(ctx, repository, sha)
+	if err != nil {
+		return false, fmt.Errorf("check tracked head %s of %s branch %s: %w", sha, repository, branch, err)
+	}
+	current := map[core.Target]bool{}
+	for _, c := range tracked {
+		if c.SupersededByID == nil && c.Branch == branch {
+			current[c.Target] = true
+		}
+	}
+	for _, f := range followed {
+		if !current[f.Target] {
+			return false, nil
+		}
+	}
+	open, err := s.commits.Open(ctx, followed, len(followed)+1)
+	if err != nil {
+		return false, fmt.Errorf("check tracked head %s of %s branch %s: %w", sha, repository, branch, err)
+	}
+	for _, c := range open {
+		if c.Commit.SHA != sha {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (s *Service) follows(c core.TrackedCommit) bool {
 	app, ok := s.targets[c.Target]
 	return ok && c.Open() && app.matches(c.Commit.Repository, c.Branch)

@@ -154,24 +154,25 @@ The secret is read once at startup (one trailing newline is trimmed); an empty o
 | `ping` | answered `200`. |
 | anything else | answered `200` and ignored. |
 
-Deliveries are processed while GitHub waits, with up to 25 seconds of work that is not cut short if GitHub hangs up after its 10 second timeout, so the response GitHub records is the real outcome:
+Deliveries are processed while GitHub waits, with up to 25 seconds of work that is not cut short if GitHub hangs up. GitHub stops waiting after 10 seconds, so a slow delivery appears as timed out in **Recent Deliveries** even though doorstep finished processing it; redelivering a timed-out `push` returns `duplicate` once that processing has completed. Otherwise the response GitHub records is the outcome:
 
 | Response | Meaning |
 | --- | --- |
 | `200 {"status":"processed"}` | handled |
 | `200 {"status":"ignored"}` | not an event or ref doorstep acts on |
-| `200 {"status":"duplicate"}` | this `X-GitHub-Delivery` was already handled; nothing was done again |
+| `200 {"status":"duplicate"}` | this `push` delivery was already handled; nothing was done again |
 | `400` | missing `X-GitHub-Event` or `X-GitHub-Delivery` header, or a payload that is not valid JSON or lacks the repository or SHA |
 | `401` | missing or wrong `X-Hub-Signature-256`; checked over the raw body before anything is parsed or stored |
 | `405` | not a `POST` |
+| `409` | this `push` delivery is being handled by another request right now; redeliver it later if that attempt failed |
 | `413` | body larger than 5 MiB |
 | `500` | handling failed, for example GitHub could not be read; the delivery is not marked as handled |
 
-**Redeliveries.** Each handled delivery ID is recorded for seven days, so a redelivery that already succeeded is answered `duplicate`. A failed delivery is not recorded, so redelivering it from **Advanced → Recent Deliveries** on the App's settings page processes it again. GitHub does not redeliver failures by itself; the poller picks up anything a failed or lost delivery missed within one poll interval.
+**Redeliveries.** Each handled `push` delivery ID is recorded for seven days, so a redelivery that already succeeded is answered `duplicate`. A failed delivery is not recorded, so redelivering it from **Advanced → Recent Deliveries** on the App's settings page processes it again. If doorstep stops while handling a delivery, the delivery is processed again when it is redelivered more than 35 seconds later (the 25 second limit plus a margin). `check_run`, `check_suite` and `status` deliveries are not recorded: handling one twice is harmless, so a redelivery is always processed. GitHub does not redeliver failures by itself; the poller picks up anything a failed or lost delivery missed within one poll interval.
 
 ## Polling
 
-Every replica also runs a poller (`intake.poll_interval`, default `1m`; `0` turns it off), so installs that GitHub cannot reach still work. On each cycle one replica, chosen through the database, reads the head of every followed branch (one call per repository and branch, however many apps share it), hands a head it has not seen before to intake exactly like a push, and then re-checks open commits that no webhook evaluated in the last half interval. A green head is therefore deployed at most about one interval after CI finishes, even with webhooks off.
+Every replica also runs a poller (`intake.poll_interval`, default `1m`; `0` turns it off), so installs that GitHub cannot reach still work. On each cycle one replica, chosen through the database, reads the head of every followed branch (one call per repository and branch, however many apps share it), hands a head to intake exactly like a push unless the database shows intake already tracking it as the head for every app on that branch, and then re-checks open commits that no webhook evaluated in the last half interval. A green head is therefore deployed at most about one interval after CI finishes, even with webhooks off. Because the poller compares against what intake has recorded rather than what it saw last, a force-push back to an earlier commit is picked up even when a webhook moved intake on in between and the webhook for the force-push was lost. The next cycle is due one interval after the previous one finished, and a cycle is cut off after `max(interval, 1m)`, so cycles never overlap even when GitHub is slow.
 
 There is no baseline: when an app is added, or after downtime, the first cycle tracks the current branch head and deploys it once it is green. This is what catches pushes missed while doorstep was down; it only ever deploys through the normal queue.
 

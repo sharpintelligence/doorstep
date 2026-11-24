@@ -261,8 +261,8 @@ func TestPostgresWebhookAndPollerEndToEnd(t *testing.T) {
 	if n := countRows(t, db, "SELECT count(*) FROM deployments WHERE source = 'webhook'"); n != 1 {
 		t.Errorf("%d deployments, want 1", n)
 	}
-	if n := countRows(t, db, "SELECT count(*) FROM webhook_deliveries"); n != 2 {
-		t.Errorf("%d recorded deliveries, want 2", n)
+	if n := countRows(t, db, "SELECT count(*) FROM webhook_deliveries WHERE completed_at IS NOT NULL"); n != 1 {
+		t.Errorf("%d completed deliveries, want only the push", n)
 	}
 
 	branches.set("example-user/blog", "main", shaB)
@@ -297,7 +297,31 @@ func TestPostgresWebhookAndPollerEndToEnd(t *testing.T) {
 		t.Errorf("branch reads = %d, want one poll cycle (head read plus Track)", n)
 	}
 
-	mustExecPool(t, db, "UPDATE webhook_deliveries SET received_at = now() - interval '8 days' WHERE delivery_id = 'push-1'")
+	readsBefore = branches.calls
+	if err := replicas[0].RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce right after a cycle: %v", err)
+	}
+	if n := branches.calls - readsBefore; n != 0 {
+		t.Errorf("branch reads = %d right after a cycle, want none until the interval passes", n)
+	}
+	mustExecPool(t, db, "UPDATE intake_poll_state SET next_poll_at = now()")
+	if err := replicas[2].RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce once due: %v", err)
+	}
+	if n := branches.calls - readsBefore; n != 1 {
+		t.Errorf("branch reads = %d, want only the head read for a head intake already tracks", n)
+	}
+
+	stranded := delivery{event: "push", id: "push-2", body: pushBody("refs/heads/main", shaA, false, "octocat", "")}
+	mustExecPool(t, db, "INSERT INTO webhook_deliveries (delivery_id, event, claimed_at) VALUES ('push-2', 'push', now() - interval '1 minute')")
+	if got := send(stranded); got != "processed" {
+		t.Errorf("redelivery of a stranded claim = %s, want processed", got)
+	}
+	if got := send(stranded); got != "duplicate" {
+		t.Errorf("second redelivery = %s, want duplicate", got)
+	}
+
+	mustExecPool(t, db, "UPDATE webhook_deliveries SET claimed_at = now() - interval '8 days', completed_at = now() - interval '8 days' WHERE delivery_id = 'push-1'")
 	deleted, err := deliveries.DeleteBefore(t.Context(), intake.DeliveryRetention)
 	if err != nil || deleted != 1 {
 		t.Errorf("DeleteBefore = %d, %v, want 1", deleted, err)

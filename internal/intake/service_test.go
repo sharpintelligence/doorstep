@@ -739,3 +739,96 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+func TestTracksHead(t *testing.T) {
+	t.Parallel()
+
+	one := []intake.App{blogApp("prod")}
+	two := []intake.App{blogApp("staging"), blogApp("prod")}
+	tests := []struct {
+		name   string
+		apps   []intake.App
+		setup  func(t *testing.T, h *harness)
+		branch string
+		sha    string
+		want   bool
+	}{
+		{name: "branch nobody follows", apps: one, branch: "feature", sha: shaA, want: true},
+		{name: "untracked head", apps: one, branch: "main", sha: shaA},
+		{
+			name: "open head",
+			apps: one,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.push(t, push(shaA))
+			},
+			branch: "main", sha: shaA, want: true,
+		},
+		{
+			name: "enqueued head",
+			apps: one,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.checks.set("example-user/blog", shaA, green("test"))
+				h.push(t, push(shaA))
+			},
+			branch: "main", sha: shaA, want: true,
+		},
+		{
+			name: "superseded head",
+			apps: one,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.push(t, push(shaA))
+				h.push(t, push(shaB))
+			},
+			branch: "main", sha: shaA,
+		},
+		{
+			name: "enqueued head with a newer open commit",
+			apps: one,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.checks.set("example-user/blog", shaA, green("test"))
+				h.push(t, push(shaA))
+				h.push(t, push(shaB))
+			},
+			branch: "main", sha: shaA,
+		},
+		{
+			name: "tracked for only one of two apps",
+			apps: two,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.svc = h.service(t, blogApp("staging"))
+				h.push(t, push(shaA))
+			},
+			branch: "main", sha: shaA,
+		},
+		{
+			name: "tracked for every app",
+			apps: two,
+			setup: func(t *testing.T, h *harness) {
+				t.Helper()
+				h.push(t, push(shaA))
+			},
+			branch: "main", sha: shaA, want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, tt.apps...)
+			if tt.setup != nil {
+				tt.setup(t, h)
+			}
+			got, err := h.service(t, tt.apps...).TracksHead(t.Context(), "EXAMPLE-USER/blog", tt.branch, tt.sha)
+			if err != nil {
+				t.Fatalf("TracksHead: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("TracksHead = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
