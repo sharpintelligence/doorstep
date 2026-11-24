@@ -68,6 +68,9 @@ func reportedChecks(s Snapshot) map[string]core.Check {
 		add(checkRunCheck(run))
 	}
 	for _, st := range s.Statuses {
+		if core.IsDoorstepStatusContext(st.Context) {
+			continue
+		}
 		add(statusCheck(st))
 	}
 	return reported

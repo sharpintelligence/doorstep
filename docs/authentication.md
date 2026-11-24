@@ -14,8 +14,11 @@ Roles are ordered, and each includes everything the lower ones may do:
 | Role | May |
 | --- | --- |
 | `viewer` | read the UI and API: queue, locks, history, gate results, audit log |
-| `deployer` | everything a viewer may, plus request a manual deploy or rollback, create or clear any block, cancel a deployment, and take or release a freeze lock |
+| `reporter` | everything a viewer may, plus post results of [`external` gates](gates.md#external); meant for CI jobs and other tools, which then cannot roll back, freeze or cancel |
+| `deployer` | everything a reporter may, plus request a manual deploy or rollback, create or clear any block, cancel a deployment, and take or release a freeze lock |
 | `admin` | everything a deployer may, plus administer API tokens over HTTP |
+
+> **A `reporter` token is not scoped to an app.** By itself the role lets its holder post results for every `external` gate of every app, so a leaked CI token of one repository could pass the production gates of another. List the allowed actors in each external gate's `reporters` ([configuration.md](configuration.md#gates)), give each CI job its own token, and set `--expires-in`. With `reporters` set, a caller outside the list is refused whatever its role.
 
 Roles govern operating doorstep, never what ships. A merge to the deployed branch is still the approval for a deploy ([ADR 0001](decisions/0001-go-and-core-design.md)); no role is needed for a webhook-triggered deploy, and no role can make doorstep deploy a commit that was not merged.
 
@@ -33,7 +36,7 @@ doorstep token revoke ci-blog
 
 - `create` prints the token once on stdout and the details on stderr, so `TOKEN=$(doorstep token create ...)` captures only the token. It cannot be shown again; create a new one if it is lost.
 - `--name` is required and unique for the life of the database: lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 63 characters. Revoked tokens keep their names, so an audit row that names a token always means the same token.
-- `--role` is required: `viewer`, `deployer` or `admin`.
+- `--role` is required: `viewer`, `reporter`, `deployer` or `admin`. Give a CI job that only posts external gate results `reporter`.
 - `--expires-in` is a Go duration (`720h`); `0`, the default, never expires.
 - `list` prints every token with its role, creation, expiry and last use times and its state (`active`, `expired` or `revoked`). `last used` is updated at most once a minute.
 - `revoke` takes effect on the next request.
@@ -120,7 +123,7 @@ GitHub users are identified by their numeric user ID, never their login: a login
 
 ### Role mapping
 
-`auth.roles` maps each role to `groups` and `users`. On sign-in, doorstep checks `admin`, then `deployer`, then `viewer`, and grants the first role with a matching entry, so the highest match wins. If nothing matches, it grants `auth.default_role`; when that is empty (the default), sign-in is refused with `403` and a page saying the account is not authorised. Authenticating with the identity provider is never enough on its own.
+`auth.roles` maps each role to `groups` and `users`. On sign-in, doorstep checks `admin`, then `deployer`, then `reporter`, then `viewer`, and grants the first role with a matching entry, so the highest match wins. If nothing matches, it grants `auth.default_role`; when that is empty (the default), sign-in is refused with `403` and a page saying the account is not authorised. Authenticating with the identity provider is never enough on its own.
 
 | Provider | `groups` entries match | `users` entries match |
 | --- | --- | --- |
@@ -219,10 +222,11 @@ The `audit_log` table records who asked doorstep to do something. It complements
 | `session.revoke` | `doorstep session revoke` |
 | `rollback.request` | `POST /api/v1/apps/{app}/rollback` ([rollback.md](rollback.md)), in the same transaction as the rollback deployment and its block |
 | `block.create`, `block.clear` | `POST /api/v1/apps/{app}/blocks` (only when a new block is created) and `DELETE /api/v1/apps/{app}/blocks/{ref}` |
+| `gate.report` | `POST /api/v1/deployments/{id}/gates/{gate}` and `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}` ([api.md](api.md#external-gate-results)), in the same transaction as the report and only when the report changed; details are `{gate, phase, status, message, url}` |
 | `deploy.request`, `deploy.cancel` | the API and UI, when they land |
 | `lock.acquire`, `lock.release` | the locks feature, when it lands |
 
-Rollback and block requests need the `deployer` role and record the caller's actor and role. Blocks have no owner: any deployer may create a block or clear any active block, including one a rollback or an admin created. That is deliberate, because unblocking is how a team returns a fixed version to automatic deploys and it never deploys anything by itself; the `block.clear` audit row and the block's `cleared_by` record who did it. The `deploy` and `lock` actions are reserved constants only: nothing records them yet. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
+Gate reports need the `reporter` role; deployers and admins may post too, which gives an audited manual override for a stuck external gate, unless the gate lists `reporters` and the caller is not on the list. Rollback and block requests need the `deployer` role and record the caller's actor and role. Blocks have no owner: any deployer may create a block or clear any active block, including one a rollback or an admin created. That is deliberate, because unblocking is how a team returns a fixed version to automatic deploys and it never deploys anything by itself; the `block.clear` audit row and the block's `cleared_by` record who did it. The `deploy` and `lock` actions are reserved constants only: nothing records them yet. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
 
 Each row holds the time, the actor (kind, ID and display name), the actor's role when known, the action, the target app and environment and the deployment ID when they apply, and a JSON object with details. Actions are dot-separated lowercase words; new features add constants to `core` without a schema change.
 

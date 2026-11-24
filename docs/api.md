@@ -2,7 +2,7 @@
 
 doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mounted once by `serve`.
 
-> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Taking or releasing a freeze lock, requesting a rollback and adding or clearing a block need `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
+> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Posting an [external gate result](#external-gate-results) needs `reporter`. Taking or releasing a freeze lock, requesting a rollback and adding or clearing a block need `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
 
 ## Conventions
 
@@ -25,6 +25,11 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | 409 | `no_rollback_target` | a rollback has nothing to roll back, or no earlier successful, unblocked version to roll back to |
   | 409 | `rollback_in_progress` | a rollback of the app is already queued or in flight; the body also carries `deployment` |
   | 409 | `blocked` | the requested rollback target is blocked; the body also carries `block` |
+  | 409 | `gate_not_external` | the named gate exists but is not of type `external` |
+  | 409 | `deployment_finished` | the deployment has reached a terminal state |
+  | 409 | `gate_not_applicable` | the deployment is a rollback and the gate does not set `apply_to_rollbacks` |
+  | 409 | `gate_not_ready` | an after-deploy gate was reported before the deployment is `verifying`; retry after `Retry-After` |
+  | 409 | `gate_decided` | the gate already has a different final verdict |
   | 415 | `unsupported_media_type` | a request body that is not `application/json` |
   | 500 | `internal` | anything else; details are logged, never returned |
   | 503 | `contended` | a lock or the app's deployments changed while the request ran; retry after `Retry-After` |
@@ -154,7 +159,7 @@ Returns one deployment with its timeline. `{id}` must be a positive integer; the
   ],
   "events_truncated": false,
   "gates": [
-    {"name": "health", "status": "passed", "message": "Healthy", "evidence": {}, "started_at": "…", "finished_at": "…"}
+    {"name": "health", "type": "health", "phase": "after", "status": "passed", "message": "Healthy", "evidence": {}, "started_at": "…", "finished_at": "…"}
   ],
   "rollbacks": [],
   "retries": []
@@ -162,9 +167,88 @@ Returns one deployment with its timeline. `{id}` must be a positive integer; the
 ```
 
 - `events` are the newest 500 events of the deployment, listed oldest first, so the terminal transition and the latest lineage notes are always included; `events_truncated` is `true` when older events were left out.
-- `gates` holds the latest result of each named gate, ordered by name.
+- `gates` holds the latest result of each named gate, ordered by name. `type` is the configured gate type and `phase` is `before` or `after`, so a client can find the `external` gates it may [report](#external-gate-results).
 - `rollbacks` are the deployments whose `rollback_of_id` is this deployment ("was it rolled back, and did that work"); `retries` are those whose `parent_id` is this deployment. Both are newest first.
 - The deployment, its events, gates and related deployments are read from one database snapshot, so they always agree with each other.
+
+## External gate results
+
+A gate of type `external` ([gates.md](gates.md#external)) waits for another system, such as an end-to-end test job or a change approval tool, to post its verdict. Two endpoints accept the verdict; both need the `reporter` role (or higher) and return the stored report.
+
+### `POST /api/v1/deployments/{id}/gates/{gate}`
+
+The canonical form, for tools that know doorstep's deployment id (for example from the `target_url` of the [commit status](gates.md#github-commit-statuses) or the deployment API).
+
+### `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}`
+
+A convenience for CI jobs that know the repository and commit but not the deployment. `{sha}` must be 40 lowercase hex characters. It resolves to the newest unfinished deployment of `{app}` whose own commit is `{sha}`, then behaves exactly like the canonical form. The lookup is in the app's `default` environment, the only environment doorstep deploys to today; it takes no `environment` parameter until apps can have more than one. When a queued batch deploys only its newest commit, only that commit matches; posting for an earlier commit of the batch answers `404`.
+
+### Request
+
+```json
+{
+  "status": "passed",
+  "message": "412 end-to-end tests passed",
+  "url": "https://ci.example.com/runs/1234",
+  "details": {"suites": 12, "duration_seconds": 431}
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `status` | yes | `pending`, `passed` or `failed`; `skipped` is not accepted |
+| `message` | no | short explanation shown in the UI and the commit status; cleaned like gate messages (1024 bytes) |
+| `url` | no | an absolute `http` or `https` link to the evidence, at most 2048 bytes, without credentials |
+| `details` | no | a JSON object of at most 32 KiB, stored in the gate's evidence |
+
+The body must be `application/json`, at most 64 KiB, and must not contain unknown fields.
+
+### Response
+
+`200 OK` with the stored report:
+
+```json
+{
+  "deployment_id": 42,
+  "app": "blog",
+  "gate": "e2e",
+  "phase": "after",
+  "status": "passed",
+  "message": "412 end-to-end tests passed",
+  "url": "https://ci.example.com/runs/1234",
+  "details": {"suites": 12, "duration_seconds": 431},
+  "reported_by": "token:ci-e2e",
+  "reported_at": "2026-03-01T11:02:00Z",
+  "updated_at": "2026-03-01T11:09:31Z"
+}
+```
+
+The verdict is not applied synchronously: the gate reads the report on the engine's next evaluation of the phase, which then records the gate result, emits the event and updates the commit status.
+
+A `200` for a `passed` or `failed` report is a guarantee: the stored report and the gate result are serialised on the gate result's row, so either the report is accepted and the gate ends with that verdict, or the gate was decided first (for example by its timeout) and the report answers `409 gate_decided`. A timeout that races an accepted final report is discarded and the next evaluation records the reported verdict. A `200` for a `pending` report promises nothing about the verdict: the gate can still time out.
+
+### Rules
+
+- `pending` reports are progress updates and may be replaced by any later report.
+- A `passed` or `failed` report is final. Posting the same verdict again is an idempotent `200` that changes nothing (so CI retries are safe); a different verdict answers `409 gate_decided`.
+- When the gate already has a final recorded result (for example it timed out), any report answers `409 gate_decided`.
+- The gate must be configured for the deployment's app (`404` otherwise) with type `external` (`409 gate_not_external` otherwise).
+- When the gate lists `reporters` ([configuration.md](configuration.md#gates)), the caller's actor (`token:<name>` or `user:<provider>:<subject>`, as in `reported_by`) must be one of them, whatever its role (`403 forbidden` otherwise). Without `reporters`, any caller with the `reporter` role or higher may report any external gate of any app.
+- The deployment must be unfinished (`409 deployment_finished`).
+- Rollbacks accept reports only when the gate sets `apply_to_rollbacks: true` (`409 gate_not_applicable`).
+- A gate in `gates.after` accepts reports only while the deployment is `verifying`, so a verdict about the old version cannot land before Argo CD synced the new one (`409 gate_not_ready` with `Retry-After: 5`). A gate in `gates.before` accepts reports any time before the deployment finishes.
+- Every report that changes the stored report writes a `gate.report` [audit](authentication.md#audit-log) row in the same transaction; identical retries write nothing.
+
+### Example
+
+```sh
+doorstep token create --name ci-e2e --role reporter --expires-in 2160h
+curl -fsS -X POST \
+  -H "Authorization: Bearer $DOORSTEP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"passed","message":"e2e green","url":"https://ci.example.com/runs/1234"}' \
+  "https://doorstep.example.com/api/v1/apps/blog/commits/$GITHUB_SHA/gates/e2e"
+```
 
 ## Deployment fields
 

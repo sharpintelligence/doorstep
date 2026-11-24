@@ -24,6 +24,7 @@ const (
 	AuditSessionRevoke   AuditAction = "session.revoke"
 	AuditBlockCreate     AuditAction = "block.create"
 	AuditBlockClear      AuditAction = "block.clear"
+	AuditGateReport      AuditAction = "gate.report"
 )
 
 func AuditActions() []AuditAction {
@@ -40,6 +41,7 @@ func AuditActions() []AuditAction {
 		AuditSessionRevoke,
 		AuditBlockCreate,
 		AuditBlockClear,
+		AuditGateReport,
 	}
 }
 

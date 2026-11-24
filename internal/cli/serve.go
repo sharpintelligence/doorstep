@@ -21,6 +21,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/gates"
 	"github.com/sharpintelligence/doorstep/internal/github"
 	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/logging"
@@ -208,6 +209,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 			return fmt.Errorf("engine: %w", err)
 		}
 		engineRuns = wiring.runs
+		defer drainAll(ctx, wiring.drains, cfg.Server.ShutdownTimeout, logger)
 		rollbackAPI = announcingRollbacks{rollbacks: rollbacks, announcer: wiring.engine}
 		commitAnnouncer = wiring.engine
 		logger.InfoContext(ctx, "engine started", slog.Int("apps", len(apps)))
@@ -230,6 +232,11 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		return fmt.Errorf("intake: %w", err)
 	}
 
+	gateReports, err := gates.NewReporter(st, in.catalog)
+	if err != nil {
+		return err
+	}
+
 	authenticator := authService.Authenticator()
 	apiHandler := api.New(api.Options{
 		Logger:        logger,
@@ -239,6 +246,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Locks:         locksService,
 		Rollbacks:     rollbackAPI,
 		Blocks:        rollbacks,
+		GateReports:   gateReports,
 		KnownApp:      knownApp(in.catalog),
 		Authenticator: principalAuthenticator{},
 		Middleware:    authenticator.RequireRole(core.RoleViewer),
@@ -311,6 +319,16 @@ func engineWatcher(cfg config.Config, catalog config.Catalog, lookupEnv LookupEn
 		return nil, fmt.Errorf("engine: %d apps are configured, so doorstep must read their Argo CD Applications: %w", len(catalog.Apps), err)
 	}
 	return watcher, nil
+}
+
+func drainAll(ctx context.Context, drains []func(context.Context) error, timeout time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	for _, drain := range drains {
+		if err := drain(ctx); err != nil {
+			logger.WarnContext(ctx, "drain gate commit statuses", slog.String("error", err.Error()))
+		}
+	}
 }
 
 func drainNotifications(ctx context.Context, dispatcher *notify.Dispatcher, timeout time.Duration, logger *slog.Logger) {

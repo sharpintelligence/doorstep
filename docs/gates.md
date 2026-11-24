@@ -7,7 +7,7 @@ A gate is a check that decides whether a deployment may continue. Gates run in t
 
 Which gates an app runs, their names and their timeouts come from the configuration file ([configuration.md](configuration.md#gates)). Gate results are recorded data, not control flow ([ADR 0001](decisions/0001-go-and-core-design.md), decision 4): every evaluation leaves a row explaining the verdict.
 
-The code lives in `internal/gates`: the data model, the registry, the evaluator, the five [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`) and the [`prometheus`](#prometheus) gate type, which reads Prometheus through the `internal/promquery` client.
+The code lives in `internal/gates`: the data model, the registry, the evaluator, the five [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`), the [`prometheus`](#prometheus) gate type, which reads Prometheus through the `internal/promquery` client, and the [`external`](#external) gate type with the service behind its API. Every gate result is mirrored to a [GitHub commit status](#github-commit-statuses) by `internal/notify`.
 
 ## Data model
 
@@ -17,7 +17,7 @@ A gate result is the latest verdict of one named gate for one deployment, stored
 | --- | --- |
 | `DeploymentID` | the deployment; its commit is the deployment's commit, so a result is effectively *(commit, gate name, phase, details)*, and a rollback of the same commit gets its own results |
 | `Name` | gate name from the configuration, unique within the app across both phases |
-| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, `prometheus`, ...) |
+| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, `prometheus`, `external`, ...) |
 | `Phase` | `before` or `after` (`core.GatePhase`) |
 | `Status` | `pending`, `passed`, `failed` or `skipped` |
 | `Message` | short human-readable explanation |
@@ -62,7 +62,7 @@ Each gate receives the deployment, the phase and its previously recorded result 
 
 ### Timeouts
 
-A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
+A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days; an `external` gate times out after `24h` unless it sets its own. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
 
 ### Errors
 
@@ -74,7 +74,7 @@ A gate call that gives no answer within 30 seconds is abandoned: the evaluator s
 
 ### Rollbacks
 
-A rollback re-pins a digest that already passed CI and soak, but it still waits for Argo CD ([ADR 0001](decisions/0001-go-and-core-design.md), decision 5). Gate types are registered with `SkipOnRollback`; for a deployment of kind `rollback` those gates are recorded as `skipped` with the message `skipped for rollback` and never called. `skipped` counts as passed. The skip is a recorded result, so a rollback's history shows which gates it bypassed. A gate whose bypass depends on its configuration (`schedule`) is registered without `SkipOnRollback` and returns `skipped` with the same message itself.
+A rollback re-pins a digest that already passed CI and soak, but it still waits for Argo CD ([ADR 0001](decisions/0001-go-and-core-design.md), decision 5). Gate types are registered with `SkipOnRollback`; for a deployment of kind `rollback` those gates are recorded as `skipped` with the message `skipped for rollback` and never called. `skipped` counts as passed. The skip is a recorded result, so a rollback's history shows which gates it bypassed. A gate whose bypass depends on its configuration (`schedule`, `external`) is registered without `SkipOnRollback` and returns `skipped` with the same message itself.
 
 ## Built-in gates
 
@@ -82,16 +82,17 @@ A rollback re-pins a digest that already passed CI and soak, but it still waits 
 | --- | --- | --- | --- | --- | --- |
 | `checks` | before | `ci` | skipped | `30m` | tracked commits, then GitHub |
 | `lock` | before | `lock` | skipped | none | freeze locks |
-| `schedule` | before | `schedule` | skipped unless `apply_to_rollbacks: true` | none | the clock |
+| `schedule` | before | `schedule` | skipped unless `apply_to_rollbacks: true` | `24h` | the clock |
 | `health` | after | `argocd` | runs | `10m` | the Argo CD Application |
 | `soak` | after | `soak` | skipped | `duration` + `10m` | the Argo CD Application |
 | `prometheus` | after | `metrics` | skipped | `initial_delay` + `success_threshold` × `interval` + `10m` | a Prometheus server |
+| `external` | either | `external` | skipped unless `apply_to_rollbacks: true` | `24h` | reports posted through the API |
 
-The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak` and `prometheus` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
+The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak`, `prometheus` and `external` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
 
 ### Wiring
 
-The composition root (`serve`) registers the five built-in types with one call, the `prometheus` type with a second, and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates` and the Prometheus registrar), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
+The composition root (`serve`) registers the five built-in types with one call, the `prometheus` and `external` types with two more, and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates`, the Prometheus registrar and `registerExternalGateFromDeps`), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
 
 ```go
 registry := gates.NewRegistry()
@@ -102,10 +103,13 @@ err := gates.RegisterBuiltins(registry, gates.Builtins{
 	Applications: argoApplications,                        // adapter over the argocd package
 })
 err = registerPrometheusGate(registry, catalog, secretSource{lookupEnv: lookupEnv, readFile: config.ReadSecretFile})
+err = gates.RegisterExternal(registry, st)                // *store.Store reads gate_reports
 plans, err := registry.Plans(catalog)
 ```
 
 `registerPrometheusGate` (in `internal/cli`) builds one `promquery.Client` per configured `prometheus` server and calls `gates.RegisterPrometheus(registry, gates.Prometheus{Servers: ...})`. It registers the type even when no server is configured, so a gate without a server is rejected by configuration validation rather than by wiring. Without the call, a configuration that uses the gate fails at startup with `unknown gate type "prometheus"`.
+
+`newGateStatusMirror(catalog, cfg, githubApp, logger, recorder)` (in `internal/cli`) returns the [commit status mirror](#github-commit-statuses), which `newEngine` passes to the evaluator as an observer (nil without a GitHub App) and drains on shutdown.
 
 The ports are small interfaces in `internal/gates`:
 
@@ -116,6 +120,7 @@ The ports are small interfaces in `internal/gates`:
 | `FreezeReader` | `Blocking(ctx, core.Target) ([]core.Lock, error)` | `*locks.Service` |
 | `ApplicationReader` | `Application(ctx, namespace, name) (gates.Application, error)` | `cli.argoApplications`: finds the app configured for that Application and reads it with `(*argocd.Watcher).Status`, mapping not found to `gates.ErrApplicationNotFound` |
 | `MetricsQuerier` | `Query(ctx, expr, at) (promquery.Result, error)` and `QueryRange(ctx, expr, from, to, step) (promquery.Result, error)` | `*promquery.Client`, one per `prometheus` server |
+| `ExternalReports` | `GetGateReport(ctx, deploymentID, gate) (core.GateReport, error)` | `*store.Store` |
 
 `gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
 
@@ -269,12 +274,61 @@ When the baseline window has no data (a new app or a new metric), `baseline.no_d
 
 State lives in the evidence of the `pending` result and is carried only from a `pending` previous result, so `Reevaluate` starts over, and so does a change of server or query. Evidence: `{"server", "query", "query_sha256", "condition", "interval", "success_threshold", "failure_threshold", "started_at", "last_attempt_at", "consecutive_successes", "consecutive_failures", "consecutive_no_data", "last_error", "baseline": {"status": "ok" | "missing", "direction", "value", "limit", "from", "to", "points"}, "samples": [{"at", "value", "outcome": "success" | "failure" | "no_data"}]}`. Values are strings (`"0.004"`, `"+Inf"`), because JSON numbers cannot hold NaN or infinities; `samples` keeps the last 10. `query` holds the configured query cut to 1024 bytes for display, and `query_sha256` the SHA-256 of the whole query, which is what detects a changed query; the server URL and credentials never appear in evidence or messages.
 
+### external
+
+Waits for another system, such as an end-to-end test job, a load test or a change approval tool, to post a verdict through the [external gate API](api.md#external-gate-results). It is the only gate type allowed in either phase:
+
+```yaml
+gates:
+  before:
+    - type: checks
+    - type: external
+      name: change-approval
+      timeout: 168h
+      reporters: [user:github:1234567]
+  after:
+    - type: health
+    - type: external
+      name: e2e
+      timeout: 30m
+      reporters: [token:ci-e2e]
+```
+
+A posted result is stored as a report in `gate_reports` ([database.md](database.md#gate_reports)), one per deployment and gate, by the API alone. The gate reads that report on each evaluation and returns it as its verdict, so the evaluator stays the only writer of gate results, and timeouts, sticky results, events, metrics and the commit status mirror all work as for any other gate. The verdict lands on the engine's next poll of the phase.
+
+| Report | Verdict | Message |
+| --- | --- | --- |
+| none yet | `pending` | `waiting for an external result` |
+| `pending` | `pending` | the report's message, or `reported pending by <actor>` |
+| `passed` | `passed` | the report's message, or `reported passed by <actor>` |
+| `failed` | `failed` | the report's message, or `reported failed by <actor>` |
+| any, on a rollback without `apply_to_rollbacks: true` | `skipped` | `skipped for rollback` |
+
+Evidence: `{"reported": false}` before a report, then `{"reported": true, "status", "reported_by", "reported_at", "url", "details"}`, where `details` is the object the reporter posted. A read error is an [evaluation error](#errors).
+
+`timeout` defaults to `24h`, so a tool that never reports cannot hold the deployment, and every deployment queued behind it, forever. An approval before the deploy that may take days needs a longer one; an after-deploy gate runs while the new version is already live, so give it a short one. When it runs out the gate fails with `timed out after <timeout>`, which fails the deployment.
+
+`reporters` limits who may post: when it is set, only the listed actors (`token:<name>` or `user:<provider>:<subject>`, the `reported_by` form) are accepted and everyone else gets `403`, admins included. Without it any caller with the `reporter` role or higher may report every external gate of every app, so set it on gates that guard production ([authentication.md](authentication.md#roles)).
+
+A final report and a timeout cannot both win. Saving a report locks the gate's result row and refuses the report when the result is already final; recording a final result locks the same row and is refused with `core.ErrGateReported` when a final report with a different verdict exists. The evaluator treats that refusal of a timeout as "still pending", and its next poll reads the report and records the reported verdict. So a `200` for `passed` or `failed` means the gate ends with that verdict. A report posted after the gate has a final result is refused with `409 gate_decided`, so a late `passed` cannot disagree with the recorded verdict. `Reevaluate` reads the same report again, so it keeps a reported verdict.
+
+Rollbacks do not wait on an external tool by default: the gate returns `skipped` (`skipped for rollback`) and the API refuses reports for the rollback. Set `apply_to_rollbacks: true` to make rollbacks wait for a result too.
+
+A typical flow for an after-deploy test job:
+
+1. Create a token for the job: `doorstep token create --name ci-e2e --role reporter`, and list it in the gate's `reporters` as `token:ci-e2e`.
+2. The job starts when the `doorstep/<app>/after/e2e` commit status turns `pending` (the after phase is being evaluated), or polls the deployment API.
+3. It may post `pending` with a progress message while it runs, then `passed` or `failed` with a link to its logs, to `POST /api/v1/apps/<app>/commits/<sha>/gates/e2e`.
+4. Retries of the final post are safe: the same verdict answers `200` again and writes nothing.
+
+Reports for a gate in `gates.after` are accepted only while the deployment is `verifying`, so a result about the old version cannot be posted before Argo CD synced the new one; earlier posts answer `409 gate_not_ready` with `Retry-After: 5`. The checks use the configuration, not the engine, and live in `gates.Reporter`, which the API calls.
+
 ## Limits
 
 - Messages are cut to 1024 bytes (on a UTF-8 boundary); NUL bytes are removed and invalid UTF-8 is replaced.
 - Evidence must be valid JSON of at most 64 KiB and no string in it (key or value) may contain the NUL character `\u0000`, which Postgres `jsonb` cannot store. An escaped backslash followed by `u0000` (`"\\u0000"`) is ordinary text and allowed. Anything else is an evaluation error.
 - The limits live in `core` (`core.CleanGateMessage`, `core.ValidateGateEvidence`) and are enforced by both the evaluator and `Store.RecordGateResult`, so any other writer of gate results gets the same cleaning and a validation error instead of a raw Postgres error.
-- Evidence and messages are shown in the UI and mirrored to GitHub. Gates must never put secrets, tokens or credentials in them.
+- Evidence and messages are shown in the UI, and messages are mirrored to GitHub for apps that set `source.status_messages: true`. Gates must never put secrets, tokens or credentials in them.
 
 ## Adding a gate type
 
@@ -301,7 +355,7 @@ plans, err := registry.Plans(catalog)
 
 ## Observers
 
-Something that must react to gate results, such as mirroring them to GitHub commit statuses, implements `Observer`:
+Something that must react to gate results implements `Observer`:
 
 ```go
 type Observer interface {
@@ -311,11 +365,34 @@ type Observer interface {
 
 Observers are called after a result is committed, only when its status changed (including the first `pending` and `skipped`), so a pending gate polled every few seconds does not call the GitHub API on every poll. Observers are best effort: an error is logged at `warn` with the deployment and gate and never changes the verdict. Retrying a failed mirror is the observer's own responsibility.
 
+### GitHub commit statuses
+
+`notify.GateStatuses` is the observer that publishes every gate as a commit status on the deployment's app commit, so GitHub shows deploy state next to CI. It runs when a GitHub App is configured, for deploys and rollbacks alike, on every app whose `source.statuses` is not `false` ([configuration.md](configuration.md#apps)).
+
+| Gate result | Commit status |
+| --- | --- |
+| context | `doorstep/<app>/<phase>/<gate>`, for example `doorstep/blog/after/health` |
+| `pending` | `pending` |
+| `passed`, `skipped` | `success` (GitHub has no skipped state, and doorstep counts `skipped` as passed) |
+| `failed` | `failure` |
+| description | fixed: `Gate pending`, `Gate passed`, `Gate skipped` or `Gate failed`, prefixed `Rollback #<id>: ` for a rollback; with `source.status_messages: true`, the gate message instead (the fixed text when it is empty), cut to 140 characters |
+| target URL | `<public url>/deployments/<id>` when [`--public-url`](configuration.md#doorstep-serve) is set, left out otherwise |
+
+Commit statuses are visible to everyone who can read the repository, which is everyone for a public one. A message from an external reporter or an Argo CD health message can name internal systems, so by default descriptions are fixed, as for [GitHub deployment statuses](notifications.md#github-deployments), and the details are one click away through the target URL. Set `source.status_messages: true` to post the gate message instead, for private repositories or where messages are known to be safe.
+
+A status is posted only when the gate's status changes ([Observers](#observers)). A `pending` external report replaced by another `pending` one with a new message does not change the gate's status, so with `source.status_messages: true` the description keeps the first pending message until the verdict; the latest progress message is in the deployment API and the UI.
+
+`GateRecorded` never blocks the engine. It records the latest desired status per repository, commit and context in memory, queues that key if it is not queued yet and returns. One worker delivers keys in the order they were first queued, always sending the newest status of the key, so a GitHub outage or a slow call can delay statuses but never lets an older one overwrite a newer one: a `pending` that has not been sent when the gate passes is replaced by the `success`. At most 1024 keys wait; beyond that a status is dropped with a `warn`. A delivery is tried up to four times with backoff, honouring GitHub's `Retry-After` and rate limit headers. A `403`, `404`, missing or suspended installation is not retried and logs `cannot mirror gates to github` at `warn` at most once per repository per hour with a permission hint ([github-app.md](github-app.md#permissions)); a `422` is not retried either. Deliveries are counted in `doorstep_notifications_total` with `type="github"` ([metrics.md](metrics.md)). `Close` drains the queue on shutdown within the shutdown deadline.
+
+Statuses are best effort, like notifications ([ADR 0006](decisions/0006-notifications-are-best-effort.md)): there is no durable outbox, so a crash can lose the last update of a gate until its next change. Gate results in doorstep stay authoritative.
+
+The `doorstep/` context prefix is reserved ([ADR 0014](decisions/0014-external-gates-and-commit-status-mirror.md)). Intake ignores commit statuses with that prefix when it decides whether a commit is green, the `status` webhook ignores them, and `source.required_checks` may not name them. Otherwise, with `required_checks` empty, doorstep's own pending `doorstep/<app>/before/checks` status would hold the `checks` gate forever, and a failed after-deploy status would block retries and other apps that track the same commit.
+
 ## Metrics
 
 Evaluations are recorded in `doorstep_gate_evaluation_duration_seconds` ([metrics.md](metrics.md)):
 
-- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, `metrics` for `prometheus`, ...), never the configured name;
+- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, `metrics` for `prometheus`, `external`, ...), never the configured name;
 - `phase` is the deployment kind (`deploy` or `rollback`), not `before`/`after`;
 - one `passed` or `failed` observation when a gate reaches that verdict, with the time from `StartedAt` to `FinishedAt` plus the wall time of the call that produced the verdict (`StartedAt` is stamped after the first call returns, so a gate that decides on its first evaluation records the duration of that call, not 0; a timeout counts as `failed`);
 - one `error` observation per evaluation error, with the wall time of that call;

@@ -296,6 +296,40 @@ func TestEvaluate(t *testing.T) {
 				{Name: "ci", Kind: core.CheckKindStatus, State: core.ChecksPending, Detail: "pending"},
 			},
 		},
+		{
+			name: "all checks: doorstep's own statuses are ignored",
+			snapshot: intake.Snapshot{
+				CheckRuns: []github.CheckRun{done(1, "test", "success")},
+				Statuses: []github.CommitStatus{
+					status("doorstep/blog/before/checks", "pending"),
+					status("doorstep/blog/after/health", "failure"),
+					status("ci/doorstep", "success"),
+				},
+			},
+			want: core.ChecksSuccess,
+			wantChecks: []core.Check{
+				{Name: "ci/doorstep", Kind: core.CheckKindStatus, State: core.ChecksSuccess, Detail: "success"},
+				{Name: "test", Kind: core.CheckKindRun, State: core.ChecksSuccess, Detail: "success"},
+			},
+		},
+		{
+			name: "all checks: only doorstep's own statuses is nothing reported",
+			snapshot: intake.Snapshot{
+				Statuses: []github.CommitStatus{status("doorstep/blog/before/checks", "success")},
+			},
+			want: core.ChecksPending,
+		},
+		{
+			name:     "required: a doorstep status never satisfies a check of the same name",
+			required: []string{"doorstep/blog/after/e2e"},
+			snapshot: intake.Snapshot{
+				Statuses: []github.CommitStatus{status("doorstep/blog/after/e2e", "success")},
+			},
+			want: core.ChecksPending,
+			wantChecks: []core.Check{
+				{Name: "doorstep/blog/after/e2e", State: core.ChecksPending, Detail: "not reported"},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

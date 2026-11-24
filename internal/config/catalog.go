@@ -94,10 +94,16 @@ type Source struct {
 	Branch         string   `yaml:"branch"`
 	RequiredChecks []string `yaml:"required_checks"`
 	Deployments    *bool    `yaml:"deployments"`
+	Statuses       *bool    `yaml:"statuses"`
+	StatusMessages bool     `yaml:"status_messages"`
 }
 
 func (s Source) DeploymentsEnabled() bool {
 	return s.Deployments == nil || *s.Deployments
+}
+
+func (s Source) StatusesEnabled() bool {
+	return s.Statuses == nil || *s.Statuses
 }
 
 type Image struct {
@@ -198,9 +204,13 @@ const (
 	GateHealth     GateType = "health"
 	GateSoak       GateType = "soak"
 	GatePrometheus GateType = "prometheus"
+	GateExternal   GateType = "external"
 )
 
-const DefaultTimeoutAllowance = 10 * time.Minute
+const (
+	DefaultTimeoutAllowance    = 10 * time.Minute
+	DefaultExternalGateTimeout = 24 * time.Hour
+)
 
 type GatePhase string
 
@@ -231,6 +241,7 @@ type Gate struct {
 	FailureThreshold *int         `yaml:"failure_threshold"`
 	NoData           NoDataPolicy `yaml:"no_data"`
 	Baseline         *Baseline    `yaml:"baseline"`
+	Reporters        []string     `yaml:"reporters"`
 }
 
 type WindowEffect string
@@ -249,12 +260,14 @@ type Window struct {
 }
 
 type gateSpec struct {
-	phase            GatePhase
-	allowsTimeout    bool
-	defaultTimeout   func(Gate) time.Duration
-	requiresDuration bool
-	requiresWindows  bool
-	prometheus       bool
+	phase               GatePhase
+	allowsTimeout       bool
+	defaultTimeout      func(Gate) time.Duration
+	requiresDuration    bool
+	requiresWindows     bool
+	allowsRollbackOptIn bool
+	prometheus          bool
+	allowsReporters     bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
@@ -265,6 +278,7 @@ func gateSpecs() map[GateType]gateSpec {
 		GateHealth:     {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute)},
 		GateSoak:       {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
 		GatePrometheus: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: prometheusTimeout, prometheus: true},
+		GateExternal:   {allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultExternalGateTimeout), allowsRollbackOptIn: true, allowsReporters: true},
 	}
 }
 
@@ -325,6 +339,9 @@ func (a App) withDefaults() App {
 	if a.Source.Deployments != nil {
 		a.Source.Deployments = new(*a.Source.Deployments)
 	}
+	if a.Source.Statuses != nil {
+		a.Source.Statuses = new(*a.Source.Statuses)
+	}
 	a.GitOps.Branch = orDefault(a.GitOps.Branch, DefaultBranch)
 	a.GitOps.Path = cleanRelative(a.GitOps.Path)
 	a.Pin = a.Pin.withDefaults(a.Image.Repository)
@@ -379,7 +396,7 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 		} else {
 			g = g.withCopiedPointers()
 		}
-		if known && spec.allowsTimeout && g.Timeout == nil {
+		if known && spec.defaultTimeout != nil && g.Timeout == nil {
 			timeout := Duration(spec.defaultTimeout(g))
 			g.Timeout = &timeout
 		} else if g.Timeout != nil {
@@ -389,6 +406,7 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 		if known && spec.requiresWindows {
 			g.Timezone = orDefault(g.Timezone, DefaultScheduleZone)
 		}
+		g.Reporters = slices.Clone(g.Reporters)
 		g.Windows = slices.Clone(g.Windows)
 		for i := range g.Windows {
 			g.Windows[i].Timezone = orDefault(g.Windows[i].Timezone, g.Timezone)

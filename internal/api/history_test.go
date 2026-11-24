@@ -386,8 +386,8 @@ func TestGetDeploymentResponse(t *testing.T) {
 				},
 				EventsTruncated: true,
 				Gates: []core.GateResult{
-					{Name: "health", Status: core.GateFailed, Message: "degraded", Evidence: json.RawMessage(`{"status":"Degraded"}`), StartedAt: occurred, FinishedAt: &gateDone},
-					{Name: "soak", Status: core.GatePending, StartedAt: occurred},
+					{Name: "health", Type: "health", Phase: core.GatePhaseAfter, Status: core.GateFailed, Message: "degraded", Evidence: json.RawMessage(`{"status":"Degraded"}`), StartedAt: occurred, FinishedAt: &gateDone},
+					{Name: "e2e", Type: "external", Phase: core.GatePhaseAfter, Status: core.GatePending, StartedAt: occurred},
 				},
 				Rollbacks: []core.Deployment{minimal},
 			},
@@ -400,8 +400,8 @@ func TestGetDeploymentResponse(t *testing.T) {
 				],
 				"events_truncated": true,
 				"gates": [
-					{"name": "health", "status": "failed", "message": "degraded", "evidence": {"status": "Degraded"}, "started_at": "2026-03-01T11:00:00Z", "finished_at": "2026-03-01T11:01:00Z"},
-					{"name": "soak", "status": "pending", "evidence": {}, "started_at": "2026-03-01T11:00:00Z"}
+					{"name": "health", "type": "health", "phase": "after", "status": "failed", "message": "degraded", "evidence": {"status": "Degraded"}, "started_at": "2026-03-01T11:00:00Z", "finished_at": "2026-03-01T11:01:00Z"},
+					{"name": "e2e", "type": "external", "phase": "after", "status": "pending", "evidence": {}, "started_at": "2026-03-01T11:00:00Z"}
 				],
 				"rollbacks": [` + minimalJSON + `],
 				"retries": []

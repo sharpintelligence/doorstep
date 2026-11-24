@@ -13,12 +13,19 @@ func TestRoleAllows(t *testing.T) {
 		want       bool
 	}{
 		{have: RoleViewer, need: RoleViewer, want: true},
+		{have: RoleViewer, need: RoleReporter},
 		{have: RoleViewer, need: RoleDeployer},
 		{have: RoleViewer, need: RoleAdmin},
+		{have: RoleReporter, need: RoleViewer, want: true},
+		{have: RoleReporter, need: RoleReporter, want: true},
+		{have: RoleReporter, need: RoleDeployer},
+		{have: RoleReporter, need: RoleAdmin},
 		{have: RoleDeployer, need: RoleViewer, want: true},
+		{have: RoleDeployer, need: RoleReporter, want: true},
 		{have: RoleDeployer, need: RoleDeployer, want: true},
 		{have: RoleDeployer, need: RoleAdmin},
 		{have: RoleAdmin, need: RoleViewer, want: true},
+		{have: RoleAdmin, need: RoleReporter, want: true},
 		{have: RoleAdmin, need: RoleDeployer, want: true},
 		{have: RoleAdmin, need: RoleAdmin, want: true},
 		{have: "", need: RoleViewer},
@@ -46,6 +53,7 @@ func TestParseRole(t *testing.T) {
 		wantErr bool
 	}{
 		{in: "viewer", want: RoleViewer},
+		{in: "reporter", want: RoleReporter},
 		{in: "deployer", want: RoleDeployer},
 		{in: "admin", want: RoleAdmin},
 		{in: "", wantErr: true},

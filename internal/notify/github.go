@@ -45,9 +45,10 @@ type GitHub struct {
 	now       func() time.Time
 	cacheSize int
 
-	mu     sync.Mutex
-	ids    map[string]int64
-	warned map[string]time.Time
+	warnings *warnThrottle
+
+	mu  sync.Mutex
+	ids map[string]int64
 }
 
 type githubPayload struct {
@@ -68,7 +69,6 @@ func NewGitHub(opts GitHubOptions) (*GitHub, error) {
 		now:       opts.Now,
 		cacheSize: opts.CacheSize,
 		ids:       make(map[string]int64),
-		warned:    make(map[string]time.Time),
 	}
 	for app, enabled := range opts.Apps {
 		g.apps[app] = enabled
@@ -82,6 +82,7 @@ func NewGitHub(opts GitHubOptions) (*GitHub, error) {
 	if g.cacheSize <= 0 {
 		g.cacheSize = defaultCacheSize
 	}
+	g.warnings = newWarnThrottle(permissionWarnInterval, g.now)
 	return g, nil
 }
 
@@ -178,36 +179,55 @@ func (g *GitHub) deploymentID(ctx context.Context, client *github.Client, owner,
 }
 
 func (g *GitHub) classify(ctx context.Context, repository string, err error) error {
+	return classifyGitHubError(err, func(err error) {
+		if g.warnings.allow(repository) {
+			g.logger.WarnContext(ctx, "cannot report deployments to github",
+				slog.String("repository", repository),
+				slog.String("hint", permissionHint),
+				slog.Any("error", err),
+			)
+		}
+	})
+}
+
+func classifyGitHubError(err error, denied func(error)) error {
 	switch {
 	case isRateLimited(err):
 		return err
 	case errors.Is(err, github.ErrNotInstalled), errors.Is(err, github.ErrInstallationSuspended),
 		hasAPIStatus(err, http.StatusForbidden), hasAPIStatus(err, http.StatusNotFound):
-		g.warnOnce(ctx, repository, err)
+		denied(err)
 		return reported(permanent(err))
-	case errors.Is(err, github.ErrInvalidRepository), hasAPIStatus(err, http.StatusUnprocessableEntity), hasAPIStatus(err, http.StatusConflict):
+	case errors.Is(err, github.ErrInvalidRepository), errors.Is(err, github.ErrInvalidCommitSHA),
+		hasAPIStatus(err, http.StatusUnprocessableEntity), hasAPIStatus(err, http.StatusConflict):
 		return permanent(err)
 	default:
 		return err
 	}
 }
 
-func (g *GitHub) warnOnce(ctx context.Context, repository string, err error) {
-	key := strings.ToLower(repository)
-	now := g.now()
-	g.mu.Lock()
-	last, seen := g.warned[key]
-	if seen && now.Sub(last) < permissionWarnInterval {
-		g.mu.Unlock()
-		return
+type warnThrottle struct {
+	interval time.Duration
+	now      func() time.Time
+
+	mu     sync.Mutex
+	warned map[string]time.Time
+}
+
+func newWarnThrottle(interval time.Duration, now func() time.Time) *warnThrottle {
+	return &warnThrottle{interval: interval, now: now, warned: make(map[string]time.Time)}
+}
+
+func (w *warnThrottle) allow(key string) bool {
+	key = strings.ToLower(key)
+	now := w.now()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if last, seen := w.warned[key]; seen && now.Sub(last) < w.interval {
+		return false
 	}
-	g.warned[key] = now
-	g.mu.Unlock()
-	g.logger.WarnContext(ctx, "cannot report deployments to github",
-		slog.String("repository", repository),
-		slog.String("hint", permissionHint),
-		slog.Any("error", err),
-	)
+	w.warned[key] = now
+	return true
 }
 
 func (g *GitHub) cached(key string) (int64, bool) {

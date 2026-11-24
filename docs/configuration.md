@@ -420,7 +420,9 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `source.repo` | required | GitHub repository that builds the image, as `owner/name`. Owners can be organizations or personal accounts, and apps from several owners can share one file. |
 | `source.branch` | `main` | Merges to this branch are deployed. |
 | `source.deployments` | `true` | Report each deployment as a GitHub deployment with statuses on `source.repo` (environment = the app name) when the GitHub App is configured. Set `false` to skip, for example when the repository has `on: deployment` workflows that should not run. See [notifications.md](notifications.md#github-deployments). |
-| `source.required_checks` | all checks | Names of the check runs and commit statuses that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique. See [Required checks](#required-checks). |
+| `source.statuses` | `true` | Mirror every gate result to a GitHub commit status on the deployed commit of `source.repo` (context `doorstep/<app>/<phase>/<gate>`) when the GitHub App is configured. Set `false` for repositories where the App cannot be granted commit status write access. See [gates.md](gates.md#github-commit-statuses). |
+| `source.status_messages` | `false` | Use the gate message (an Argo CD health message, an external reporter's text) as the commit status description instead of a fixed one such as `Gate failed`. GitHub shows descriptions to everyone who can read the repository, so turn this on only for private repositories or when gate messages cannot name internal systems. |
+| `source.required_checks` | all checks | Names of the check runs and commit statuses that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique and must not start with `doorstep/`, which is reserved for doorstep's own commit statuses. See [Required checks](#required-checks). |
 | `image.repository` | required | Fully qualified image repository without tag or digest, such as `ghcr.io/example-user/blog`. The registry host must contain a `.` or a `:port`, or be `localhost`; there is no implicit Docker Hub. The path must be lowercase. Images are expected to be tagged with the full commit SHA. |
 | `gitops.repo` | required | GitHub repository Argo CD syncs from, as `owner/name`. |
 | `gitops.branch` | `main` | Branch doorstep commits pins to, or opens pull requests against. |
@@ -442,6 +444,7 @@ When a commit is pushed to `source.branch`, doorstep tracks it for every app tha
 - Names match check run names and commit status contexts exactly and case-sensitively.
 - A check run that has not completed is pending. Conclusions `success`, `neutral` and `skipped` pass, as in GitHub branch protection; every other conclusion (`failure`, `cancelled`, `timed_out`, `action_required`, `stale`, or anything unknown) fails.
 - A commit status `success` passes and `pending` is pending; `failure`, `error` and anything unknown fail.
+- Commit statuses whose context starts with `doorstep/` are doorstep's own [gate mirror](gates.md#github-commit-statuses) and never count, so a pending or failed gate status cannot hold the checks of the commit it reports on.
 - When a check is re-run, the newest run of that name counts. When a check run and a commit status share a name, the worse result counts.
 - With `required_checks` listed, only those checks count. Each must be reported and pass; one that has not been reported yet is pending, and any failure fails the commit even while others are pending.
 - With `required_checks` empty, every reported check run and commit status must pass, at least one must be reported, and every check suite that has created check runs must have completed. The last rule covers GitHub Actions jobs that wait on `needs:` and are not created until their dependencies finish. A repository with no CI at all therefore never deploys automatically in this mode. Listing the checks explicitly is recommended: it is faster to evaluate and does not depend on other Apps' check suites.
@@ -479,12 +482,15 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced and healthy, and not degraded for a minute or more. |
 | `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy; a `Degraded` observation restarts the clock. |
 | `prometheus` | `after` | `query`, required; `condition` and/or `baseline`; see [Prometheus gates](#prometheus-gates) | A PromQL query meets its condition, and stays within a margin of its pre-deploy baseline, for `success_threshold` samples in a row. |
+| `external` | either | `timeout`, default `24h`; `apply_to_rollbacks`, default `false`; `reporters`, default any caller with the `reporter` role | Another system posted `passed` through the [external gate API](api.md#external-gate-results); see [gates.md](gates.md#external). |
 
-The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak` and `prometheus` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule` unless it sets `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
+The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak`, `prometheus` and `external` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule` and `external` unless they set `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
-A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`, and a `prometheus` timeout longer than `initial_delay` + (`success_threshold` - 1) × `interval`.
+A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`, and a `prometheus` timeout longer than `initial_delay` + (`success_threshold` - 1) × `interval`. An `external` gate times out after `24h` unless it sets its own `timeout`, so a tool that never reports cannot hold a deployment, and the app's queue behind it, forever. Set a longer one (`timeout: 168h`) for an approval that may take days, and a short one on an `external` gate in `gates.after`, which holds a deployment that is already live.
 
-A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health` or `prometheus`, `windows`, `timezone` or `apply_to_rollbacks` on anything but `schedule`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
+`reporters` lists the actors allowed to post results for an `external` gate, as `token:<name>` (an [API token](authentication.md#api-tokens)) or `user:<provider>:<subject>` (a signed-in user, as shown in `reported_by` and the audit log). When it is set, every other caller is refused with `403`, deployers and admins included; when it is left out, any caller with the `reporter` role or higher may report the gate. An empty list, duplicate entries and `reporters` on any other gate type are errors. Set it on every gate that guards production, so a leaked CI token of one repository cannot pass the gates of every app.
+
+A gate type other than `external` is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health`, `prometheus` or `external`, `windows` or `timezone` on anything but `schedule`, `apply_to_rollbacks` on anything but `schedule` and `external`, `reporters` on anything but `external`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
 
 #### Prometheus gates
 
@@ -648,6 +654,10 @@ apps:
       after:
         - type: health
           timeout: 5m
+        - type: external
+          name: e2e
+          timeout: 30m
+          reporters: [token:ci-api-e2e]
     notify: [ops, hooks]
 
   - name: api-prod

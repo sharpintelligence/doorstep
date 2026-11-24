@@ -83,6 +83,8 @@ type event struct {
 
 type gate struct {
 	Name       string          `json:"name"`
+	Type       string          `json:"type"`
+	Phase      core.GatePhase  `json:"phase"`
 	Status     core.GateStatus `json:"status"`
 	Message    string          `json:"message,omitempty"`
 	Evidence   json.RawMessage `json:"evidence"`
@@ -122,6 +124,8 @@ func newDeploymentDetail(h store.DeploymentHistory) deploymentDetail {
 	for _, g := range h.Gates {
 		detail.Gates = append(detail.Gates, gate{
 			Name:       g.Name,
+			Type:       g.Type,
+			Phase:      g.Phase,
 			Status:     g.Status,
 			Message:    g.Message,
 			Evidence:   jsonObject(g.Evidence),

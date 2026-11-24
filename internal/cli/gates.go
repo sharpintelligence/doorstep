@@ -14,6 +14,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/intake"
 	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
+	"github.com/sharpintelligence/doorstep/internal/notify"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
@@ -27,16 +28,21 @@ type gateDeps struct {
 	recorder  *metrics.Recorder
 	logger    *slog.Logger
 	lookupEnv LookupEnv
+
+	statusMirror *notify.GateStatuses
 }
 
 type gateRegistrar func(r *gates.Registry, deps gateDeps) error
 
 func gateRegistrars() []gateRegistrar {
-	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps}
+	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps, registerExternalGateFromDeps}
 }
 
-func gateObservers(gateDeps) []gates.Observer {
-	return nil
+func gateObservers(deps gateDeps) []gates.Observer {
+	if deps.statusMirror == nil {
+		return nil
+	}
+	return []gates.Observer{deps.statusMirror}
 }
 
 func registerBuiltinGates(r *gates.Registry, deps gateDeps) error {
@@ -50,6 +56,10 @@ func registerBuiltinGates(r *gates.Registry, deps gateDeps) error {
 
 func registerPrometheusGateFromDeps(r *gates.Registry, deps gateDeps) error {
 	return registerPrometheusGate(r, deps.catalog, secretSource{lookupEnv: deps.lookupEnv, readFile: config.ReadSecretFile})
+}
+
+func registerExternalGateFromDeps(r *gates.Registry, deps gateDeps) error {
+	return gates.RegisterExternal(r, deps.store)
 }
 
 func newGateEvaluator(deps gateDeps) (*gates.Evaluator, error) {

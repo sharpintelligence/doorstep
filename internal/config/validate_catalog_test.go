@@ -346,6 +346,18 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{`source.required_checks[1]: duplicate check "test"`},
 		},
 		{
+			name:    "required check with the reserved doorstep prefix",
+			mutate:  func(c *Catalog) { c.Apps[0].Source.RequiredChecks = []string{"test", "doorstep/blog/before/checks"} },
+			wantErr: []string{`source.required_checks[1]: "doorstep/blog/before/checks" uses the doorstep/ prefix that doorstep reserves for its own commit statuses`},
+		},
+		{
+			name: "required check that only resembles the reserved prefix",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Source.RequiredChecks = []string{"doorstep", "Doorstep/e2e", "ci/doorstep/e2e"}
+			},
+			wantErr: nil,
+		},
+		{
 			name:    "image repository required",
 			mutate:  func(c *Catalog) { c.Apps[0].Image.Repository = "" },
 			wantErr: []string{"image.repository: is required"},
@@ -626,7 +638,7 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name:    "gate type required",
 			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Type = "" },
-			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, health, lock, prometheus, schedule, soak)"},
+			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, external, health, lock, prometheus, schedule, soak)"},
 		},
 		{
 			name:    "gate type unknown",
@@ -742,6 +754,96 @@ func TestCatalogValidate(t *testing.T) {
 				c.Apps[1].Gates.After[1].Timezone = "Europe/London"
 			},
 			wantErr: []string{"gates.after[1].timezone: not allowed for type soak"},
+		},
+		{
+			name: "external gate before deploy with a long timeout",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval", Timeout: durPtr(7 * 24 * time.Hour)})
+			},
+			wantErr: nil,
+		},
+		{
+			name: "external gate without timeout",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval"})
+			},
+			wantErr: []string{"gates.before[1].timeout: must be positive"},
+		},
+		{
+			name: "external gate reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{
+					Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour),
+					Reporters: []string{"token:cab", "user:github:12345", "user:oidc:https://idp.example.com:alice"},
+				})
+			},
+			wantErr: nil,
+		},
+		{
+			name: "external gate invalid reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{
+					Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour),
+					Reporters: []string{"cab", "token:", "system:x", "token: cab", "token:cab", "token:cab"},
+				})
+			},
+			wantErr: []string{
+				`gates.before[1].reporters[0]: "cab" must be token:<name> or user:<provider>:<subject>`,
+				"gates.before[1].reporters[1]: actor id must not be empty",
+				`gates.before[1].reporters[2]: "system:x" must be token:<name> or user:<provider>:<subject>`,
+				`gates.before[1].reporters[3]: actor id " cab" must not contain control characters or surrounding whitespace`,
+				`gates.before[1].reporters[5]: duplicate reporter "token:cab"`,
+			},
+		},
+		{
+			name: "external gate empty reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour), Reporters: []string{}})
+			},
+			wantErr: []string{"gates.before[1].reporters: must not be empty; leave it out to accept any reporter"},
+		},
+		{
+			name: "reporters on a built-in gate",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before[0].Reporters = []string{"token:ci"}
+			},
+			wantErr: []string{"gates.before[0].reporters: not allowed for type checks"},
+		},
+		{
+			name: "external gate after deploy with timeout and rollback opt-in",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateExternal, Name: "e2e", Timeout: durPtr(30 * time.Minute), ApplyToRollbacks: true})
+			},
+			wantErr: nil,
+		},
+		{
+			name: "external gate zero timeout",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateExternal, Name: "e2e", Timeout: durPtr(0)})
+			},
+			wantErr: []string{"gates.after[1].timeout: must be positive"},
+		},
+		{
+			name: "external gate rejects duration and windows",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{
+					Type: GateExternal, Name: "e2e", Timeout: durPtr(time.Hour), Duration: Duration(time.Minute), Timezone: "UTC",
+					Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}},
+				})
+			},
+			wantErr: []string{
+				"gates.after[1].duration: not allowed for type external",
+				"gates.after[1].windows: not allowed for type external",
+				"gates.after[1].timezone: not allowed for type external",
+			},
+		},
+		{
+			name: "external gates share the name space",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "review", Timeout: durPtr(time.Hour)})
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateExternal, Name: "review", Timeout: durPtr(time.Hour)})
+			},
+			wantErr: []string{"gates.after[1].name: duplicate of gates.before[1]"},
 		},
 		{
 			name:    "schedule gate",
@@ -1326,6 +1428,28 @@ func TestNotificationEventNames(t *testing.T) {
 		if !slices.Contains(NotificationEvents(), event) {
 			t.Errorf("default event %q is not a known event", event)
 		}
+	}
+}
+
+func TestSourceStatusesEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "omitted", in: nil, want: true},
+		{name: "true", in: new(true), want: true},
+		{name: "false", in: new(false), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := (Source{Statuses: tt.in}).StatusesEnabled(); got != tt.want {
+				t.Errorf("StatusesEnabled() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

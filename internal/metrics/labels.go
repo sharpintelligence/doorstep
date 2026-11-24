@@ -82,11 +82,12 @@ const (
 	GateKindMetrics  GateKind = "metrics"
 	GateKindManual   GateKind = "manual"
 	GateKindSchedule GateKind = "schedule"
+	GateKindExternal GateKind = "external"
 )
 
 func (k GateKind) label() string {
 	switch k {
-	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule:
+	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule, GateKindExternal:
 		return string(k)
 	default:
 		return unknownLabel

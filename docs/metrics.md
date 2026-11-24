@@ -65,10 +65,10 @@ The other labels are fixed sets. Any other value is recorded as `unknown`, excep
 | `outcome` | `succeeded`, `failed` (failed before anything was pinned, nothing to roll back), `rolled_back`, `rollback_failed`, `cancelled`, `superseded`, `unknown` |
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
-| `gate` | `ci`, `lock` (a manual freeze), `schedule` (a deploy window), `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
+| `gate` | `ci`, `lock` (a manual freeze), `schedule` (a deploy window), `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `external` (a result posted through the API), `unknown` |
 | `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown`; webhooks: `processed`, `ignored`, `duplicate`, `rejected`, `unauthorized`, `failed`, `unknown`; poll cycles: `succeeded`, `failed`, `unknown` |
 | `event` | `push`, `check_run`, `check_suite`, `status`, `installation`, `installation_repositories`, `ping`, `other` |
-| `type` | `slack`, `webhook`, `github` (deployment statuses), `unknown` |
+| `type` | `slack`, `webhook`, `github` (deployment statuses and the gate commit status mirror), `unknown` |
 
 ### Histogram buckets
 
@@ -115,7 +115,7 @@ Notifications that are not getting through (failed or dropped in the last 30 min
 sum by (type) (increase(doorstep_notifications_total{result=~"failed|dropped"}[30m])) > 0
 ```
 
-A `github` failure usually means the App lacks the *Deployments* permission on a repository; the logs name it.
+A `github` failure usually means the App lacks the *Deployments* or *Commit statuses* permission on a repository; the logs name it (`cannot report deployments to github` or `cannot mirror gates to github`).
 
 Queue alerts:
 

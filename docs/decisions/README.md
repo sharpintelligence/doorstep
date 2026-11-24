@@ -19,6 +19,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0011](0011-built-in-gates-and-deploy-schedules.md) | Built-in gates and deploy schedules | Proposed | 2026-11-24 |
 | [0012](0012-deployment-engine.md) | The deployment engine | Proposed | 2026-11-24 |
 | [0013](0013-prometheus-query-gate.md) | Prometheus query gate | Proposed | 2026-11-24 |
+| [0014](0014-external-gates-and-commit-status-mirror.md) | External gates and the commit status mirror | Proposed | 2026-11-24 |
 
 ## When to write one
 

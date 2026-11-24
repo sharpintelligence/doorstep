@@ -197,7 +197,11 @@ func (e *Evaluator) evaluateGate(ctx context.Context, d core.Deployment, b Bindi
 		timedOut.Status = core.GateFailed
 		timedOut.Message = fmt.Sprintf("timed out after %s", b.Timeout)
 		timedOut.Evidence = stored.Evidence
-		return e.record(ctx, d, b, timedOut, callDuration)
+		failed, err := e.record(ctx, d, b, timedOut, callDuration)
+		if errors.Is(err, core.ErrGateReported) {
+			return stored, nil
+		}
+		return failed, err
 	}
 	return stored, nil
 }

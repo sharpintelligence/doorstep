@@ -40,6 +40,10 @@ type FreezeReader interface {
 	Blocking(ctx context.Context, t core.Target) ([]core.Lock, error)
 }
 
+type ExternalReports interface {
+	GetGateReport(ctx context.Context, id core.DeploymentID, gate string) (core.GateReport, error)
+}
+
 type ApplicationReader interface {
 	Application(ctx context.Context, namespace, name string) (Application, error)
 }

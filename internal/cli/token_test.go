@@ -130,7 +130,7 @@ func TestRunTokenErrors(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "unknown role", args: []string{"token", "create", "--name", "ci", "--role", "root"}, wantErr: `--role: unknown role "root" (want viewer, deployer, admin)`},
+		{name: "unknown role", args: []string{"token", "create", "--name", "ci", "--role", "root"}, wantErr: `--role: unknown role "root" (want viewer, reporter, deployer, admin)`},
 		{name: "bad name", args: []string{"token", "create", "--name", "Bad Name", "--role", "viewer"}, wantErr: "--name: invalid token name"},
 		{name: "missing flags", args: []string{"token", "create"}, wantErr: `required flag(s) "name", "role" not set`},
 		{name: "negative expiry", args: []string{"token", "create", "--name", "ci", "--role", "viewer", "--expires-in", "-1h"}, wantErr: "--expires-in: must not be negative"},

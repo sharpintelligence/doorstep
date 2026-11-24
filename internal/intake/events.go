@@ -56,6 +56,7 @@ type checkSuitePayload struct {
 
 type statusPayload struct {
 	SHA        string            `json:"sha"`
+	Context    string            `json:"context"`
 	Repository repositoryPayload `json:"repository"`
 }
 
@@ -69,6 +70,7 @@ type installationPayload struct {
 type commitRef struct {
 	Repository string
 	SHA        string
+	Context    string
 }
 
 type repositoryName struct {
@@ -130,7 +132,7 @@ func parseCommitEvent(event string, body []byte) (commitRef, error) {
 		if err := json.Unmarshal(body, &p); err != nil {
 			return commitRef{}, fmt.Errorf("decode %s payload: %w", event, err)
 		}
-		ref = commitRef{Repository: p.Repository.FullName, SHA: p.SHA}
+		ref = commitRef{Repository: p.Repository.FullName, SHA: p.SHA, Context: p.Context}
 	default:
 		return commitRef{}, fmt.Errorf("event %q does not name a commit", event)
 	}

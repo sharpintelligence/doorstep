@@ -8,6 +8,8 @@ doorstep tells people and systems what it is doing in three ways:
 
 Slack and webhook targets are configured in `notifications[]` and attached to apps with `apps[].notify` (see [configuration.md](configuration.md#notifications)). GitHub deployments need no target: they are reported for every app whenever the GitHub App is configured, unless the app opts out.
 
+Separately from these notifications, every gate result is mirrored to a GitHub commit status (`doorstep/<app>/<phase>/<gate>`) on the deployed commit. The mirror shares the retry policy, the permission warnings and the `github` metrics type with GitHub deployments; see [gates.md](gates.md#github-commit-statuses).
+
 Notifications are advisory. A failed or slow notification never delays, fails or rolls back a deploy; the deployment history is the durable record ([ADR 0006](decisions/0006-notifications-are-best-effort.md)).
 
 ## Events

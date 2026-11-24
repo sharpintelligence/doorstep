@@ -6,6 +6,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
 func NotificationEvents() []string {
@@ -224,6 +226,8 @@ func validateApp(r reporter, a App, notifications map[string]bool, servers []str
 			r.addf(field, "must not be empty")
 		case checks[check]:
 			r.addf(field, "duplicate check %q", check)
+		case core.IsDoorstepStatusContext(check):
+			r.addf(field, "%q uses the %s prefix that doorstep reserves for its own commit statuses", check, core.StatusContextPrefix)
 		}
 		checks[check] = true
 	}
@@ -330,7 +334,7 @@ func validateGates(r reporter, g Gates, servers []string) {
 				}
 				continue
 			}
-			if spec.phase != phase.phase {
+			if spec.phase != "" && spec.phase != phase.phase {
 				r.addf(field+".type", "%s gates run only in gates.%s", gate.Type, spec.phase)
 			}
 			if spec.allowsTimeout && (gate.Timeout == nil || *gate.Timeout <= 0) {
@@ -351,12 +355,17 @@ func validateGates(r reporter, g Gates, servers []string) {
 			if spec.requiresWindows {
 				validateScheduleGate(r, field, gate)
 			} else {
-				forbidScheduleFields(r, field, gate)
+				forbidScheduleFields(r, field, gate, spec.allowsRollbackOptIn)
 			}
 			if spec.prometheus {
 				validatePrometheusGate(r, field, gate, servers)
 			} else {
 				forbidPrometheusFields(r, field, gate)
+			}
+			if spec.allowsReporters {
+				validateReporters(r, field+".reporters", gate.Reporters)
+			} else if gate.Reporters != nil {
+				r.addf(field+".reporters", "not allowed for type %s", gate.Type)
 			}
 		}
 	}
@@ -368,4 +377,30 @@ func joinTypes(types []GateType) string {
 		names[i] = string(t)
 	}
 	return strings.Join(names, ", ")
+}
+
+func validateReporters(r reporter, field string, reporters []string) {
+	if reporters != nil && len(reporters) == 0 {
+		r.addf(field, "must not be empty; leave it out to accept any reporter")
+	}
+	seen := make(map[string]bool, len(reporters))
+	for i, actor := range reporters {
+		entry := fmt.Sprintf("%s[%d]", field, i)
+		if err := validateReporterActor(actor); err != nil {
+			r.check(entry, err)
+			continue
+		}
+		if seen[actor] {
+			r.addf(entry, "duplicate reporter %q", actor)
+		}
+		seen[actor] = true
+	}
+}
+
+func validateReporterActor(actor string) error {
+	kind, id, ok := strings.Cut(actor, ":")
+	if !ok || (kind != string(core.ActorToken) && kind != string(core.ActorUser)) {
+		return fmt.Errorf("%q must be token:<name> or user:<provider>:<subject>", actor)
+	}
+	return core.Actor{Kind: core.ActorKind(kind), ID: id}.Validate()
 }
