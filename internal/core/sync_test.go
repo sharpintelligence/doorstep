@@ -71,6 +71,7 @@ func TestSyncStatusReady(t *testing.T) {
 		{name: "degraded", mutate: func(s *SyncStatus) { s.Health.Status = HealthDegraded }},
 		{name: "operation running", mutate: func(s *SyncStatus) { s.OperationPhase = OperationRunning }},
 		{name: "operation terminating", mutate: func(s *SyncStatus) { s.OperationPhase = OperationTerminating }},
+		{name: "health older than the operation", mutate: func(s *SyncStatus) { s.HealthStale = true }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,6 +105,7 @@ func TestSyncFailureReasonClass(t *testing.T) {
 		{SyncReasonNotFound, FailureConfiguration, FailureConfiguration},
 		{SyncReasonForbidden, FailureConfiguration, FailureConfiguration},
 		{SyncReasonUnavailable, FailureTransient, FailureTransient},
+		{SyncReasonUntracked, FailureConfiguration, FailureConfiguration},
 		{"something_new", FailureUnknown, FailureUnknown},
 	}
 	for _, tt := range tests {

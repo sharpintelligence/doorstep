@@ -262,6 +262,121 @@ func TestAssess(t *testing.T) {
 			wantRevision: pinSHA,
 		},
 		{
+			name: "failed operation before a sync result on the pin",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Sync = "OutOfSync"
+				a.Operation = &argocdtest.Operation{
+					Phase: "Failed", Message: "ComparisonError: failed to generate manifest", Revision: pinSHA, WithoutResult: true,
+				}
+			}),
+			wantReached:   true,
+			wantState:     core.SyncOutOfSync,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationFailed,
+			wantReason:    core.SyncReasonFailed,
+			wantClass:     core.FailureVersion,
+			wantMessage:   "sync operation failed: ComparisonError: failed to generate manifest",
+		},
+		{
+			name: "failed operation before a sync result on an older revision is ignored",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Operation = &argocdtest.Operation{Phase: "Failed", Message: "old failure", Revision: otherSHA, WithoutResult: true}
+			}),
+			wantReady:    true,
+			wantReached:  true,
+			wantState:    core.SyncSynced,
+			wantHealth:   core.HealthHealthy,
+			wantRevision: pinSHA,
+		},
+		{
+			name: "failed operation without a requested revision is ignored",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Operation = &argocdtest.Operation{Phase: "Failed", Message: "old failure", WithoutResult: true}
+			}),
+			wantReady:    true,
+			wantReached:  true,
+			wantState:    core.SyncSynced,
+			wantHealth:   core.HealthHealthy,
+			wantRevision: pinSHA,
+		},
+		{
+			name: "multi-source failed operation before a sync result",
+			app: with(synced(""), func(a *argocdtest.Application) {
+				a.Sync = "OutOfSync"
+				a.Sources = []string{chartURL, repoURL}
+				a.Revisions = []string{"4.5.6", pinSHA}
+				a.Operation = &argocdtest.Operation{Phase: "Failed", Message: "manifest generation failed", Revisions: []string{"4.5.6", pinSHA}, WithoutResult: true}
+			}),
+			wantReached:   true,
+			wantState:     core.SyncOutOfSync,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  "4.5.6, " + pinSHA,
+			wantOperation: core.OperationFailed,
+			wantReason:    core.SyncReasonFailed,
+			wantClass:     core.FailureVersion,
+			wantMessage:   "manifest generation failed",
+		},
+		{
+			name: "single-source Helm chart can never reach a commit",
+			app: with(synced("4.5.6"), func(a *argocdtest.Application) {
+				a.RepoURL = chartURL
+			}),
+			wantState:     core.SyncSynced,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  "4.5.6",
+			wantOperation: core.OperationSucceeded,
+			wantReason:    core.SyncReasonUntracked,
+			wantClass:     core.FailureConfiguration,
+			wantMessage:   "revision 4.5.6, which is not a Git commit",
+		},
+		{
+			name: "health read before the operation finished",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.ReconciledAt = reconciled
+				a.Operation.FinishedAt = reconciled.Add(time.Second)
+			}),
+			wantReached:   true,
+			wantState:     core.SyncSynced,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationSucceeded,
+			wantReason:    core.SyncReasonProgressing,
+			wantClass:     core.FailureUnknown,
+			wantMessage:   "reassess health after the sync operation finished",
+			check: func(t *testing.T, s core.SyncStatus) {
+				t.Helper()
+				if !s.HealthStale {
+					t.Error("HealthStale = false, want true")
+				}
+			},
+		},
+		{
+			name: "health read when the operation finished",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.ReconciledAt = reconciled
+				a.Operation.FinishedAt = reconciled
+			}),
+			wantReady:     true,
+			wantReached:   true,
+			wantState:     core.SyncSynced,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationSucceeded,
+		},
+		{
+			name: "operation finish time without a reconcile time is not stale",
+			app: with(synced(pinSHA), func(a *argocdtest.Application) {
+				a.Operation.FinishedAt = reconciled
+			}),
+			wantReady:     true,
+			wantReached:   true,
+			wantState:     core.SyncSynced,
+			wantHealth:    core.HealthHealthy,
+			wantRevision:  pinSHA,
+			wantOperation: core.OperationSucceeded,
+		},
+		{
 			name: "failed operation on the pin",
 			app: with(synced(pinSHA), func(a *argocdtest.Application) {
 				a.Sync = "OutOfSync"

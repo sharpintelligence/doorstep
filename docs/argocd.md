@@ -12,7 +12,7 @@ Each app names one Application (`apps[].argocd.application`, default the app nam
 | `spec.syncPolicy.automated` | whether Argo CD syncs by itself (a failure hint, see below) |
 | `status.sync.status`, `status.sync.revision`, `status.sync.revisions` | sync state and the revision Argo CD last compared against |
 | `status.health.status`, `status.health.message` | Application health |
-| `status.operationState` | the phase, message and per-resource results of the last sync operation |
+| `status.operationState` | the phase, message, requested revision, finish time and per-resource results of the last sync operation |
 | `status.conditions` | `ComparisonError`, `SyncError` and `InvalidSpecError` conditions |
 | `status.resources` | resources that are not healthy or out of sync, to explain a failure |
 | `status.reconciledAt` | when Argo CD last looked at the Application |
@@ -24,9 +24,10 @@ Each app names one Application (`apps[].argocd.application`, default the app nam
 1. the Application's synced revision contains the pin commit (see below);
 2. `status.sync.status` is `Synced`;
 3. no sync operation is `Running` or `Terminating`;
-4. `status.health.status` is `Healthy`.
+4. `status.health.status` is `Healthy`;
+5. when the current sync operation has a `finishedAt` and the Application a `reconciledAt`, the health was assessed no earlier than the operation finished (otherwise the reason is `progressing` until Argo CD reconciles again).
 
-This is the same condition as `argocd app wait --sync --health --operation`. It means the deployment's `syncing` state covers the whole rollout, and `verifying` starts from a healthy Application. The `health` after-gate then checks the same condition again through `Check`, which normally passes at once.
+Apart from the last check, this is the same condition as `argocd app wait --sync --health --operation`. It means the deployment's `syncing` state covers the whole rollout, and `verifying` starts from a healthy Application. The `health` after-gate then checks the same condition again through `Check`, which normally passes at once.
 
 A terminal operation whose phase is `Failed` does not stop the Application from counting as ready when its resources nevertheless ended `Synced` and `Healthy`; doorstep reports the operation message but does not fail the deploy for it.
 
@@ -37,7 +38,8 @@ Argo CD tracks the branch head, and several apps often share one GitOps reposito
 - a revision equal to the pin is accepted at once;
 - otherwise, for a revision of 40 hex characters, doorstep asks GitHub whether the pin is an ancestor of it (`GET /repos/{owner}/{repo}/compare/{pin}...{revision}`): `ahead` or `identical` means it is contained, `behind`, `diverged` and `404` mean it is not;
 - answers are remembered for the rest of the wait, so each new revision costs one GitHub call;
-- a GitHub error is logged at `warn` and counts as "not yet"; the next event or resync asks again.
+- a GitHub error is logged at `warn` and counts as "not yet"; the next event or resync asks again;
+- a `404` from the compare means GitHub does not know one of the commits in that repository, for example because the Application tracks a fork or another repository. It is logged at `warn` and remembered as "not contained", so check the log when a wait times out with reason `not_observed`.
 
 The GitHub App therefore needs read access to the GitOps repository's contents, which it already has to write pins. `doorstep argocd status` works without the GitHub App and then only accepts an equal revision.
 
@@ -49,7 +51,7 @@ For an Application with `spec.sources`, the candidate revisions are the entries 
 - `git@github.com:owner/name`
 - `ssh://git@github.com/owner/name`
 
-The host is not compared, so GitHub Enterprise URLs match too. If no source matches by URL, every revision of 40 hex characters is a candidate. Helm chart versions such as `4.5.6` are never sent to GitHub. The pin counts as reached if any candidate equals it or contains it. The revision recorded for the deployment is the list joined with `, `, for example `0123…cdef, 4.5.6`.
+The host is not compared, so GitHub Enterprise URLs match too. If no source matches by URL, every revision of 40 hex characters is a candidate. Helm chart versions such as `4.5.6` are never sent to GitHub. When Argo CD reports revisions but none of the candidates is a commit, as for a single-source Application of a Helm chart, the pin can never be reached and the reason is `untracked_revision`. The pin counts as reached if any candidate equals it or contains it. The revision recorded for the deployment is the list joined with `, `, for example `0123…cdef, 4.5.6`.
 
 ## Timeouts
 
@@ -69,10 +71,12 @@ Only deterministic conditions end a wait early:
 | --- | --- |
 | The Application does not exist (`404`), or is deleted during the wait | `core.ErrSyncTargetNotFound` |
 | The app has no Application configured | `core.ErrSyncTargetNotFound` |
-| The Kubernetes API answers `401` or `403` to the read | `kube.ErrForbidden` |
+| The Kubernetes API answers `401` or `403` to the read | `core.ErrSyncForbidden` (also `kube.ErrForbidden`) |
 | The current sync operation's phase is `Failed` and its revision is the current synced revision, which contains the pin | `core.ErrSyncFailed` |
 
-Everything else keeps waiting until the timeout: an operation in phase `Error` (Argo CD retries those), `Degraded` health (it often flaps during a rollout), `Missing`, `Suspended`, `OutOfSync`, and Kubernetes API errors. An `operationState` left over from an older revision is ignored.
+Everything else keeps waiting until the timeout: an operation in phase `Error` (Argo CD retries those), `Degraded` health (it often flaps during a rollout), `Missing`, `Suspended`, `OutOfSync`, `untracked_revision`, and Kubernetes API errors.
+
+An operation's revision is the one in its `syncResult`. A sync that fails before Argo CD writes a `syncResult`, for example on a manifest generation error, is matched by the revision it requested in `operation.sync.revision` (or `revisions`), so it still fails fast. An `operationState` left over from an older revision, or one that names no revision, is ignored.
 
 ## Failure reasons
 
@@ -81,6 +85,7 @@ Every non-ready status carries a `core.SyncFailure` with a stable reason, a clas
 | Reason | When | Class |
 | --- | --- | --- |
 | `sync_failed` | the current sync operation failed | `version` |
+| `untracked_revision` | Argo CD reports revisions, but none of the candidates is a Git commit, so the pin can never be reached | `configuration` |
 | `not_observed` | Argo CD has not reached a revision containing the pin | `transient` |
 | `sync_error` | the current operation is in phase `Error`, or a `ComparisonError`, `SyncError` or `InvalidSpecError` condition is set | `transient` |
 | `sync_running` | a sync operation is still running | `unknown` |
@@ -88,7 +93,7 @@ Every non-ready status carries a `core.SyncFailure` with a stable reason, a clas
 | `degraded` | health is `Degraded` | `version` |
 | `missing` | health is `Missing` | `unknown` |
 | `suspended` | health is `Suspended` | `unknown` |
-| `progressing` | health is `Progressing` or unknown | `unknown` |
+| `progressing` | health is `Progressing` or unknown, or was read before the sync operation finished | `unknown` |
 | `not_found` | the Application does not exist | `configuration` |
 | `forbidden` | the API refused the read | `configuration` |
 | `unavailable` | the API could not be read until the timeout | `transient` |
@@ -121,8 +126,8 @@ The `kubernetes` section of the configuration file (or flags and environment var
 
 | Key | Flag | Environment variable | Default |
 | --- | --- | --- | --- |
-| `kubernetes.kubeconfig` | `--kubeconfig` | `DOORSTEP_KUBECONFIG` | empty: in-cluster |
-| `kubernetes.context` | `--kube-context` | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` |
+| `kubernetes.kubeconfig` | `--kubeconfig` (`argocd status` only) | `DOORSTEP_KUBECONFIG` | empty: in-cluster |
+| `kubernetes.context` | `--kube-context` (`argocd status` only) | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` |
 
 ### In the cluster
 
@@ -185,5 +190,6 @@ With `--revision`, it also prints `pin`, `reached`, `ready` and the failure `rea
 | `kube api: 403 Forbidden` | the ServiceAccount lacks `get` on `applications.argoproj.io` in the Application's namespace; see [install.md](install.md#rbac) |
 | `sync target not found` | `argocd.application` or `argocd.namespace` does not name an existing Application |
 | `unsupported kubeconfig setting` | the kubeconfig uses exec, auth-provider, basic auth, impersonation, `insecure-skip-tls-verify` or `proxy-url`; use `kubectl proxy` |
-| timeouts with reason `not_observed` | Argo CD has not refreshed (configure its webhook), tracks another branch or path, or the GitHub App cannot read the GitOps repository |
+| timeouts with reason `not_observed` | Argo CD has not refreshed (configure its webhook), tracks another branch or path, or the GitHub App cannot read the GitOps repository; a `github compare found no such commit` warning means the Application tracks another repository |
+| reason `untracked_revision` | the Application's source is a Helm chart or other non-Git source; point `gitops.repo` at the repository the Application syncs from |
 | timeouts with reason `out_of_sync` and class `configuration` | automated sync is off; sync the Application or enable automated sync |

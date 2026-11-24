@@ -39,18 +39,20 @@ func assess(app application, repository, pin string, contains func(revision stri
 	if op := currentOperation(app); op != nil {
 		status.OperationPhase = op.Phase
 		status.OperationMessage = cut(op.Message)
+		status.HealthStale = !status.OperationInProgress() && healthStale(app, op)
 	}
 	if pin == "" {
 		return status
 	}
-	status.Reached = slices.ContainsFunc(candidateRevisions(app, repository), func(revision string) bool {
+	candidates := candidateRevisions(app, repository)
+	status.Reached = slices.ContainsFunc(candidates, func(revision string) bool {
 		if strings.EqualFold(revision, pin) {
 			return true
 		}
 		return contains != nil && core.ValidateCommitSHA(revision) == nil && contains(revision)
 	})
 	if !status.Ready() {
-		status.Failure = failure(app, status, pin)
+		status.Failure = failure(app, status, pin, trackable(candidates))
 	}
 	return status
 }
@@ -86,19 +88,20 @@ func currentOperation(app application) *operationState {
 	if op.Phase == core.OperationRunning || op.Phase == core.OperationTerminating {
 		return op
 	}
-	if op.SyncResult == nil {
-		return nil
-	}
-	if app.multiSource() {
-		if len(op.SyncResult.Revisions) > 0 && slices.Equal(op.SyncResult.Revisions, app.Status.Sync.Revisions) {
-			return op
-		}
-		return nil
-	}
-	if op.SyncResult.Revision != "" && op.SyncResult.Revision == app.Status.Sync.Revision {
+	revisions := op.revisions(app.multiSource())
+	if len(revisions) > 0 && slices.Equal(revisions, app.revisions()) {
 		return op
 	}
 	return nil
+}
+
+func healthStale(app application, op *operationState) bool {
+	finished, err := time.Parse(time.RFC3339, op.FinishedAt)
+	if err != nil {
+		return false
+	}
+	reconciled, err := time.Parse(time.RFC3339, app.Status.ReconciledAt)
+	return err == nil && reconciled.Before(finished)
 }
 
 func appHealth(app application, now time.Time) core.Health {
@@ -160,7 +163,13 @@ func resources(app application) []core.ResourceStatus {
 	return out
 }
 
-func failure(app application, status core.SyncStatus, pin string) *core.SyncFailure {
+func trackable(candidates []string) bool {
+	return len(candidates) == 0 || slices.ContainsFunc(candidates, func(revision string) bool {
+		return core.ValidateCommitSHA(revision) == nil
+	})
+}
+
+func failure(app application, status core.SyncStatus, pin string, trackable bool) *core.SyncFailure {
 	automated := app.automatedSync()
 	errorCondition := firstErrorCondition(app)
 	var reason core.SyncFailureReason
@@ -168,6 +177,9 @@ func failure(app application, status core.SyncStatus, pin string) *core.SyncFail
 	switch {
 	case status.Reached && status.OperationPhase == core.OperationFailed:
 		reason, message = core.SyncReasonFailed, withDetail("sync operation failed", status.OperationMessage)
+	case !status.Reached && !trackable:
+		reason, message = core.SyncReasonUntracked, "Argo CD reports revision "+status.Revision+", which is not a Git commit, so it can never contain "+pin+
+			"; point the Application's source at the GitOps repository"
 	case !status.Reached:
 		reason, message = core.SyncReasonNotObserved, notObserved(status.Revision, pin)
 		if errorCondition != nil {
@@ -184,6 +196,8 @@ func failure(app application, status core.SyncStatus, pin string) *core.SyncFail
 		if !automated {
 			message += "; automated sync is disabled, so the application must be synced by hand"
 		}
+	case status.HealthStale:
+		reason, message = core.SyncReasonProgressing, "waiting for Argo CD to reassess health after the sync operation finished"
 	case status.Health.Status == core.HealthDegraded:
 		reason, message = core.SyncReasonDegraded, healthMessage(status.Health)
 	case status.Health.Status == core.HealthMissing:

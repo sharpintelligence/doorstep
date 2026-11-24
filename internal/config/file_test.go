@@ -7,6 +7,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
 const fullFile = `
@@ -410,7 +412,7 @@ func defaultedApp() App {
 		GitOps: GitOps{Repo: "example-user/homelab", Branch: "main", Path: "apps/blog"},
 		Pin:    Pin{Kustomize: &KustomizePin{Image: "ghcr.io/example-user/blog"}},
 		Deploy: Deploy{Mode: DeployCommit, MaxBatch: intPtr(DefaultMaxBatch)},
-		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd", SyncTimeout: durPtr(DefaultArgoCDSyncTimeout)},
+		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd", SyncTimeout: durPtr(core.DefaultSyncTimeout)},
 		Gates: Gates{
 			Before: []Gate{{Type: GateChecks, Name: "checks", Timeout: durPtr(30 * time.Minute)}},
 			After:  []Gate{{Type: GateHealth, Name: "health", Timeout: durPtr(10 * time.Minute)}},
@@ -668,7 +670,7 @@ func TestArgoCDTimeout(t *testing.T) {
 		in   ArgoCD
 		want time.Duration
 	}{
-		{name: "default", in: ArgoCD{}, want: DefaultArgoCDSyncTimeout},
+		{name: "default", in: ArgoCD{}, want: core.DefaultSyncTimeout},
 		{name: "explicit", in: ArgoCD{SyncTimeout: durPtr(3 * time.Minute)}, want: 3 * time.Minute},
 	}
 	for _, tt := range tests {

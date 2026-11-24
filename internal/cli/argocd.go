@@ -25,7 +25,8 @@ type repoOpener interface {
 }
 
 type githubAncestry struct {
-	repos repoOpener
+	repos  repoOpener
+	logger *slog.Logger
 }
 
 func (a githubAncestry) Contains(ctx context.Context, repository, ancestor, descendant string) (bool, error) {
@@ -40,6 +41,12 @@ func (a githubAncestry) Contains(ctx context.Context, repository, ancestor, desc
 	comparison, err := repo.Compare(ctx, ancestor, descendant)
 	if err != nil {
 		if github.HasStatus(err, http.StatusNotFound) {
+			a.logger.WarnContext(ctx, "github compare found no such commit; treating the revision as not containing the pin",
+				slog.String("repository", repository),
+				slog.String("revision", ancestor),
+				slog.String("argocd_revision", descendant),
+				slog.String("error", err.Error()),
+			)
 			return false, nil
 		}
 		return false, err
@@ -88,7 +95,7 @@ func newSyncWatcher(cfg config.Config, catalog config.Catalog, lookupEnv LookupE
 	}
 	opts := argocd.Options{Client: client, Applications: syncApplications(catalog), Logger: logger}
 	if githubApp != nil {
-		opts.Ancestry = githubAncestry{repos: githubApp}
+		opts.Ancestry = githubAncestry{repos: githubApp, logger: logger}
 	}
 	return argocd.New(opts)
 }

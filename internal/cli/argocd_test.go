@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -207,7 +209,7 @@ func TestSyncApplications(t *testing.T) {
 	}
 	got := syncApplications(file.Catalog())
 	want := map[core.Target]argocd.Application{
-		core.AppTarget("blog"): {Namespace: "argocd", Name: "blog", Repository: "example-user/homelab", SyncTimeout: config.DefaultArgoCDSyncTimeout},
+		core.AppTarget("blog"): {Namespace: "argocd", Name: "blog", Repository: "example-user/homelab", SyncTimeout: core.DefaultSyncTimeout},
 		core.AppTarget("shop"): {Namespace: "apps", Name: "shop-prod", Repository: "example-user/homelab", SyncTimeout: 20 * time.Minute},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -228,7 +230,6 @@ func TestGitHubAncestry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("github.New: %v", err)
 	}
-	ancestry := githubAncestry{repos: app}
 
 	tests := []struct {
 		name                 string
@@ -236,19 +237,25 @@ func TestGitHubAncestry(t *testing.T) {
 		ancestor, descendant string
 		want                 bool
 		wantErr              string
+		wantWarning          bool
 	}{
 		{name: "later commit", repository: "example-user/homelab", ancestor: first, descendant: second, want: true},
 		{name: "same commit", repository: "example-user/homelab", ancestor: second, descendant: second, want: true},
 		{name: "older commit", repository: "example-user/homelab", ancestor: second, descendant: first},
 		{name: "diverged", repository: "example-user/homelab", ancestor: second, descendant: side},
-		{name: "unknown commit", repository: "example-user/homelab", ancestor: first, descendant: strings.Repeat("e", 40)},
+		{name: "unknown commit", repository: "example-user/homelab", ancestor: first, descendant: strings.Repeat("e", 40), wantWarning: true},
 		{name: "malformed repository", repository: "homelab", ancestor: first, descendant: second, wantErr: "must be owner/name"},
 		{name: "not installed", repository: "example-user/other", ancestor: first, descendant: second, wantErr: "not installed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			var logs bytes.Buffer
+			ancestry := githubAncestry{repos: app, logger: slog.New(slog.NewTextHandler(&logs, nil))}
 			got, err := ancestry.Contains(t.Context(), tt.repository, tt.ancestor, tt.descendant)
+			if warned := strings.Contains(logs.String(), "level=WARN"); warned != tt.wantWarning {
+				t.Errorf("warning logged = %v, want %v: %s", warned, tt.wantWarning, logs.String())
+			}
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("Contains error = %v, want %q", err, tt.wantErr)

@@ -5,14 +5,15 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
 const (
-	DefaultBranch            = "main"
-	DefaultArgoCDNamespace   = "argocd"
-	DefaultArgoCDSyncTimeout = 10 * time.Minute
-	DefaultMaxBatch          = 10
-	MaxMaxBatch              = 100
+	DefaultBranch          = "main"
+	DefaultArgoCDNamespace = "argocd"
+	DefaultMaxBatch        = 10
+	MaxMaxBatch            = 100
 )
 
 type Catalog struct {
@@ -174,7 +175,7 @@ type ArgoCD struct {
 
 func (a ArgoCD) Timeout() time.Duration {
 	if a.SyncTimeout == nil {
-		return DefaultArgoCDSyncTimeout
+		return core.DefaultSyncTimeout
 	}
 	return a.SyncTimeout.Std()
 }

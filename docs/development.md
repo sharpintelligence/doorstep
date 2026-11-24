@@ -88,7 +88,7 @@ kind export kubeconfig --name homelab --kubeconfig /tmp/kind-homelab.yaml
 bin/doorstep argocd status blog --config dev.yaml --kubeconfig /tmp/kind-homelab.yaml --kube-context kind-homelab
 ```
 
-`DOORSTEP_KUBECONFIG` and `DOORSTEP_KUBE_CONTEXT` do the same for `serve`. For clusters whose kubeconfig uses an exec credential plugin (EKS, GKE, AKS), run `kubectl proxy` and use a kubeconfig whose server is `http://127.0.0.1:8001`; see [argocd.md](argocd.md#with-a-kubeconfig).
+`DOORSTEP_KUBECONFIG` and `DOORSTEP_KUBE_CONTEXT` (or the `kubernetes` section of the configuration file) select the same connection without flags. For clusters whose kubeconfig uses an exec credential plugin (EKS, GKE, AKS), run `kubectl proxy` and use a kubeconfig whose server is `http://127.0.0.1:8001`; see [argocd.md](argocd.md#with-a-kubeconfig).
 
 Tests never need a cluster: `argocdtest.NewServer(t)` (in `internal/argocd/argocdtest`) serves `get` and `watch` for Applications built with `argocdtest.Synced` and friends, pushes watch events on `Set`, `Update` and `Delete`, closes or expires watches, injects status codes with `FailNext`, counts requests and writes a kubeconfig for it with `Kubeconfig(t)`.
 

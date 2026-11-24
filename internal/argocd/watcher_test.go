@@ -386,7 +386,7 @@ func TestWaitSyncedFailsFast(t *testing.T) {
 			},
 			target:     blogTarget,
 			revision:   pinSHA,
-			wantIs:     []error{kube.ErrForbidden},
+			wantIs:     []error{core.ErrSyncForbidden, kube.ErrForbidden},
 			wantReason: core.SyncReasonForbidden,
 			wantClass:  core.FailureConfiguration,
 			wantGets:   1,
@@ -399,7 +399,7 @@ func TestWaitSyncedFailsFast(t *testing.T) {
 			},
 			target:     blogTarget,
 			revision:   pinSHA,
-			wantIs:     []error{kube.ErrForbidden},
+			wantIs:     []error{core.ErrSyncForbidden, kube.ErrForbidden},
 			wantReason: core.SyncReasonForbidden,
 			wantClass:  core.FailureConfiguration,
 			wantGets:   1,
@@ -698,7 +698,7 @@ func TestNewValidatesOptions(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 			app, ok := w.Application(blogTarget)
-			if !ok || app.SyncTimeout != DefaultSyncTimeout || w.resync != DefaultResyncInterval {
+			if !ok || app.SyncTimeout != core.DefaultSyncTimeout || w.resync != DefaultResyncInterval {
 				t.Fatalf("defaults = %+v, %s", app, w.resync)
 			}
 		})

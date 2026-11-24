@@ -23,11 +23,13 @@ type Application struct {
 }
 
 type Operation struct {
-	Phase     string
-	Message   string
-	Revision  string
-	Revisions []string
-	Resources []SyncResource
+	Phase         string
+	Message       string
+	Revision      string
+	Revisions     []string
+	Resources     []SyncResource
+	FinishedAt    time.Time
+	WithoutResult bool
 }
 
 type SyncResource struct {
@@ -120,18 +122,26 @@ func (a Application) Object(resourceVersion int) map[string]any {
 			})
 		}
 		result := map[string]any{"resources": results}
+		requested := map[string]any{"revision": a.Operation.Revision}
 		if len(a.Sources) > 0 {
 			result["revisions"] = a.Operation.Revisions
+			requested = map[string]any{"revisions": a.Operation.Revisions}
 		} else {
 			result["revision"] = a.Operation.Revision
 		}
-		status["operationState"] = map[string]any{
-			"phase":      a.Operation.Phase,
-			"message":    a.Operation.Message,
-			"startedAt":  "2026-01-01T00:00:00Z",
-			"operation":  map[string]any{"sync": map[string]any{"revision": a.Operation.Revision}},
-			"syncResult": result,
+		state := map[string]any{
+			"phase":     a.Operation.Phase,
+			"message":   a.Operation.Message,
+			"startedAt": "2026-01-01T00:00:00Z",
+			"operation": map[string]any{"sync": requested},
 		}
+		if !a.Operation.WithoutResult {
+			state["syncResult"] = result
+		}
+		if !a.Operation.FinishedAt.IsZero() {
+			state["finishedAt"] = a.Operation.FinishedAt.UTC().Format(time.RFC3339)
+		}
+		status["operationState"] = state
 	}
 	if len(a.Conditions) > 0 {
 		conditions := make([]any, 0, len(a.Conditions))

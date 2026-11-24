@@ -498,10 +498,6 @@ func TestRunHelp(t *testing.T) {
 			want: []string{"--config", "--registry-credentials-file", config.EnvRegistryCredentialsFile},
 		},
 		{
-			args: []string{"serve", "--help"},
-			want: []string{"--kubeconfig", "--kube-context", config.EnvKubeconfig, config.EnvKubeContext},
-		},
-		{
 			args: []string{"argocd", "status", "--help"},
 			want: []string{"--config", "--kubeconfig", "--kube-context", "--revision", config.EnvKubeconfig},
 		},

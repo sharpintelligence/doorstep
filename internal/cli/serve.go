@@ -70,7 +70,6 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
 	addRegistryCredentialsFlag(flags, &overrides.Registry.CredentialsFile)
-	bindKubernetesFlags(flags, &overrides)
 	return cmd
 }
 

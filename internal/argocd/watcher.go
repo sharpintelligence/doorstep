@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	DefaultSyncTimeout    = 10 * time.Minute
 	DefaultResyncInterval = 30 * time.Second
 
 	watchGrace     = 5 * time.Second
@@ -85,7 +84,7 @@ func New(opts Options) (*Watcher, error) {
 		case app.SyncTimeout < 0:
 			return nil, fmt.Errorf("argocd: sync timeout for %s must be positive, got %s", target, app.SyncTimeout)
 		case app.SyncTimeout == 0:
-			app.SyncTimeout = DefaultSyncTimeout
+			app.SyncTimeout = core.DefaultSyncTimeout
 		}
 		apps[target] = app
 	}
@@ -395,7 +394,7 @@ func apiFailure(app Application, err error) (core.SyncStatus, error) {
 	case kube.IsNotFound(err):
 		reason, err = core.SyncReasonNotFound, fmt.Errorf("%w: %w", core.ErrSyncTargetNotFound, err)
 	case kube.IsForbidden(err):
-		reason = core.SyncReasonForbidden
+		reason, err = core.SyncReasonForbidden, fmt.Errorf("%w: %w", core.ErrSyncForbidden, err)
 	default:
 		return core.SyncStatus{}, fmt.Errorf("argocd: read application %s: %w", app, err)
 	}

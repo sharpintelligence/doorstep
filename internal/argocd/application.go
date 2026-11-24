@@ -55,7 +55,18 @@ type healthInfo struct {
 type operationState struct {
 	Phase      string      `json:"phase"`
 	Message    string      `json:"message"`
+	Operation  operation   `json:"operation"`
 	SyncResult *syncResult `json:"syncResult"`
+	FinishedAt string      `json:"finishedAt"`
+}
+
+type operation struct {
+	Sync *syncOperation `json:"sync"`
+}
+
+type syncOperation struct {
+	Revision  string   `json:"revision"`
+	Revisions []string `json:"revisions"`
 }
 
 type syncResult struct {
@@ -110,4 +121,21 @@ func (a application) revisions() []string {
 func (a application) automatedSync() bool {
 	p := a.Spec.SyncPolicy
 	return p != nil && p.Automated != nil && (p.Automated.Enabled == nil || *p.Automated.Enabled)
+}
+
+func (o operationState) revisions(multiSource bool) []string {
+	revision, revisions := "", []string(nil)
+	switch {
+	case o.SyncResult != nil:
+		revision, revisions = o.SyncResult.Revision, o.SyncResult.Revisions
+	case o.Operation.Sync != nil:
+		revision, revisions = o.Operation.Sync.Revision, o.Operation.Sync.Revisions
+	}
+	if multiSource {
+		return revisions
+	}
+	if revision == "" {
+		return nil
+	}
+	return []string{revision}
 }

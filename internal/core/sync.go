@@ -10,7 +10,10 @@ var (
 	ErrSyncFailed         = errors.New("sync failed")
 	ErrSyncTargetNotFound = errors.New("sync target not found")
 	ErrSyncUnavailable    = errors.New("sync status unavailable")
+	ErrSyncForbidden      = errors.New("sync status forbidden")
 )
+
+const DefaultSyncTimeout = 10 * time.Minute
 
 type HealthStatus string
 
@@ -82,6 +85,7 @@ type SyncStatus struct {
 	OperationPhase   string
 	OperationMessage string
 	Health           Health
+	HealthStale      bool
 	Failure          *SyncFailure
 }
 
@@ -90,7 +94,7 @@ func (s SyncStatus) OperationInProgress() bool {
 }
 
 func (s SyncStatus) Ready() bool {
-	return s.Reached && s.State == SyncSynced && s.Health.Status == HealthHealthy && !s.OperationInProgress()
+	return s.Reached && s.State == SyncSynced && s.Health.Status == HealthHealthy && !s.HealthStale && !s.OperationInProgress()
 }
 
 type SyncFailureReason string
@@ -108,6 +112,7 @@ const (
 	SyncReasonNotFound    SyncFailureReason = "not_found"
 	SyncReasonForbidden   SyncFailureReason = "forbidden"
 	SyncReasonUnavailable SyncFailureReason = "unavailable"
+	SyncReasonUntracked   SyncFailureReason = "untracked_revision"
 )
 
 type FailureClass string
@@ -125,7 +130,7 @@ func (r SyncFailureReason) Class(automatedSync bool) FailureClass {
 		return FailureTransient
 	case SyncReasonFailed, SyncReasonDegraded:
 		return FailureVersion
-	case SyncReasonNotFound, SyncReasonForbidden:
+	case SyncReasonNotFound, SyncReasonForbidden, SyncReasonUntracked:
 		return FailureConfiguration
 	case SyncReasonOutOfSync:
 		if automatedSync {
