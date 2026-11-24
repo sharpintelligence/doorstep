@@ -1,0 +1,48 @@
+{
+  "text": "blog (prod): deploy #42 rolled back",
+  "attachments": [
+    {
+      "color": "#ECB22E",
+      "fallback": "blog (prod): deploy #42 rolled back",
+      "blocks": [
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*blog (prod)*: deploy #42 rolled back\nRollback #43 re-pinned the image that ran before <https://doorstep.example.com/deployments/42|deploy #42>"
+          }
+        },
+        {
+          "type": "section",
+          "fields": [
+            {
+              "type": "mrkdwn",
+              "text": "*Commit*\n<https://github.com/example-user/blog/commit/fedcba9876543210fedcba9876543210fedcba98|example-user/blog@fedcba9>"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Image*\n`sha256:1a3c5e7a9d1f`"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Requested by*\ndoorstep"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Duration*\n1m35s"
+            }
+          ]
+        },
+        {
+          "type": "context",
+          "elements": [
+            {
+              "type": "mrkdwn",
+              "text": "<https://doorstep.example.com/deployments/43|View deployment>"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

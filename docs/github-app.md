@@ -5,6 +5,7 @@ doorstep talks to GitHub as a [GitHub App](https://docs.github.com/en/apps/creat
 - commit image digest pins to the GitOps repository and, where a repository requires it, open pull requests for them;
 - read check runs and commit statuses on application repositories to decide whether a commit is green;
 - write commit statuses that mirror doorstep's own gates;
+- create deployments and deployment statuses on application repositories, so GitHub shows what runs in each environment ([notifications.md](notifications.md#github-deployments));
 - receive webhooks (pushes, check and status updates) that start deployments.
 
 One App serves every repository doorstep works with, across any number of organizations and personal accounts. There are no personal access tokens, deploy keys or SSH keys.
@@ -33,6 +34,7 @@ Repository permissions:
 | Pull requests | Read and write | GitOps repository | open, update, squash-merge and close doorstep's own pin pull requests for apps in `pull_request` mode |
 | Checks | Read | application repositories | read check runs for the CI gate |
 | Commit statuses | Read and write | application repositories | read statuses for the CI gate; write statuses that mirror doorstep's gates |
+| Deployments | Read and write | application repositories | create a GitHub deployment per doorstep deployment and post its statuses (`queued`, `in_progress`, `success`, `failure`, `inactive`) |
 
 No organization or account permissions are needed.
 
@@ -41,6 +43,7 @@ Before recording a push, doorstep reads `GET /repos/{owner}/{repo}/git/ref/heads
 To decide whether a commit is green, doorstep reads, per tracked commit and with the installation token, `GET /repos/{owner}/{repo}/commits/{sha}/status` and the commit's check runs. When every app following the commit lists `required_checks`, it reads only those check runs, one `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name={name}&filter=latest` per name. Otherwise it reads every check run (`check-runs?filter=latest`) and `GET /repos/{owner}/{repo}/commits/{sha}/check-suites`. These need only the Checks and Commit statuses read permissions above. Results are read 100 per page; more than 1,000 results for one request (all check runs, the check runs of one name, statuses or suites) is treated as an error rather than evaluated on a partial list, so very large monorepos should list `required_checks`.
 
 For apps in `pull_request` mode, enable **Allow squash merging** on the GitOps repository. doorstep merges its own pull requests once required status checks pass; if branch protection or a ruleset requires approving reviews, or forbids direct pushes for apps in `commit` mode, add the App to the bypass list. doorstep only ever merges a pull request that changes nothing but its own pin edit ([gitops.md](gitops.md#pull_request)).
+**Adding a permission to an existing App.** When you add *Deployments: Read and write* to an App that is already installed, GitHub asks the owner of each installation to accept the new permission (on the account's **Settings → GitHub Apps** page, or from the email GitHub sends). Until an installation accepts it, doorstep's deployment reports for that installation's repositories fail with `403`; doorstep logs `cannot report deployments to github` once per repository per hour and keeps deploying. To skip GitHub deployments for an app instead, set `apps[].source.deployments: false`.
 
 **GitHub applies one permission set to every repository an installation can reach.** The table says which repositories *need* each permission, but GitHub cannot express that: if the App can write contents in the GitOps repository, it can write contents in every repository the installation includes. Least privilege therefore comes from the repository selection:
 
@@ -145,4 +148,5 @@ Installation tokens minted with the old key stay valid until they expire (at mos
 | `github api: 401 Unauthorized` with `'Expiration time' claim` or `'Issued at' claim` in the message | The host clock is off by more than about a minute. Run NTP on the node. |
 | `github api: 401 Unauthorized` with `A JSON web token could not be decoded` or `Integration not found` | The App ID does not match the private key, or the key was deleted from the App. Check both settings. |
 | `invalid github app private key` at startup | The key is not a PEM RSA key of at least 2048 bits, or an inline value lost its line breaks. Use the file form, or escape newlines as `\n`. |
+| `cannot report deployments to github` (warning) | The App lacks *Deployments: Read and write*, an installation has not accepted it yet, or the repository is not in the installation's selection. Grant or accept the permission, or set `source.deployments: false` on the app. Deploys are not affected. |
 | `request host does not match the github api url` | A request or redirect pointed somewhere other than `DOORSTEP_GITHUB_API_URL`. Check the API URL, in particular for GitHub Enterprise Server. |

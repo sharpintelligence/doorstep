@@ -31,6 +31,7 @@ type FileServer struct {
 	MetricsListenAddr *string   `yaml:"metrics_listen_addr"`
 	ShutdownDelay     *Duration `yaml:"shutdown_delay"`
 	ShutdownTimeout   *Duration `yaml:"shutdown_timeout"`
+	PublicURL         *string   `yaml:"public_url"`
 }
 
 type FileLog struct {
@@ -99,6 +100,9 @@ func (f File) Apply(base Config) Config {
 	if f.Server.ShutdownTimeout != nil {
 		cfg.Server.ShutdownTimeout = f.Server.ShutdownTimeout.Std()
 	}
+	if f.Server.PublicURL != nil {
+		cfg.Server.PublicURL = *f.Server.PublicURL
+	}
 	if f.Log.Level != nil {
 		cfg.Log.Level = *f.Log.Level
 	}
@@ -129,6 +133,9 @@ func (f File) Apply(base Config) Config {
 
 func (f File) Catalog() Catalog {
 	c := Catalog{Notifications: slices.Clone(f.Notifications)}
+	for i := range c.Notifications {
+		c.Notifications[i].Events = slices.Clone(c.Notifications[i].Events)
+	}
 	for _, a := range f.Apps {
 		c.Apps = append(c.Apps, a.withDefaults())
 	}

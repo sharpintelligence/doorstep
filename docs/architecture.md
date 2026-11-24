@@ -40,7 +40,8 @@ doorstep never talks to workloads directly and never mutates Argo CD. Git is the
                        at high priority: it re-pins the previous
                        digest through this same path
 
- notify fires on every terminal state; history records every transition.
+ notify reports queued, started and every terminal state (Slack, webhooks,
+ GitHub deployment statuses) and lock changes; history records every transition.
 ```
 
 ## Package map
@@ -55,11 +56,11 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
-| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
+| `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `Notification`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
 | `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, tracked commits, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
 | `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
 | `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends only on `core` through a `Repository` port that `*store.Store` satisfies; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
-| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites and branch heads, webhook signature verification; `Repo` handle with typed contents, refs, commits and pull request calls | built |
+| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites, branch heads, deployments and deployment statuses, webhook signature verification; `Repo` handle with typed contents, refs, commits and pull request calls | built |
 | `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens; in-memory fake repository (branches, commits, contents, refs, pull requests with squash merges) with hooks to inject concurrent writes, blocked merges and conflicts | built |
 | `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; see [Merge and CI detection](#merge-and-ci-detection). The webhook handler and poller that call it, and API and CLI requests, are later beads | built |
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
@@ -67,7 +68,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API | planned |
 | `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; see [gates.md](gates.md). The `checks`, `health` and `soak` gate types are planned | built |
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
-| `internal/notify` | Slack, ntfy and generic webhook notifications | planned |
+| `internal/notify` | Slack and generic webhook notifications; GitHub deployment statuses; see [notifications.md](notifications.md) | built |
 | `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
 | `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication, queue, lock and deploy history endpoints; see [api.md](api.md) | built |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
@@ -82,7 +83,7 @@ The design is ports and adapters.
 
 - `core` imports nothing from `internal/`. Every other package may import it.
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
-- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config`.
+- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops`, `intake` and `notify` use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config`.
 - `store` imports only `core`.
 - `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
 - `gates` imports `core`, `config` (the typed `App` and `Gate` its factories read) and `metrics` (only the label types of its `Metrics` port). It reaches Postgres only through its `ResultStore` port, which `*store.Store` satisfies, and never imports `store` or `engine`.
@@ -138,7 +139,7 @@ type GateEvaluator interface {
 }
 
 type Notifier interface {
-	Notify(ctx context.Context, ev core.Event) error
+	Notify(ctx context.Context, n core.Notification)
 }
 
 type Clock interface {
@@ -151,6 +152,8 @@ type Clock interface {
 `Locker` is what `locks.Service` offers the engine: the live freezes (app and global) that block a target, so the engine can record the `lock` gate as pending with the owner and reason as evidence. The claim itself already skips frozen deploys ([locks.md](locks.md)). Per-target serialisation needs no lock rows: head-of-line claiming and the one-active-deployment index provide it, and kind `deployment` lock rows are reserved for the engine.
 
 The store already implements the deployment side: `TransitionDeployment`, `SetLineage` and `LastSuccessfulDeployment` ([database.md](database.md#transitions-and-lineage)). The engine bead decides whether its port takes `store.Transition` as is or a mirror type in `core`, keeping `engine` free of a `store` import.
+
+`Notifier` has no error result on purpose: `notify.Dispatcher` validates and queues the notification without network I/O and returns, so a notification can never block or fail a deploy (see [Notifications](#notifications)).
 
 `PinWriter` is `*gitops.Writer`. Like the registry adapter, `gitops` owns its request and result types (plain strings plus `core.Digest`, `core.Commit`, `core.DeploymentID` and `core.Kind`) and imports only `core` and `github`, never `config`; the engine maps `config.App` to `gitops.Target`. It has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). See [GitOps pin writer](#gitops-pin-writer).
 
@@ -260,6 +263,25 @@ result, err := writer.Pin(ctx, gitops.Request{Target: target, Digest: digest, De
 | `ErrMergeTimeout` | not mergeable within `MergeTimeout` | call `Pin` again to keep waiting, or `Abandon` |
 | `github.ErrFileTooLarge`, `github.ErrNotAFile` | the pin file is over 1 MiB, or a directory, symlink or submodule | fix the GitOps repository |
 | `*github.APIError` | any other GitHub refusal, such as `403` or `404` | inspect `StatusCode` |
+## Notifications
+
+`internal/notify` is a sink for `core.Notification` values; it decides nothing about when they are emitted. The engine emits deploy events as deployments move through their states and the locks code emits lock events. `core.Notification` carries the deployment (with commit, digests and failure reason), the deployment a rollback reverts, or the lock, which is more than the `core.Event` history row holds.
+
+```
+engine ── Notify(n) ──► Dispatcher: validate, route by app, enqueue (no I/O)
+                           │
+             ┌─────────────┼──────────────────┐
+             ▼             ▼                  ▼
+        queue + worker  queue + worker   queue + worker      one per target, 64 deep
+         Slack "ops"    webhook "hooks"  GitHub deployments
+             │             │                  │
+             └── retry: 4 attempts, 1s/2s/4s ±20%, 10 s each, Retry-After ≤ 30 s
+```
+
+- Routing: `apps[].notify` names the Slack and webhook targets of each app; the GitHub reporter is global and skips apps with `source.deployments: false`. Each target filters by event kind (`notifications[].events`, six kinds by default).
+- Delivery is in memory and best effort ([ADR 0006](decisions/0006-notifications-are-best-effort.md)): per-target queues keep order and isolate slow targets, a full queue drops and counts, and `Dispatcher.Close(ctx)` drains until the shutdown deadline. Outcomes are counted in `doorstep_notifications_total`.
+- `notify` does not import `config` or `metrics`. `cli` maps the catalog to `notify.SlackOptions`, `notify.WebhookOptions` and routes, passes secrets as closures over `SecretRef.Read` (read on every send), and adapts `metrics.Recorder` to `notify.Observer`. `cli.newNotifier` builds the dispatcher; the engine bead calls it from `serve`, hands the dispatcher to the engine and closes it with the shutdown timeout.
+- The GitHub reporter keeps no state that matters: it finds the GitHub deployment by commit, environment (the app name) and the `doorstep_deployment_id` in its payload, or creates it, and caches IDs in a bounded map until the deployment ends.
 
 ## State machine and concurrency
 
@@ -327,8 +349,8 @@ Client.Do(ctx, method, path, in, out)   JSON in/out, non-2xx → *APIError
 - `RepoClient` rejects owner and repository names that are not valid GitHub names (`ErrInvalidRepository`), so names from configuration or webhooks cannot reach other API routes. Owners may contain `_` for Enterprise Managed User accounts (`handle_shortcode`). A missing or suspended installation is `ErrNotInstalled` / `ErrInstallationSuspended` and is never cached.
 - Lookups and mints go through a small in-package single-flight group: concurrent callers for the same repository or installation share one call and its result or error, each waiting under its own context. The shared call runs detached from any one caller's cancellation and is bounded to 30 s. A `401` drops the cached token; a `404` or a suspension `403` while minting evicts the token and every lookup that pointed at that installation. Expired lookups are swept whenever a new one is stored. Nothing retries automatically; engine steps are idempotent and retried by the engine.
 - Every request, with an App JWT or an installation token, goes through a transport that only sends it when the scheme and host match the configured API URL and refuses anything else with `ErrForeignHost`, including redirects. Tokens are never exported from the package.
-- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Typed methods sit on top of `Client.Do`: `ListCheckRuns`, `ListCheckRunsNamed`, `CombinedStatus`, `ListCheckSuites` and `BranchHead` (see [Merge and CI detection](#merge-and-ci-detection). `BranchHead` validates branch names (`ErrInvalidBranch`) and reports a missing branch as `ErrBranchNotFound`.
-- `App.Repo(ctx, owner, name)` returns a `Repo` handle with typed calls on top of `Client.Do`: `GetFile`/`PutFile` (Contents API; regular files of at most 1 MiB, `ErrNotAFile`, `ErrFileTooLarge`), `BranchSHA`/`CreateBranch`/`DeleteBranch` (`ErrRefNotFound`, `ErrRefExists`), `ListCommits`, and pull request list, create, get, update, merge and update-branch. Each path segment is escaped on its own and paths with empty, `.` or `..` segments or control characters are rejected (`ErrInvalidPath`). `HasStatus` classifies an `*APIError`. Later beads add statuses and checks the same way.
+- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Typed methods sit on top of `Client.Do`: `ListCheckRuns`, `ListCheckRunsNamed`, `CombinedStatus`, `ListCheckSuites`, `ListDeployments`, `CreateDeployment` (always `auto_merge: false` and no required contexts), `CreateDeploymentStatus` and `BranchHead` (see [Merge and CI detection](#merge-and-ci-detection). `BranchHead` validates branch names (`ErrInvalidBranch`) and reports a missing branch as `ErrBranchNotFound`.
+- `App.Repo(ctx, owner, name)` returns a `Repo` handle with typed calls on top of `Client.Do`: `GetFile`/`PutFile` (Contents API; regular files of at most 1 MiB, `ErrNotAFile`, `ErrFileTooLarge`), `BranchSHA`/`CreateBranch`/`DeleteBranch` (`ErrRefNotFound`, `ErrRefExists`), `ListCommits`, and pull request list, create, get, update, merge and update-branch. Each path segment is escaped on its own and paths with empty, `.` or `..` segments or control characters are rejected (`ErrInvalidPath`). `HasStatus` classifies an `*APIError`. `WebBaseURL` derives the web host for links from the API URL.
 - `VerifySignature` checks `X-Hub-Signature-256` webhook signatures against the raw body with a constant-time comparison.
 
 Setup, permissions and the least-privilege model are described in [github-app.md](github-app.md).
@@ -343,6 +365,7 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 - Pins are written through the GitHub Contents API using the blob SHA for optimistic concurrency: no local clone, no git binary, no SSH keys, no writable volume. Only regular files of at most 1 MiB are read or written, and every value written into a commit message is checked for control characters, so trailers cannot be injected.
 - In pull request mode doorstep only merges its own pull request: the head must be a branch of the GitOps repository itself, the pull request must change exactly the pin file, that file must be byte-equal to doorstep's edit of the current base, and the merge is pinned to the head SHA that was checked. Anyone who can push to the branch therefore cannot use the App's write access to merge other changes.
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed.
+- Outbound notifications use one HTTP client with a 10 s timeout that never follows redirects, so signed payloads and secret webhook URLs stay on the configured host. Slack webhook URLs (and webhook URLs from `url_env`/`url_file`) are credentials: they are read per send, never logged, and removed from transport errors. Generic webhooks are signed with HMAC-SHA256 over the raw body (`X-Doorstep-Signature-256`). Targets on private addresses are allowed, since they are operator-configured and usually on the home network. Response bodies are read through a 4 KiB limit and only 256 bytes are quoted in logs.
 - Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications. The install base grants exactly this; see [install.md](install.md#rbac).
 - Only image digests are pinned, never mutable tags.
 - Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.

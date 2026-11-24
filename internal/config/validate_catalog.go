@@ -8,6 +8,31 @@ import (
 	"strings"
 )
 
+func NotificationEvents() []string {
+	return []string{
+		"deploy.queued",
+		"deploy.started",
+		"deploy.succeeded",
+		"deploy.failed",
+		"deploy.rolled_back",
+		"deploy.cancelled",
+		"deploy.superseded",
+		"lock.changed",
+		"lock.reminder",
+	}
+}
+
+func DefaultNotificationEvents() []string {
+	return []string{
+		"deploy.started",
+		"deploy.succeeded",
+		"deploy.failed",
+		"deploy.rolled_back",
+		"lock.changed",
+		"lock.reminder",
+	}
+}
+
 type reporter struct {
 	prefix string
 	errs   *[]error
@@ -115,6 +140,7 @@ func validateNotification(r reporter, n Notification) {
 	default:
 		r.addf("type", "unknown type %q (want slack or webhook)", n.Type)
 	}
+	validateEvents(r, n.Events)
 	for _, f := range []field{{"webhook_url_env", n.WebhookURLEnv}, {"url_env", n.URLEnv}, {"secret_env", n.SecretEnv}} {
 		if f.value != "" {
 			r.check(f.name, validateEnvName(f.value))
@@ -124,6 +150,28 @@ func validateNotification(r reporter, n Notification) {
 		if f.value != "" {
 			r.check(f.name, validateSecretFile(f.value))
 		}
+	}
+}
+
+func validateEvents(r reporter, events []string) {
+	if events == nil {
+		return
+	}
+	if len(events) == 0 {
+		r.addf("events", "must not be empty; leave it out for the default events")
+		return
+	}
+	known := NotificationEvents()
+	seen := make(map[string]bool, len(events))
+	for i, event := range events {
+		field := fmt.Sprintf("events[%d]", i)
+		switch {
+		case !slices.Contains(known, event):
+			r.addf(field, "unknown event %q (want one of %s)", event, strings.Join(known, ", "))
+		case seen[event]:
+			r.addf(field, "duplicate event %q", event)
+		}
+		seen[event] = true
 	}
 }
 

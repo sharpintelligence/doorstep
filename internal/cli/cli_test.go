@@ -584,7 +584,7 @@ func TestResolveServeConfig(t *testing.T) {
 
 	const databaseURL = "postgres://doorstep@localhost/doorstep"
 	flags := config.Config{
-		Server:   config.Server{ListenAddr: "127.0.0.1:7000", MetricsListenAddr: "127.0.0.1:7001", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
+		Server:   config.Server{ListenAddr: "127.0.0.1:7000", MetricsListenAddr: "127.0.0.1:7001", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second, PublicURL: "https://flag.example.com"},
 		Log:      config.Log{Level: "error", Format: "text"},
 		Database: config.Database{URLFile: "/run/secrets/database-url"},
 		GitHub:   config.Default().GitHub,
@@ -681,8 +681,19 @@ locks:
 		},
 		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagMetricsListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
+			changed: []string{flagListenAddr, flagMetricsListenAddr, flagShutdownDelay, flagShutdownTimeout, flagPublicURL, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
 			want:    func(c *config.Config) { *c = flags },
+		},
+		{
+			name: "public url from environment",
+			env:  map[string]string{config.EnvPublicURL: "https://env.example.com"},
+			want: func(c *config.Config) { c.Server.PublicURL = "https://env.example.com" },
+		},
+		{
+			name:    "public url flag over environment",
+			env:     map[string]string{config.EnvPublicURL: "https://env.example.com"},
+			changed: []string{flagPublicURL},
+			want:    func(c *config.Config) { c.Server.PublicURL = flags.Server.PublicURL },
 		},
 		{
 			name: "database URL file from environment",

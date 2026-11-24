@@ -32,6 +32,30 @@ doorstep_deployments_started_total{app="web"} 2
 `,
 		},
 		{
+			name: "notifications by type and result, primed at zero",
+			calls: func(r *Recorder) {
+				r.NotificationDelivered(NotificationSlack, NotificationSent)
+				r.NotificationDelivered(NotificationSlack, NotificationSent)
+				r.NotificationDelivered(NotificationWebhook, NotificationFailed)
+				r.NotificationDelivered(NotificationGitHub, NotificationDropped)
+				r.NotificationDelivered(NotificationType("email"), NotificationResult("lost"))
+			},
+			want: `
+# HELP doorstep_notifications_total Notification deliveries, by target type and result.
+# TYPE doorstep_notifications_total counter
+doorstep_notifications_total{result="dropped",type="github"} 1
+doorstep_notifications_total{result="dropped",type="slack"} 0
+doorstep_notifications_total{result="dropped",type="webhook"} 0
+doorstep_notifications_total{result="failed",type="github"} 0
+doorstep_notifications_total{result="failed",type="slack"} 0
+doorstep_notifications_total{result="failed",type="webhook"} 1
+doorstep_notifications_total{result="sent",type="github"} 0
+doorstep_notifications_total{result="sent",type="slack"} 2
+doorstep_notifications_total{result="sent",type="webhook"} 0
+doorstep_notifications_total{result="unknown",type="unknown"} 1
+`,
+		},
+		{
 			name: "rollbacks per app and reason",
 			calls: func(r *Recorder) {
 				r.Rollback("web", RollbackReasonGateFailed)

@@ -78,6 +78,11 @@ type Source struct {
 	Repo           RepoName `yaml:"repo"`
 	Branch         string   `yaml:"branch"`
 	RequiredChecks []string `yaml:"required_checks"`
+	Deployments    *bool    `yaml:"deployments"`
+}
+
+func (s Source) DeploymentsEnabled() bool {
+	return s.Deployments == nil || *s.Deployments
 }
 
 type Image struct {
@@ -220,6 +225,14 @@ type Notification struct {
 	URLFile        string           `yaml:"url_file"`
 	SecretEnv      string           `yaml:"secret_env"`
 	SecretFile     string           `yaml:"secret_file"`
+	Events         []string         `yaml:"events"`
+}
+
+func (n Notification) EventNames() []string {
+	if n.Events == nil {
+		return DefaultNotificationEvents()
+	}
+	return slices.Clone(n.Events)
 }
 
 func (n Notification) Endpoint() SecretRef {
@@ -241,6 +254,9 @@ func (n Notification) label(field string) string {
 func (a App) withDefaults() App {
 	a.Source.Branch = orDefault(a.Source.Branch, DefaultBranch)
 	a.Source.RequiredChecks = slices.Clone(a.Source.RequiredChecks)
+	if a.Source.Deployments != nil {
+		a.Source.Deployments = new(*a.Source.Deployments)
+	}
 	a.GitOps.Branch = orDefault(a.GitOps.Branch, DefaultBranch)
 	a.GitOps.Path = cleanRelative(a.GitOps.Path)
 	a.Pin = a.Pin.withDefaults(a.Image.Repository)

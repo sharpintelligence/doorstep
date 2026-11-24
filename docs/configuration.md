@@ -24,6 +24,7 @@ Apps and notification targets are only read from the configuration file; they ha
 | `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | `:9090` | Address for the `/metrics` listener as `host:port`; `/metrics` is served only there. Must differ from `--listen-addr`. Set it to an empty value to serve `/metrics` on the main listener instead, which is only safe when the main listener is not reachable from the internet. Until API authentication exists, the `/api/v1/` JSON API is served only on this listener; an empty value disables it. See [metrics.md](metrics.md) and [api.md](api.md). |
 | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` | `5s` | How long the server keeps serving after `SIGINT`/`SIGTERM` while `/readyz` reports `shutting_down`, before it stops accepting connections. Gives load balancers time to stop routing to the instance. Go duration syntax. `0s` disables it; must not be negative. |
 | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` | `15s` | How long in-flight requests may run once the shutdown delay has passed, before the server is closed. Go duration syntax (`30s`, `1m`). Must be positive. |
+| `--public-url` | `DOORSTEP_PUBLIC_URL` | empty | The external base URL people use to reach doorstep, such as `https://doorstep.example.com`. Notifications link to `<public url>/deployments/<id>` and GitHub deployment statuses use that as their log URL; without it those links are left out. Must be an absolute `http` or `https` URL with a host and without user information, query or fragment; a trailing slash is ignored. See [notifications.md](notifications.md#links). |
 | `--log-level` | `DOORSTEP_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` (case-insensitive). Health probe and `/metrics` requests are logged at `debug`. |
 | `--log-format` | `DOORSTEP_LOG_FORMAT` | `json` | `json` or `text`. Logs are written to stderr. |
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
@@ -251,6 +252,7 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `server.metrics_listen_addr` | `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` |
 | `server.shutdown_delay` | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` |
 | `server.shutdown_timeout` | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` |
+| `server.public_url` | `--public-url` | `DOORSTEP_PUBLIC_URL` |
 | `log.level` | `--log-level` | `DOORSTEP_LOG_LEVEL` |
 | `log.format` | `--log-format` | `DOORSTEP_LOG_FORMAT` |
 | `database.url_file` | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` or `DOORSTEP_DATABASE_URL` |
@@ -272,9 +274,10 @@ Named notification targets. Apps refer to them by name in `notify`.
 | `type` | yes | `slack` or `webhook`. |
 | `webhook_url_env` / `webhook_url_file` | `slack`: exactly one | Environment variable or absolute file path holding the Slack incoming webhook URL. Slack webhook URLs are credentials, so there is no inline form. |
 | `url` / `url_env` / `url_file` | `webhook`: exactly one | The endpoint doorstep posts to: inline (`http` or `https`, with a host, and without `user:password@`, a query string or a fragment, since those often carry tokens), or from an environment variable or absolute file path when the URL itself carries a token. |
-| `secret_env` / `secret_file` | `webhook`: optional, at most one | Secret used to sign webhook payloads. |
+| `secret_env` / `secret_file` | `webhook`: optional, at most one | Secret used to sign webhook payloads (`X-Doorstep-Signature-256`, HMAC-SHA256 of the body). |
+| `events` | no | Events this target receives, by name: `deploy.queued`, `deploy.started`, `deploy.succeeded`, `deploy.failed`, `deploy.rolled_back`, `deploy.cancelled`, `deploy.superseded`, `lock.changed`, `lock.reminder`. Leave it out for the defaults (`deploy.started`, `deploy.succeeded`, `deploy.failed`, `deploy.rolled_back`, `lock.changed`, `lock.reminder`). An empty list, an unknown event or a repeated event is an error. |
 
-Keys that belong to the other type are rejected. Environment variable names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and file paths must be absolute. See [Secrets](#secrets) for how they are read.
+Keys that belong to the other type are rejected. Environment variable names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and file paths must be absolute. See [Secrets](#secrets) for how they are read, [notifications.md](notifications.md) for message contents, the webhook payload and delivery, and [`doorstep notify test`](#doorstep-notify-test) to try a target.
 
 ### `apps[]`
 
@@ -285,6 +288,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `name` | required | Unique name; a DNS label. It appears in URLs, commit status contexts and metric labels. |
 | `source.repo` | required | GitHub repository that builds the image, as `owner/name`. Owners can be organizations or personal accounts, and apps from several owners can share one file. |
 | `source.branch` | `main` | Merges to this branch are deployed. |
+| `source.deployments` | `true` | Report each deployment as a GitHub deployment with statuses on `source.repo` (environment = the app name) when the GitHub App is configured. Set `false` to skip, for example when the repository has `on: deployment` workflows that should not run. See [notifications.md](notifications.md#github-deployments). |
 | `source.required_checks` | all checks | Names of the check runs and commit statuses that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique. See [Required checks](#required-checks). |
 | `image.repository` | required | Fully qualified image repository without tag or digest, such as `ghcr.io/example-user/blog`. The registry host must contain a `.` or a `:port`, or be `localhost`; there is no implicit Docker Hub. The path must be lowercase. Images are expected to be tagged with the full commit SHA. |
 | `gitops.repo` | required | GitHub repository Argo CD syncs from, as `owner/name`. |
@@ -360,6 +364,7 @@ Two owners, both pin strategies, both deploy modes, a soak gate and both notific
 server:
   shutdown_delay: 10s
   metrics_listen_addr: :9090
+  public_url: https://doorstep.example.com
 log:
   format: json
 database:
@@ -376,10 +381,11 @@ notifications:
   - name: ops
     type: slack
     webhook_url_file: /etc/doorstep/secrets/slack-webhook-url
-  - name: ntfy
+  - name: hooks
     type: webhook
-    url: https://ntfy.example.com/doorstep
-    secret_env: DOORSTEP_NTFY_SECRET
+    url: https://hooks.example.com/doorstep
+    secret_env: DOORSTEP_HOOKS_SECRET
+    events: [deploy.succeeded, deploy.failed, deploy.rolled_back]
 
 apps:
   - name: blog
@@ -408,13 +414,14 @@ apps:
       after:
         - type: health
           timeout: 5m
-    notify: [ops, ntfy]
+    notify: [ops, hooks]
 
   - name: api-prod
     source:
       repo: example-org/api
       branch: release
       required_checks: [test, lint, e2e]
+      deployments: false
     image:
       repository: ghcr.io/example-org/api
     gitops:
@@ -439,7 +446,7 @@ apps:
         - type: health
         - type: soak
           duration: 30m
-    notify: [ops, ntfy]
+    notify: [ops, hooks]
 ```
 
 ### Kubernetes
@@ -497,6 +504,14 @@ doorstep config validate --config config.yaml
 ```
 
 Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags, so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
+
+## `doorstep notify test`
+
+```sh
+doorstep notify test <notification-name> --config config.yaml
+```
+
+Sends one synthetic `deploy.succeeded` notification to the named `notifications[]` target, with a single attempt, and prints `ok: sent deploy.succeeded to <name> (<type>)`. It is sent even when the target's `events` leave `deploy.succeeded` out. It uses the same secrets (`*_env` variables and `*_file` paths), `DOORSTEP_PUBLIC_URL` and HTTP client as `serve`, so it proves the target works before a real deploy depends on it. On failure it prints the reason without the URL, such as `unexpected response 404 Not Found: no_service`, and exits 1. The path comes from `--config` or `DOORSTEP_CONFIG`. See [notifications.md](notifications.md#testing-a-target).
 
 ## Secrets
 

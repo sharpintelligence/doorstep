@@ -28,3 +28,7 @@ func newVersionCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print as JSON")
 	return cmd
 }
+
+func userAgent() string {
+	return "doorstep/" + buildinfo.Read().Version
+}

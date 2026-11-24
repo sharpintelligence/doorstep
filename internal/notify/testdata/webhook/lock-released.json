@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "00112233445566778899aabbccddeeff",
+  "type": "lock.changed",
+  "occurred_at": "2026-11-23T10:30:00Z",
+  "app": "blog",
+  "environment": "prod",
+  "actor": "carol",
+  "lock": {
+    "kind": "freeze",
+    "owner": "bob",
+    "reason": "database migration",
+    "change": "released",
+    "created_at": "2026-11-23T07:30:00Z",
+    "expires_at": "2026-11-23T14:30:00Z"
+  }
+}

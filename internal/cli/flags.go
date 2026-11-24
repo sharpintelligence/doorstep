@@ -16,6 +16,7 @@ const (
 	flagMetricsListenAddr = "metrics-listen-addr"
 	flagShutdownDelay     = "shutdown-delay"
 	flagShutdownTimeout   = "shutdown-timeout"
+	flagPublicURL         = "public-url"
 	flagLogLevel          = "log-level"
 	flagLogFormat         = "log-format"
 	flagDatabaseURLFile   = "database-url-file"
@@ -52,6 +53,9 @@ func resolveConfig(changed func(name string) bool, overrides config.Config, file
 	}
 	if changed(flagShutdownTimeout) {
 		cfg.Server.ShutdownTimeout = overrides.Server.ShutdownTimeout
+	}
+	if changed(flagPublicURL) {
+		cfg.Server.PublicURL = overrides.Server.PublicURL
 	}
 	if changed(flagLogLevel) {
 		cfg.Log.Level = overrides.Log.Level

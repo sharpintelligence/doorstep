@@ -39,6 +39,7 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newLockCommand(lookupEnv),
 		newUnlockCommand(lookupEnv),
 		newLocksCommand(lookupEnv),
+		newNotifyCommand(lookupEnv),
 	)
 	return root
 }

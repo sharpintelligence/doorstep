@@ -1,0 +1,31 @@
+{
+  "text": "blog (prod): unfrozen by carol",
+  "attachments": [
+    {
+      "color": "#9E9E9E",
+      "fallback": "blog (prod): unfrozen by carol",
+      "blocks": [
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*blog (prod)*: unfrozen by carol"
+          }
+        },
+        {
+          "type": "section",
+          "fields": [
+            {
+              "type": "mrkdwn",
+              "text": "*Owner*\nbob"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Reason*\ndatabase migration"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
