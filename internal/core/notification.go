@@ -14,6 +14,7 @@ type NotificationKind string
 const (
 	NotificationDeployQueued     NotificationKind = "deploy.queued"
 	NotificationDeployStarted    NotificationKind = "deploy.started"
+	NotificationDeployRetrying   NotificationKind = "deploy.retrying"
 	NotificationDeploySucceeded  NotificationKind = "deploy.succeeded"
 	NotificationDeployFailed     NotificationKind = "deploy.failed"
 	NotificationDeployRolledBack NotificationKind = "deploy.rolled_back"
@@ -27,6 +28,7 @@ func NotificationKinds() []NotificationKind {
 	return []NotificationKind{
 		NotificationDeployQueued,
 		NotificationDeployStarted,
+		NotificationDeployRetrying,
 		NotificationDeploySucceeded,
 		NotificationDeployFailed,
 		NotificationDeployRolledBack,
@@ -40,6 +42,7 @@ func NotificationKinds() []NotificationKind {
 func DefaultNotificationKinds() []NotificationKind {
 	return []NotificationKind{
 		NotificationDeployStarted,
+		NotificationDeployRetrying,
 		NotificationDeploySucceeded,
 		NotificationDeployFailed,
 		NotificationDeployRolledBack,

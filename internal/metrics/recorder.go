@@ -16,6 +16,7 @@ var (
 type Recorder struct {
 	deploymentsStarted *prometheus.CounterVec
 	deploymentDuration *prometheus.HistogramVec
+	deploymentRetries  *prometheus.CounterVec
 	rollbacks          *prometheus.CounterVec
 	gateDuration       *prometheus.HistogramVec
 	notifications      *prometheus.CounterVec
@@ -37,6 +38,11 @@ func newRecorder() *Recorder {
 			Help:      "Time from deployment start to a final outcome, by application and outcome.",
 			Buckets:   deploymentDurationBuckets,
 		}, []string{"app", "outcome"}),
+		deploymentRetries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "deployment_retries_total",
+			Help:      "Failed deployment attempts that doorstep retried on the same version, by application and failure class.",
+		}, []string{"app", "class"}),
 		rollbacks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "rollbacks_total",
@@ -86,7 +92,7 @@ func newRecorder() *Recorder {
 }
 
 func (r *Recorder) collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications, r.webhookDeliveries, r.pollCycles, r.migrationFailures}
+	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.deploymentRetries, r.rollbacks, r.gateDuration, r.notifications, r.webhookDeliveries, r.pollCycles, r.migrationFailures}
 }
 
 func (r *Recorder) DeploymentStarted(app string) {
@@ -95,6 +101,10 @@ func (r *Recorder) DeploymentStarted(app string) {
 
 func (r *Recorder) DeploymentFinished(app string, outcome Outcome, duration time.Duration) {
 	r.deploymentDuration.WithLabelValues(app, outcome.label()).Observe(duration.Seconds())
+}
+
+func (r *Recorder) DeploymentRetried(app string, class FailureClass) {
+	r.deploymentRetries.WithLabelValues(app, class.label()).Inc()
 }
 
 func (r *Recorder) Rollback(app string, reason RollbackReason) {
@@ -129,6 +139,9 @@ func (r *Recorder) PrimeApp(app string) {
 	}
 	for _, reason := range allReasons {
 		r.rollbacks.WithLabelValues(app, reason.label())
+	}
+	for _, class := range primedRetryClasses {
+		r.deploymentRetries.WithLabelValues(app, class.label())
 	}
 	for _, gate := range allGates {
 		for _, phase := range allPhases {

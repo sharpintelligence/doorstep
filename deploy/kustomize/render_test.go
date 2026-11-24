@@ -161,8 +161,9 @@ func TestRenderedExamples(t *testing.T) {
 				"DOORSTEP_CONFIG":                    "/etc/doorstep/config/config.yaml",
 				"DOORSTEP_DATABASE_URL_FILE":         "/etc/doorstep/secrets/database-url",
 				"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "/etc/doorstep/registry/.dockerconfigjson",
+				"DOORSTEP_KUBE_POD_DIAGNOSTICS":      "true",
 			})
-			assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader")
+			assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader", "doorstep-pods-reader")
 		})
 	}
 }
@@ -203,6 +204,47 @@ func TestJobGateComponentRenders(t *testing.T) {
 	slices.Sort(roles)
 	if want := []string{"doorstep-applications-reader", "doorstep-jobs-reader"}; !slices.Equal(roles, want) {
 		t.Errorf("cluster roles = %v, want %v", roles, want)
+	}
+}
+
+func TestPodDiagnosticsComponentRenders(t *testing.T) {
+	t.Parallel()
+
+	dir := writeOverlay(t, map[string]any{
+		"apiVersion": "kustomize.config.k8s.io/v1beta1",
+		"kind":       "Kustomization",
+		"namespace":  "doorstep",
+		"resources":  []string{"../base"},
+		"components": []string{"../components/pod-diagnostics"},
+	})
+	documents := render(t, dir)
+	assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader", "doorstep-pods-reader")
+	var roles []string
+	for _, role := range renderedOfKind(documents, "ClusterRole") {
+		roles = append(roles, role.lookup(t, "metadata", "name").(string))
+	}
+	slices.Sort(roles)
+	if want := []string{"doorstep-applications-reader", "doorstep-pods-reader"}; !slices.Equal(roles, want) {
+		t.Errorf("cluster roles = %v, want %v", roles, want)
+	}
+	if got := envValues(t, renderedPodSpec(t, documents))["DOORSTEP_KUBE_POD_DIAGNOSTICS"]; got != "true" {
+		t.Errorf("DOORSTEP_KUBE_POD_DIAGNOSTICS = %q, want true", got)
+	}
+}
+
+func TestBaseDoesNotReadPods(t *testing.T) {
+	t.Parallel()
+
+	documents := render(t, "base")
+	for _, role := range renderedOfKind(documents, "ClusterRole") {
+		for _, rule := range role.lookup(t, "rules").([]any) {
+			if slices.Contains(namesFromStrings(rule.(map[string]any)["resources"]), "pods") {
+				t.Errorf("base role %v grants pods", role.lookup(t, "metadata", "name"))
+			}
+		}
+	}
+	if _, ok := envValues(t, renderedPodSpec(t, documents))["DOORSTEP_KUBE_POD_DIAGNOSTICS"]; ok {
+		t.Error("base turns pod diagnostics on")
 	}
 }
 

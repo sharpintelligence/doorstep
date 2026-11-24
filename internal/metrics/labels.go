@@ -22,6 +22,26 @@ func (o Outcome) label() string {
 	}
 }
 
+type FailureClass string
+
+const (
+	FailureClassTransient     FailureClass = "transient"
+	FailureClassVersion       FailureClass = "version"
+	FailureClassConfiguration FailureClass = "configuration"
+	FailureClassUnknown       FailureClass = "unknown"
+)
+
+var primedRetryClasses = []FailureClass{FailureClassTransient, FailureClassUnknown}
+
+func (c FailureClass) label() string {
+	switch c {
+	case FailureClassTransient, FailureClassVersion, FailureClassConfiguration, FailureClassUnknown:
+		return string(c)
+	default:
+		return unknownLabel
+	}
+}
+
 type RollbackReason string
 
 const (

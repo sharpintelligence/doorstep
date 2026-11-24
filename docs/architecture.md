@@ -30,8 +30,10 @@ doorstep never talks to workloads directly and never mutates Argo CD. Git is the
                  │
                  ▼
      argocd: wait until the Application is synced to that revision
-                 │
-                 ▼
+             │  not healthy in time: classify (transient, version, ...);
+             │  transient or unknown: wait again on the same pin with
+             │  backoff, up to the app's retry budget
+             ▼
      gates: before (checks, lock, schedule, external, backup webhook for
             releases flagged as migrations) and after (health, soak,
             prometheus queries, validation Job, external)
@@ -73,9 +75,11 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
 | `internal/registry/registrytest` | fake OCI registry for tests: `/v2/` ping and manifest `HEAD`/`GET` with `Docker-Content-Digest` for pushed tags | built |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) | built |
-| `internal/argocd` | read-only `Application` watcher through the Kubernetes API: `WaitSynced` (synced to a revision containing the pin commit and healthy, with a per-app timeout), `Check` and `Health`; a get and a watch per wait, no cache; see [argocd.md](argocd.md) | built |
+| `internal/argocd` | read-only `Application` watcher through the Kubernetes API: `WaitSynced` (synced to a revision containing the pin commit and healthy, with a per-app timeout), `Check`, `Health` and `Workloads` (the Deployments, StatefulSets, DaemonSets and Rollouts an Application manages); a get and a watch per wait, no cache; see [argocd.md](argocd.md) | built |
 | `internal/argocd/argocdtest` | fake Kubernetes API for Argo CD `Application` resources: get and watch (field selector, resource version, timeout), event pushes, closed and expired watches, injected `401`/`403`/`404`/`5xx`, request counts and a generated kubeconfig | built |
 | `internal/kube` | small Kubernetes REST client: in-cluster ServiceAccount or explicit kubeconfig subset, host-pinned transport, bounded `Get` and `Stream`, `StatusError` with `ErrNotFound`, `ErrForbidden` and `ErrGone`; imports nothing internal ([ADR 0008](decisions/0008-kubernetes-rest-client.md)) | built |
+| `internal/pods` | opt-in, read-only pod lister for retry diagnostics: one `GET /api/v1/namespaces/{ns}/pods?limit=500` per namespace (at most five) through `internal/kube`, matched to workloads by controller owner reference and decoded into `core.PodStatus` (node, images, phase, conditions, container waiting and termination reasons); imports only `core` ([ADR 0017](decisions/0017-retry-before-rollback.md)) | built |
+| `internal/retry` | the retry-before-rollback failure policy: a pure `Classify` that turns an Argo CD failure, pod statuses and earlier diagnoses into a verdict with findings and evidence, and `Policy`, the `engine.FailurePolicy` that retries transient and unknown failures within each app's attempt budget with doubling backoff; imports `core` and `engine` ([engine.md](engine.md#retry-before-rollback), [ADR 0017](decisions/0017-retry-before-rollback.md)) | built |
 | `internal/jobs` | read-only Kubernetes `batch/v1` Job reader for the `job` gate: one `GET` per call through `internal/kube`, decoded into a small `Job` type, `ErrNotFound`; imports only `kube` ([ADR 0016](decisions/0016-validation-job-gate.md)) | built |
 | `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; the built-in `checks`, `lock`, `schedule`, `health` and `soak` gate types, registered by `RegisterBuiltins` over small read ports; the deferred `backup` webhook gate, registered by `RegisterBackup`; the `prometheus` gate type, registered by `RegisterPrometheus` over its `MetricsQuerier` port; the `job` gate type, registered by `RegisterJobGate` over its `JobReader` and the shared `ApplicationReader` port; the `external` gate type (`RegisterExternal`), which reads results other systems posted, and `Reporter`, the service behind the external gate API; see [gates.md](gates.md#built-in-gates) | built |
 | `internal/rollback` | rollback requests and blocks: picks the current version and the previous good, unblocked digest, cancels the deploy it replaces and queued deploys of the blocked commit, queues the rollback deployment at rollback priority, records the block and the audit row in one transaction (retried on state conflicts); manual block, unblock and list; the confirmation guard for rollbacks across releases flagged as database migrations and `MigrationsCrossed` for the engine; the engine's `BlockList` port. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [rollback.md](rollback.md) | built |
@@ -95,6 +99,7 @@ The design is ports and adapters.
 - `core` imports nothing from `internal/`. Every other package may import it.
 - `kube` imports nothing from `internal/`. `jobs` imports only `kube`. `argocd` imports only `core` and `kube`; it reaches GitHub for ancestry checks through its own `Ancestry` port, which `cli` implements over `(*github.Repo).Compare`, and it never imports `config` (`cli` maps the catalog to `argocd.Application` values).
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
+- `retry` implements `engine.FailurePolicy`, so it imports `engine` for the `Failure` and `Decision` types, and `core`; it reaches pods, history and the queue through its own `Diagnostics`, `History` and `Queue` ports, which `cli` fills. `pods` imports only `core` and reads through a one-method `Getter` that `*kube.Client` satisfies.
 - Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops`, `intake`, `notify` and `auth` (for GitHub sign-in) use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, `auth`, `rollback`, and later `gates` persistence) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config` or `metrics` (its `Observer` port is adapted to `metrics.Recorder` in `cli`).
 - `store` imports only `core`.
 - Actions are audited through `(*store.Store).RecordAudit`, called on the transaction-bound store in the same `InTx` as the action. Consumers declare a one-method `RecordAudit(ctx, core.AuditEntry) error` port rather than importing `auth`.
@@ -117,6 +122,7 @@ type DeploymentStore interface {
 	Transition(ctx context.Context, t engine.Transition) (core.Deployment, error)
 	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
 	TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error)
+	RetryState(ctx context.Context, id core.DeploymentID) (engine.RetryState, error)
 }
 
 type DigestResolver interface {
@@ -152,16 +158,19 @@ type Notifier interface {
 type Metrics interface {
 	DeploymentStarted(app string)
 	DeploymentFinished(app string, outcome engine.Outcome, duration time.Duration)
+	DeploymentRetried(app string, class core.FailureClass)
 }
 
 type FailurePolicy interface {
-	Decide(ctx context.Context, f engine.Failure) (engine.FailureAction, error)
+	Decide(ctx context.Context, f engine.Failure) (engine.Decision, error)
 }
 ```
 
 `serve` is the composition root. `internal/cli/engine.go` holds the thin adapters: `engineStore` maps `engine.Transition` to `store.Transition`; `digestResolver` calls `registry.Resolver.ResolveCommit` and wraps its sentinels in `engine.ErrPermanent` or `engine.ErrImageNotReady`; `pinWriter` maps each app to its `gitops.Target` (built by `appWiring` in `internal/cli/apps.go`, which also maps apps to `intake.App` and `argocd.Application`) and classifies `gitops` errors; `engineMetrics` adapts `metrics.Recorder`; `queueHandler` turns `queue.Claimed` into `engine.Claim`. `*argocd.Watcher`, `*gates.Evaluator`, `*rollback.Service` and `*notify.Dispatcher` satisfy their ports as they are, and `engine.FailPolicy` is the default policy.
 
-There is no queue port: `queue.Runner` claims, heartbeats and releases, and a terminal transition deletes the queue entry in the same transaction, so the engine never calls the queue. There is no locker port either: the claim skips frozen deploys and the opt-in `lock` gate reads freezes. `LastSuccessfulDeployment` and an enqueue port are left to automatic rollback (doorstep-ehl.6.5), which also adds the failure policy action that fails a deploy, enqueues its rollback and creates the block in one transaction.
+There is no queue port: `queue.Runner` claims, heartbeats and releases, and a terminal transition deletes the queue entry in the same transaction, so the engine never calls the queue. There is no locker port either: the claim skips frozen deploys and the opt-in `lock` gate reads freezes. `LastSuccessfulDeployment` and an enqueue port are left to automatic rollback (doorstep-ehl.6.2), which also adds the failure policy action that fails a deploy, enqueues its rollback and creates the block in one transaction, for failures whose event is marked `rollback_eligible`.
+
+`FailurePolicy` is `*retry.Policy`, built by `newRetryPolicy` in `internal/cli/retry.go` from each app's `retry` settings (`catalogApps.RetrySettings`), `retryHistory` and `retryQueue` over `*store.Store` (`Diagnoses`, `QueueEntries`), and, when `kubernetes.pod_diagnostics` is on, `podDiagnostics`, which asks `*argocd.Watcher` for the Application's workloads and `*pods.Reader` for their pods ([engine.md](engine.md#retry-before-rollback)).
 
 `BlockList` is `*rollback.Service` ([rollback.md](rollback.md), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)). The engine calls `Blocked` with the resolved digest of a deploy and fails it when blocked, passes `PendingTrailers` with every pin and calls `MarkMirrored` after a pin that wrote a commit, pins a rollback's preset digest without resolving, and calls `Pin` again with `Repin` before a rollback succeeds, which confirms the pin or writes it again if a cancelled deploy's late pin replaced it ([rollback.md](rollback.md#the-late-pin-race)).
 
@@ -343,7 +352,9 @@ engine ── Notify(n) ──► Dispatcher: validate, route by app, enqueue (n
 Deployment state is persisted in Postgres:
 
 ```
-queued → resolving → pinning → syncing → verifying → succeeded
+                                     ┌──┐ retry: same pin, new window
+                                     ▼  │
+queued → resolving → pinning → syncing ─┴→ verifying → succeeded
                                               │
                                               └────► failed
 ```
@@ -352,8 +363,8 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 
 - Terminal states: `succeeded`, `failed`, `cancelled`, `superseded`. A terminal state has no outgoing transitions.
 - Active states: `resolving`, `pinning`, `syncing`, `verifying`. At most one deployment per target is active.
-- The legal transitions are a table in `core` (`State.CanTransitionTo`), not a switch.
-- A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`, and so are queued deploys of the commit the rollback blocks; other queued deploys run after the rollback ([rollback.md](rollback.md)).
+- The legal transitions are a table in `core` (`State.CanTransitionTo`), not a switch. `syncing → syncing` is the only self-transition: it records an automatic retry of the same pin, and restarts the sync deadline because deadlines are measured from the newest transition into a state ([engine.md](engine.md#retry-before-rollback)).
+- A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). Automatic retries of a deploy that did not become healthy stay inside that deployment as `syncing → syncing` events; `parent_id` is reserved for a person re-running a failed deployment ([ADR 0017](decisions/0017-retry-before-rollback.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`, and so are queued deploys of the commit the rollback blocks; other queued deploys run after the rollback ([rollback.md](rollback.md)).
 
 - Every transition is a compare-and-set on `(id, from_state)` through `store.TransitionDeployment` and is recorded in history in the same transaction; a lost race returns `core.ErrStateConflict` ([database.md](database.md#transitions-and-lineage)).
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA and resumes with the remaining sync time. One claim runs as many steps as it can.

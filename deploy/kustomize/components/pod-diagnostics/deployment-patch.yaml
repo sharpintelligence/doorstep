@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doorstep
+spec:
+  template:
+    spec:
+      containers:
+        - name: doorstep
+          env:
+            - name: DOORSTEP_KUBE_POD_DIAGNOSTICS
+              value: "true"

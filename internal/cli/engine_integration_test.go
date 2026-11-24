@@ -185,10 +185,15 @@ type engineServe struct {
 
 func startEngineServe(t *testing.T, f *engineFixture) *engineServe {
 	t.Helper()
+	return startEngineServeWith(t, f, engineConfig)
+}
+
+func startEngineServeWith(t *testing.T, f *engineFixture, cfg string) *engineServe {
+	t.Helper()
 	sink := newRecordingSink(t)
 	args, env := withDatabase(t, databaseURLEnv, []string{
 		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
-		"--config", writeConfig(t, f.config(engineConfig)),
+		"--config", writeConfig(t, f.config(cfg)),
 	}, f.env(map[string]string{
 		config.EnvGitHubWebhookSecret: intakeTestSecret,
 		config.EnvPollInterval:        "0",
@@ -437,4 +442,156 @@ func TestEngineShutdownMidSyncKeepsDeployment(t *testing.T) {
 	if got := s.sink.typesFor(id); slices.Contains(got, "deploy.failed") {
 		t.Errorf("notifications = %v, shutdown must not fail the deployment", got)
 	}
+}
+
+const retryEngineConfig = `
+notifications:
+  - name: hooks
+    type: webhook
+    url_env: TEST_HOOK_URL
+    events: [deploy.queued, deploy.started, deploy.retrying, deploy.succeeded, deploy.failed]
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+      required_checks: [test]
+      deployments: false
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    argocd:
+      sync_timeout: 2s
+    retry:
+      max_attempts: 2
+      backoff: 1s
+      max_backoff: 1s
+    notify: [hooks]
+`
+
+func degradedAt(sha string) argocdtest.Application {
+	app := argocdtest.Synced("argocd", "blog", engineHomelabURL, sha)
+	app.Health = "Degraded"
+	app.HealthMessage = "Deployment blog: Readiness probe failed: connection refused"
+	return app
+}
+
+func (s *engineServe) events(id core.DeploymentID) []core.Event {
+	s.t.Helper()
+	h, err := s.store.GetDeploymentHistory(s.t.Context(), id)
+	if err != nil {
+		s.t.Fatalf("GetDeploymentHistory: %v", err)
+	}
+	var out []core.Event
+	for _, e := range h.Events {
+		if e.Type == core.EventTransition {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b core.Event) int { return int(a.ID - b.ID) })
+	return out
+}
+
+func (s *engineServe) awaitRetry(id core.DeploymentID) core.Event {
+	s.t.Helper()
+	deadline := time.Now().Add(engineWaitLimit)
+	for {
+		for _, e := range s.events(id) {
+			if e.From == core.StateSyncing && e.To == core.StateSyncing {
+				return e
+			}
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("deployment %d was not retried: %v\n%s", id, s.transitions(id), s.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestEngineRetriesTheSameVersion(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.followGitOps(ctx, degradedAt)
+	s := startEngineServeWith(t, f, retryEngineConfig)
+
+	id, _ := s.push(strings.Repeat("e", 40))
+	retried := s.awaitRetry(id)
+	var data struct {
+		Retry struct {
+			Attempt     int    `json:"attempt"`
+			NextAttempt int    `json:"next_attempt"`
+			MaxAttempts int    `json:"max_attempts"`
+			DelayMS     int64  `json:"delay_ms"`
+			Reason      string `json:"reason"`
+		} `json:"retry"`
+		Diagnosis struct {
+			Verdict string `json:"verdict"`
+		} `json:"diagnosis"`
+	}
+	if err := json.Unmarshal(retried.Data, &data); err != nil || data.Retry.Attempt != 1 || data.Retry.NextAttempt != 2 || data.Retry.MaxAttempts != 2 || data.Retry.DelayMS != 1000 || data.Retry.Reason != "transient" || data.Diagnosis.Verdict != "transient" {
+		t.Fatalf("retry event data = %s (%v)", retried.Data, err)
+	}
+	pinned, err := s.store.GetDeployment(t.Context(), id)
+	if err != nil {
+		t.Fatalf("GetDeployment: %v", err)
+	}
+	pinCommits := len(f.homelab.Commits("main"))
+	f.argo.Set(syncedTo(pinned.PinCommitSHA))
+
+	d := s.awaitState(id, core.StateSucceeded, core.StateFailed)
+	if d.State != core.StateSucceeded || d.PinCommitSHA != pinned.PinCommitSHA || d.Digest != pinned.Digest {
+		t.Fatalf("deployment = %+v, want succeeded on the same pin", d)
+	}
+	if got := len(f.homelab.Commits("main")); got != pinCommits {
+		t.Errorf("GitOps commits = %d after the retry, want %d: a retry must not write to git", got, pinCommits)
+	}
+	want := []core.State{core.StateQueued, core.StateResolving, core.StatePinning, core.StateSyncing, core.StateSyncing, core.StateVerifying, core.StateSucceeded}
+	if got := s.transitions(id); !slices.Equal(got, want) {
+		t.Errorf("transitions = %v, want %v", got, want)
+	}
+	s.sink.await(t, id, []string{"deploy.queued", "deploy.started", "deploy.retrying", "deploy.succeeded"})
+	if body := s.metrics(); !strings.Contains(body, `doorstep_deployment_retries_total{app="blog",class="transient"} 1`) {
+		t.Errorf("metrics do not count the retry")
+	}
+	s.stop()
+}
+
+func TestEngineFailsWhenTheRetryBudgetIsSpent(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.followGitOps(ctx, degradedAt)
+	s := startEngineServeWith(t, f, retryEngineConfig)
+
+	id, _ := s.push(strings.Repeat("f", 40))
+	d := s.awaitState(id, core.StateSucceeded, core.StateFailed)
+	if d.State != core.StateFailed {
+		t.Fatalf("deployment = %+v, want failed", d)
+	}
+	want := []core.State{core.StateQueued, core.StateResolving, core.StatePinning, core.StateSyncing, core.StateSyncing, core.StateFailed}
+	if got := s.transitions(id); !slices.Equal(got, want) {
+		t.Errorf("transitions = %v, want %v", got, want)
+	}
+	events := s.events(id)
+	last := events[len(events)-1]
+	var data struct {
+		Attempts         int    `json:"attempts"`
+		Decision         string `json:"decision"`
+		RollbackEligible bool   `json:"rollback_eligible"`
+		Stage            string `json:"stage"`
+	}
+	if err := json.Unmarshal(last.Data, &data); err != nil || data.Attempts != 2 || data.Decision != "retries_exhausted" || !data.RollbackEligible || data.Stage != "syncing" {
+		t.Errorf("failed event data = %s (%v)", last.Data, err)
+	}
+	if last.Message != "failed while syncing after 2 attempts" {
+		t.Errorf("failed event message = %q", last.Message)
+	}
+	s.sink.await(t, id, []string{"deploy.queued", "deploy.started", "deploy.retrying", "deploy.failed"})
+	s.stop()
 }

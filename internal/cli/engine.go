@@ -84,6 +84,10 @@ func newEngine(in engineInput) (engineWiring, error) {
 		targets[a.target()] = target
 		in.recorder.PrimeApp(a.app.Name)
 	}
+	policy, err := newRetryPolicy(in)
+	if err != nil {
+		return engineWiring{}, err
+	}
 	e, err := engine.New(engine.Options{
 		Store:    engineStore{store: in.store},
 		Resolver: digestResolver{resolver: registry.New(resolverOpts), logger: in.logger},
@@ -96,6 +100,7 @@ func newEngine(in engineInput) (engineWiring, error) {
 		Blocks:      in.blocks,
 		Notifier:    in.notifier,
 		Metrics:     engineMetrics{recorder: in.recorder},
+		Policy:      policy,
 		SyncTimeout: in.apps.SyncTimeout,
 		Logger:      in.logger,
 	})
@@ -159,6 +164,14 @@ func (s engineStore) SetLineage(ctx context.Context, id core.DeploymentID, l cor
 
 func (s engineStore) TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {
 	return s.store.TimeInState(ctx, id, state)
+}
+
+func (s engineStore) RetryState(ctx context.Context, id core.DeploymentID) (engine.RetryState, error) {
+	state, err := s.store.RetryState(ctx, id)
+	if err != nil {
+		return engine.RetryState{}, err
+	}
+	return engine.RetryState{Retries: state.Retries, Delay: state.Delay, MaxAttempts: state.MaxAttempts}, nil
 }
 
 type commitResolver interface {
@@ -277,6 +290,10 @@ func (m engineMetrics) DeploymentStarted(app string) {
 
 func (m engineMetrics) DeploymentFinished(app string, outcome engine.Outcome, duration time.Duration) {
 	m.recorder.DeploymentFinished(app, metrics.Outcome(outcome), duration)
+}
+
+func (m engineMetrics) DeploymentRetried(app string, class core.FailureClass) {
+	m.recorder.DeploymentRetried(app, metrics.FailureClass(class))
 }
 
 type announcer interface {

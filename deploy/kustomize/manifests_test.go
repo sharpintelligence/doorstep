@@ -135,6 +135,7 @@ func TestDeploymentEnvironmentNamesAreKnownSettings(t *testing.T) {
 		config.EnvGitHubWebhookSecret,
 		config.EnvGitHubWebhookSecretFile,
 		config.EnvPollInterval,
+		config.EnvKubePodDiagnostics,
 	}
 	tests := []struct {
 		name      string
@@ -153,6 +154,14 @@ func TestDeploymentEnvironmentNamesAreKnownSettings(t *testing.T) {
 				return registryPatch(t).lookup(t, "spec", "template", "spec", "containers", 0).(map[string]any)
 			},
 			required: []string{config.EnvRegistryCredentialsFile},
+		},
+		{
+			name: "pod diagnostics component",
+			container: func(t *testing.T) map[string]any {
+				t.Helper()
+				return findDocument(t, "components/pod-diagnostics/deployment-patch.yaml", "Deployment", "doorstep").lookup(t, "spec", "template", "spec", "containers", 0).(map[string]any)
+			},
+			required: []string{config.EnvKubePodDiagnostics},
 		},
 	}
 	for _, tt := range tests {
@@ -350,6 +359,11 @@ func TestClusterRolesAreReadOnly(t *testing.T) {
 			file: "components/job-gate/rbac.yaml",
 			name: "doorstep-jobs-reader",
 			rule: map[string][]string{"apiGroups": {"batch"}, "resources": {"jobs"}, "verbs": {"get"}},
+		},
+		{
+			file: "components/pod-diagnostics/rbac.yaml",
+			name: "doorstep-pods-reader",
+			rule: map[string][]string{"apiGroups": {""}, "resources": {"pods"}, "verbs": {"list"}},
 		},
 	}
 	for _, tt := range tests {

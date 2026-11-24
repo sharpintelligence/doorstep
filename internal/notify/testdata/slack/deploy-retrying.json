@@ -1,0 +1,44 @@
+{
+  "text": "blog (prod): deploy #42 failed an attempt, retrying",
+  "attachments": [
+    {
+      "color": "#ECB22E",
+      "fallback": "blog (prod): deploy #42 failed an attempt, retrying",
+      "blocks": [
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*blog (prod)*: deploy #42 failed an attempt, retrying\nattempt 1 of 3 failed (transient: image pull failing on node pi-3); retrying (attempt 2 of 3) in 1m"
+          }
+        },
+        {
+          "type": "section",
+          "fields": [
+            {
+              "type": "mrkdwn",
+              "text": "*Commit*\n<https://github.com/example-user/blog/commit/0123456789abcdef0123456789abcdef01234567|example-user/blog@0123456>"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Image*\n`sha256:9b2c4e6a8d0f`"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Requested by*\nalice"
+            }
+          ]
+        },
+        {
+          "type": "context",
+          "elements": [
+            {
+              "type": "mrkdwn",
+              "text": "<https://doorstep.example.com/deployments/42|View deployment>"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

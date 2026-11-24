@@ -57,11 +57,11 @@ func (e *Engine) resolve(ctx context.Context, d core.Deployment) (core.Deploymen
 		case errors.Is(err, ErrImageNotReady):
 			return e.awaitImage(ctx, d, err)
 		default:
-			return e.retry(ctx, d, e.resolveTimeout, err, "resolve "+d.Image.String())
+			return e.retryUntilDeadline(ctx, d, e.resolveTimeout, err, "resolve "+d.Image.String())
 		}
 		block, found, err := e.blocks.Blocked(ctx, d.Target, d.Commit, digest)
 		if err != nil {
-			return e.retry(ctx, d, e.resolveTimeout, err, "check blocks")
+			return e.retryUntilDeadline(ctx, d, e.resolveTimeout, err, "check blocks")
 		}
 		if found {
 			return e.fail(ctx, d, Failure{Class: core.FailureVersion, Reason: (&core.BlockedError{Block: block}).Error()})
@@ -127,7 +127,7 @@ func (e *Engine) pinFailed(ctx context.Context, d core.Deployment, err error, ac
 	if attention || errors.Is(err, ErrPermanent) {
 		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: action + ": " + err.Error(), KeepPin: attention})
 	}
-	return e.retry(ctx, d, limit, err, action)
+	return e.retryUntilDeadline(ctx, d, limit, err, action)
 }
 
 func (e *Engine) writePin(ctx context.Context, d core.Deployment, repin bool) (PinResult, error) {
@@ -152,9 +152,13 @@ func (e *Engine) syncStep(ctx context.Context, d core.Deployment) (core.Deployme
 	if !ok {
 		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "app " + d.Target.App + " is not configured"})
 	}
-	elapsed, err := e.elapsed(ctx, d)
+	elapsed, err := e.syncElapsed(ctx, d)
 	if err != nil {
 		return d, Result{}, err
+	}
+	if elapsed < 0 {
+		e.logFor(d).DebugContext(ctx, "retry pause not over yet", slog.Duration("retry_in", -elapsed))
+		return d, Result{RequeueAfter: -elapsed}, nil
 	}
 	if d.PinCommitSHA == "" {
 		return e.awaitHealthy(ctx, d, elapsed, timeout)
@@ -174,6 +178,18 @@ func (e *Engine) syncStep(ctx context.Context, d core.Deployment) (core.Deployme
 	default:
 		return d, Result{}, fmt.Errorf("wait for sync: %w", err)
 	}
+}
+
+func (e *Engine) syncElapsed(ctx context.Context, d core.Deployment) (time.Duration, error) {
+	elapsed, err := e.elapsed(ctx, d)
+	if err != nil {
+		return 0, err
+	}
+	state, err := e.store.RetryState(ctx, d.ID)
+	if err != nil {
+		return 0, fmt.Errorf("read the retry state of deployment %d: %w", d.ID, err)
+	}
+	return elapsed - state.Delay, nil
 }
 
 func (e *Engine) awaitSync(ctx context.Context, d core.Deployment, revision string, wait time.Duration) (core.SyncStatus, error) {
@@ -352,13 +368,13 @@ func (e *Engine) confirmRollbackPin(ctx context.Context, d core.Deployment) (cor
 	case isSyncFailure(err):
 		return e.failSync(ctx, d, status, err, timeout)
 	default:
-		return e.retry(ctx, d, e.verifyTimeout, err, "wait for sync of pin commit "+res.Commit.SHA)
+		return e.retryUntilDeadline(ctx, d, e.verifyTimeout, err, "wait for sync of pin commit "+res.Commit.SHA)
 	}
 	repinned := d
 	repinned.PinCommitSHA = res.Commit.SHA
 	repinned.GitOpsRepository = res.Commit.Repository
 	if _, err := e.gates.Reevaluate(ctx, repinned, core.GatePhaseAfter); err != nil {
-		return e.retry(ctx, d, e.verifyTimeout, err, "evaluate the after gates again")
+		return e.retryUntilDeadline(ctx, d, e.verifyTimeout, err, "evaluate the after gates again")
 	}
 	updated, err := e.store.SetLineage(ctx, d.ID, core.Lineage{
 		PinCommitSHA:     res.Commit.SHA,
@@ -377,17 +393,31 @@ func (e *Engine) succeed(ctx context.Context, d core.Deployment) (core.Deploymen
 		return d, Result{}, err
 	}
 	e.logFor(succeeded).InfoContext(ctx, "deployment succeeded", slog.String("digest", string(succeeded.Digest)))
+	message := e.attemptsNote(ctx, succeeded)
 	if succeeded.Kind == core.KindRollback {
 		e.metrics.DeploymentFinished(succeeded.Target.App, OutcomeRolledBack, runDuration(succeeded))
-		e.notify(ctx, core.NotificationDeployRolledBack, succeeded, "")
+		e.notify(ctx, core.NotificationDeployRolledBack, succeeded, message)
 	} else {
 		e.metrics.DeploymentFinished(succeeded.Target.App, OutcomeSucceeded, runDuration(succeeded))
-		e.notify(ctx, core.NotificationDeploySucceeded, succeeded, "")
+		e.notify(ctx, core.NotificationDeploySucceeded, succeeded, message)
 	}
 	return succeeded, Result{}, nil
 }
 
-func (e *Engine) retry(ctx context.Context, d core.Deployment, limit time.Duration, cause error, action string) (core.Deployment, Result, error) {
+func (e *Engine) attemptsNote(ctx context.Context, d core.Deployment) string {
+	state, err := e.store.RetryState(ctx, d.ID)
+	if err != nil {
+		e.logFor(d).WarnContext(ctx, "read the retry state of a succeeded deployment", slog.String("error", err.Error()))
+		return ""
+	}
+	if state.Retries == 0 {
+		return ""
+	}
+	attempt := state.Retries + 1
+	return fmt.Sprintf("succeeded on attempt %d of %d", attempt, max(state.MaxAttempts, attempt))
+}
+
+func (e *Engine) retryUntilDeadline(ctx context.Context, d core.Deployment, limit time.Duration, cause error, action string) (core.Deployment, Result, error) {
 	if ctx.Err() != nil || errors.Is(cause, core.ErrStateConflict) {
 		return d, Result{}, cause
 	}

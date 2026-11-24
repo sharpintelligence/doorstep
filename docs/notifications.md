@@ -18,9 +18,10 @@ Notifications are advisory. A failed or slow notification never delays, fails or
 | --- | --- | --- |
 | `deploy.queued` | a deployment was queued | no |
 | `deploy.started` | a deployment (or rollback) started resolving its image | yes |
-| `deploy.succeeded` | a deployment passed its gates | yes |
-| `deploy.failed` | a deployment failed; a failed rollback is a `deploy.failed` of kind `rollback` and is shown more prominently | yes |
-| `deploy.rolled_back` | a rollback succeeded, so the deployment it reverts is no longer running | yes |
+| `deploy.retrying` | the first attempt of a deployment (or rollback) did not become healthy and doorstep is [trying the same version again](engine.md#retry-before-rollback); the message carries the diagnosis and the plan, such as `attempt 1 of 3 failed (transient: image pull failing on node pi-3); retrying (attempt 2 of 3) in 1m`. Sent once per deployment, not per attempt | yes |
+| `deploy.succeeded` | a deployment passed its gates; after a retry the message says `succeeded on attempt 2 of 3` | yes |
+| `deploy.failed` | a deployment failed; a failed rollback is a `deploy.failed` of kind `rollback` and is shown more prominently. When retries were involved or ruled out, the message carries the final decision: `still failing after 3 attempts: ...`, `version: ...; not retried`, or why no retry was tried | yes |
+| `deploy.rolled_back` | a rollback succeeded, so the deployment it reverts is no longer running; after a retry the message says on which attempt | yes |
 | `deploy.cancelled` | a deployment was cancelled | no |
 | `deploy.superseded` | a queued deployment was replaced by a newer one before it started pinning | no |
 | `lock.changed` | a lock was acquired or released | yes |
@@ -38,7 +39,7 @@ notifications:
 
 Leaving `events` out means the default set above. An empty list, an unknown event or a repeated event is a configuration error.
 
-A rollback is a separate deployment of kind `rollback` ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, you see `deploy.failed` for the deploy, then `deploy.started` for the rollback, then either `deploy.rolled_back` (the rollback worked) or `deploy.failed` for the rollback (it did not, and someone has to act).
+A deploy that does not become healthy is first retried on the same version: you see `deploy.retrying` once, then the final decision on `deploy.succeeded` or `deploy.failed`. A rollback is a separate deployment of kind `rollback` ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, you see `deploy.failed` for the deploy, then `deploy.started` for the rollback, then either `deploy.rolled_back` (the rollback worked) or `deploy.failed` for the rollback (it did not, and someone has to act).
 
 Manual freeze locks produce `lock.changed` (acquired, released, and released when a lock expires) and periodic `lock.reminder` events; nothing else does. An app freeze is sent to that app's targets. A global freeze has no app, so it is sent once per app, addressed to that app and marked `global freeze`, skipping an app whose targets all already received it, so a channel shared by every app gets one message rather than one per app.
 
@@ -167,7 +168,7 @@ When the GitHub App is configured, doorstep mirrors each deployment as a [GitHub
 | `deploy.failed` | `failure` |
 | `deploy.cancelled`, `deploy.superseded` | `inactive` |
 
-Lock events are not reported to GitHub.
+Lock events and `deploy.retrying` are not reported to GitHub: the deployment is still `in_progress`, and status descriptions never carry failure reasons.
 
 - **Environment.** The GitHub environment is the app name. Model environments as separate apps (`blog-staging`, `blog-prod`) and each gets its own GitHub environment, even though they share a repository. GitHub creates an environment the first time a deployment names it.
 - **Deployment.** One GitHub deployment per doorstep deployment, for the full commit SHA, with task `deploy`, `auto_merge` off and no required status contexts (doorstep runs its own check gate). Its payload is `{"doorstep_deployment_id": 42, "kind": "deploy"}`, plus `rollback_of_id` for rollbacks.

@@ -952,6 +952,45 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"gates.before[0].when: not allowed for type checks", "gates.before[0].webhook: not allowed for type checks"},
 		},
 		{
+			name:   "retry defaults",
+			mutate: func(c *Catalog) { c.Apps[0].Retry = &Retry{} },
+		},
+		{
+			name: "retry disabled with explicit bounds",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Retry = &Retry{Enabled: new(false), MaxAttempts: intPtr(MaxRetryAttempts), Backoff: durPtr(MaxRetryBackoff), MaxBackoff: durPtr(MaxRetryMaxBackoff)}
+			},
+		},
+		{
+			name:   "retry backoff above the default maximum raises it",
+			mutate: func(c *Catalog) { c.Apps[0].Retry = &Retry{Backoff: durPtr(30 * time.Minute)} },
+		},
+		{
+			name:   "retry without a pause",
+			mutate: func(c *Catalog) { c.Apps[0].Retry = &Retry{Backoff: durPtr(0), MaxBackoff: durPtr(0)} },
+		},
+		{
+			name: "retry out of range",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Retry = &Retry{MaxAttempts: intPtr(0), Backoff: durPtr(-time.Second), MaxBackoff: durPtr(7 * time.Hour)}
+			},
+			wantErr: []string{
+				"apps[0] (blog): retry.max_attempts: 0 is out of range (want 1 to 10)",
+				"apps[0] (blog): retry.backoff: -1s is out of range (want 0s to 1h0m0s)",
+				"apps[0] (blog): retry.max_backoff: 7h0m0s is longer than the limit of 6h0m0s",
+			},
+		},
+		{
+			name: "retry too many attempts and a short maximum",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Retry = &Retry{MaxAttempts: intPtr(11), Backoff: durPtr(2 * time.Minute), MaxBackoff: durPtr(time.Minute)}
+			},
+			wantErr: []string{
+				"retry.max_attempts: 11 is out of range (want 1 to 10)",
+				"retry.max_backoff: 1m0s must not be shorter than retry.backoff (2m0s)",
+			},
+		},
+		{
 			name: "migrations with labels and trailer",
 			mutate: func(c *Catalog) {
 				c.Apps[0].Migrations = &Migrations{Labels: []string{"db-migration", "schema change"}}

@@ -32,6 +32,8 @@ const (
 	EnvKubeconfig  = "DOORSTEP_KUBECONFIG"
 	EnvKubeContext = "DOORSTEP_KUBE_CONTEXT"
 
+	EnvKubePodDiagnostics = "DOORSTEP_KUBE_POD_DIAGNOSTICS"
+
 	MinLockReminderInterval  = time.Minute
 	MinPollInterval          = 10 * time.Second
 	DefaultEngineConcurrency = 4
@@ -79,8 +81,9 @@ type Locks struct {
 }
 
 type Kubernetes struct {
-	Kubeconfig string
-	Context    string
+	Kubeconfig     string
+	Context        string
+	PodDiagnostics bool
 }
 
 func (k Kubernetes) Validate() error {
@@ -135,6 +138,7 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 		lookupDuration(lookup, EnvLockReminderInterval, &cfg.Locks.ReminderInterval),
 		lookupDuration(lookup, EnvPollInterval, &cfg.Intake.PollInterval),
 		lookupInt(lookup, EnvEngineConcurrency, &cfg.Engine.Concurrency),
+		lookupBool(lookup, EnvKubePodDiagnostics, &cfg.Kubernetes.PodDiagnostics),
 	)
 	if v, ok := lookup(EnvLogLevel); ok {
 		cfg.Log.Level = v
@@ -183,6 +187,19 @@ func lookupInt(lookup func(string) (string, bool), key string, dst *int) error {
 		return fmt.Errorf("%s: %q is not a whole number", key, v)
 	}
 	*dst = n
+	return nil
+}
+
+func lookupBool(lookup func(string) (string, bool), key string, dst *bool) error {
+	v, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return fmt.Errorf("%s: %q is not true or false", key, v)
+	}
+	*dst = b
 	return nil
 }
 

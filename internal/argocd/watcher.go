@@ -126,6 +126,19 @@ func (w *Watcher) Status(ctx context.Context, t core.Target) (core.SyncStatus, e
 	return w.read(ctx, t, "")
 }
 
+func (w *Watcher) Workloads(ctx context.Context, t core.Target) ([]core.Workload, error) {
+	app, ok := w.apps[t]
+	if !ok {
+		return nil, unknownTarget(t)
+	}
+	var obj application
+	if err := w.client.Get(ctx, applicationPath(app), nil, &obj); err != nil {
+		_, err = apiFailure(app, err)
+		return nil, err
+	}
+	return workloads(obj), nil
+}
+
 func (w *Watcher) Check(ctx context.Context, t core.Target, revision string) (core.SyncStatus, error) {
 	if err := core.ValidateCommitSHA(revision); err != nil {
 		return core.SyncStatus{}, fmt.Errorf("argocd: %w", err)

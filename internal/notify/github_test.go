@@ -320,6 +320,7 @@ func TestGitHubSinkAccepts(t *testing.T) {
 		{name: "deploy started", n: sampleNamed(t, "deploy-started"), want: true},
 		{name: "queued", n: sampleNamed(t, "deploy-queued"), want: true},
 		{name: "superseded", n: sampleNamed(t, "deploy-superseded"), want: true},
+		{name: "retrying is not a GitHub deployment status", n: sampleNamed(t, "deploy-retrying")},
 		{name: "lock changed", n: sampleNamed(t, "lock-acquired")},
 		{name: "lock reminder", n: sampleNamed(t, "lock-reminder")},
 		{name: "app disabled", n: forApp(sampleNamed(t, "deploy-started"), "off")},

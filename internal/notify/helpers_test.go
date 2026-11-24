@@ -120,6 +120,15 @@ func samples() []sample {
 		out.Lock, out.LockChange, out.Actor = freezeLock(), change, actor
 		return out
 	}
+	retrying := withDeployment(core.NotificationDeployRetrying, baseDeployment(42, core.StateSyncing), nil)
+	retrying.Deployment.PinCommitSHA = testPinSHA
+	retrying.Actor = "doorstep"
+	retrying.Message = "attempt 1 of 3 failed (transient: image pull failing on node pi-3); retrying (attempt 2 of 3) in 1m"
+	retriedSucceeded := withDeployment(core.NotificationDeploySucceeded, finished(baseDeployment(42, core.StateSucceeded)), nil)
+	retriedSucceeded.Deployment.PinCommitSHA = testPinSHA
+	retriedSucceeded.Message = "succeeded on attempt 2 of 3"
+	exhausted := withDeployment(core.NotificationDeployFailed, failed, nil)
+	exhausted.Message = "still failing after 3 attempts: transient: image pull failing on node pi-3"
 	cancelled := withDeployment(core.NotificationDeployCancelled, finished(baseDeployment(42, core.StateCancelled)), nil)
 	cancelled.Actor = "carol"
 	cancelled.Message = "Cancelled from the UI"
@@ -129,6 +138,9 @@ func samples() []sample {
 		{"deploy-started", withDeployment(core.NotificationDeployStarted, baseDeployment(42, core.StateResolving), nil)},
 		{"deploy-succeeded", withDeployment(core.NotificationDeploySucceeded, succeeded, nil)},
 		{"deploy-failed", withDeployment(core.NotificationDeployFailed, failed, nil)},
+		{"deploy-retrying", retrying},
+		{"deploy-succeeded-after-retry", retriedSucceeded},
+		{"deploy-failed-after-retries", exhausted},
 		{"rollback-started", withDeployment(core.NotificationDeployStarted, rollbackDeployment(core.StateResolving), failed)},
 		{"deploy-rolled-back", withDeployment(core.NotificationDeployRolledBack, finished(rollbackDeployment(core.StateSucceeded)), failed)},
 		{"rollback-failed", withDeployment(core.NotificationDeployFailed, rollbackFailed, failed)},

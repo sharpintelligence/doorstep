@@ -24,6 +24,7 @@ func TestStateTransitionMatrix(t *testing.T) {
 		{StatePinning, StateSyncing}:      true,
 		{StatePinning, StateFailed}:       true,
 		{StatePinning, StateCancelled}:    true,
+		{StateSyncing, StateSyncing}:      true,
 		{StateSyncing, StateVerifying}:    true,
 		{StateSyncing, StateFailed}:       true,
 		{StateSyncing, StateCancelled}:    true,
@@ -129,6 +130,16 @@ func TestTerminalStatesHaveNoOutgoingTransitions(t *testing.T) {
 			if from.CanTransitionTo(to) {
 				t.Errorf("terminal state %s may move to %s", from, to)
 			}
+		}
+	}
+}
+
+func TestOnlySyncingMayRepeat(t *testing.T) {
+	t.Parallel()
+
+	for _, s := range States() {
+		if got, want := s.CanTransitionTo(s), s == StateSyncing; got != want {
+			t.Errorf("%s.CanTransitionTo(%s) = %v, want %v", s, s, got, want)
 		}
 	}
 }

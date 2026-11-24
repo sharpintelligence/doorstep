@@ -32,6 +32,7 @@ Apps, notification targets and the `auth` section are only read from the configu
 | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
 | `--kubeconfig` | `DOORSTEP_KUBECONFIG` | empty (in-cluster) | Kubeconfig file used to read Argo CD Applications. Empty uses the pod's ServiceAccount; doorstep never falls back to `$KUBECONFIG` or `~/.kube/config`. Only a subset of kubeconfig settings is supported; see [argocd.md](argocd.md#connecting-to-the-cluster). Required, like the [GitHub App](#github-app), whenever apps are configured: `serve` refuses to start without a usable Kubernetes connection. |
 | `--kube-context` | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` | Context in that kubeconfig. Requires a kubeconfig. |
+| | `DOORSTEP_KUBE_POD_DIAGNOSTICS` | `false` | `true` lets doorstep list the pods of a deployment that did not become healthy, to tell a flaky node from a bad version before [retrying](engine.md#retry-before-rollback). Needs `list` on `pods`, which the base manifests do not grant; apply the [pod-diagnostics component](install.md#pod-diagnostics). Without the permission, or when off, failures are classified from the Argo CD Application alone. Accepts `true`, `false`, `1` and `0`. |
 | | `DOORSTEP_LOCK_REMINDER_INTERVAL` | `24h` | How long a freeze lock may be held before doorstep sends a reminder, and how often it repeats while the lock stays held. Go duration syntax. `0s` disables reminders (expired locks are still cleaned up); otherwise at least `1m`; must not be negative. See [locks.md](locks.md#reminders). |
 | | `DOORSTEP_POLL_INTERVAL` | `1m` | How often doorstep polls GitHub for new branch heads and re-checks open commits, as a safety net for missed or unreachable webhooks. Go duration syntax. `0s` disables polling; otherwise at least `10s`; must not be negative. See [Intake](#intake). |
 
@@ -120,7 +121,7 @@ Each replica runs one [deployment engine](engine.md#running) worker pool.
 
 | Environment variable | File key | Default | Description |
 | --- | --- | --- | --- |
-| `DOORSTEP_ENGINE_CONCURRENCY` | `engine.concurrency` | `4` | How many deployments, each of a different app, one replica works on at the same time. Between `1` and `256`. A deployment holds its slot while it pins and while Argo CD syncs (up to the app's `argocd.sync_timeout`), so set it at least to the number of apps you expect to deploy at once, divided by the number of replicas. |
+| `DOORSTEP_ENGINE_CONCURRENCY` | `engine.concurrency` | `4` | How many deployments, each of a different app, one replica works on at the same time. Between `1` and `256`. A deployment holds its slot while it pins and while Argo CD syncs (up to the app's `argocd.sync_timeout` per [retry attempt](#retries); pauses between attempts release it), so set it at least to the number of apps you expect to deploy at once, divided by the number of replicas. |
 
 ## `doorstep image resolve`
 
@@ -302,6 +303,7 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
 | `kubernetes.kubeconfig` | `--kubeconfig` (`serve`, `argocd status`) | `DOORSTEP_KUBECONFIG` |
 | `kubernetes.context` | `--kube-context` (`serve`, `argocd status`) | `DOORSTEP_KUBE_CONTEXT` |
+| `kubernetes.pod_diagnostics` | none | `DOORSTEP_KUBE_POD_DIAGNOSTICS` |
 | `intake.poll_interval` | none | `DOORSTEP_POLL_INTERVAL` |
 | `engine.concurrency` | none | `DOORSTEP_ENGINE_CONCURRENCY` |
 
@@ -438,6 +440,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
 | `migrations` | none | Flag releases that contain database migrations; see [Migrations](#migrations). Without the block nothing is detected and no extra GitHub calls are made. |
+| `retry` | on, 3 attempts | Retry a deploy or rollback that did not become healthy on the same pin before failing it; see [Retries](#retries). |
 
 #### Required checks
 
@@ -480,6 +483,34 @@ apps:
 | `migrations.trailer` | `true` | Also flag a commit whose message has a `Doorstep-Migration: true` (or `yes`) line. |
 
 The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches, or when an earlier flagged deploy has not reached the cluster (it is still queued, was batched away, or failed before its pin); the flag makes a rollback across it require `--confirm-migration-rollback`, withholds automatic rollbacks across it, and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can, and `doorstep_migration_detection_failures_total` counts each refusal. See [rollback.md](rollback.md#migration-aware-releases).
+
+#### Retries
+
+```yaml
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    retry:
+      enabled: true
+      max_attempts: 3
+      backoff: 1m
+      max_backoff: 10m
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `retry.enabled` | `true` | `false` fails a deploy at its first failed attempt, as before retries existed. The failure is still classified and its diagnosis recorded. |
+| `retry.max_attempts` | `3` | Attempts in total, counting the first; 1 to 10. Each attempt waits up to `argocd.sync_timeout`. |
+| `retry.backoff` | `1m` | Pause before the second attempt, doubling before each later one; 0 to 1 hour. The claim is released during the pause. |
+| `retry.max_backoff` | `10m`, or `backoff` when that is longer | Cap on the pause; at least `backoff` and at most 6 hours. |
+
+When a deploy or rollback does not become synced and healthy within `argocd.sync_timeout`, doorstep classifies the failure. A transient failure (a pod that cannot be scheduled or pull its image, a lost node, an eviction, a probe timeout) or one it cannot attribute is retried: doorstep waits for the backoff and then gives Argo CD and Kubernetes another full `sync_timeout` on the same pin, without writing to git or the cluster. A failure caused by the version (a failing sync hook or migration, an image that cannot start, the same crash on several nodes) fails at once. A deploy also fails instead of retrying when a newer deployment of the app is waiting. With the defaults and a 10 minute sync timeout, a deploy that never becomes healthy fails after 33 minutes (three windows and pauses of 1 and 2 minutes). Failures in other steps and failed after gates are never retried. See [engine.md](engine.md#retry-before-rollback).
 
 #### Pin strategies
 
@@ -687,7 +718,7 @@ A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{ef
 
 ### Full example
 
-Two owners, both pin strategies, both deploy modes, freeze, soak, Prometheus, validation Job and backup gates, migration detection and both notification types:
+Two owners, both pin strategies, both deploy modes, freeze, soak, Prometheus, validation Job and backup gates, migration detection, retries with pod diagnostics and both notification types:
 
 ```yaml
 server:
@@ -710,6 +741,8 @@ intake:
   poll_interval: 2m
 engine:
   concurrency: 8
+kubernetes:
+  pod_diagnostics: true
 
 notifications:
   - name: ops
@@ -784,6 +817,9 @@ apps:
       application: api
       namespace: argo-cd
       sync_timeout: 20m
+    retry:
+      max_attempts: 2
+      backoff: 2m
     gates:
       before:
         - type: checks

@@ -14,7 +14,7 @@ Each app names one Application (`apps[].argocd.application`, default the app nam
 | `status.health.status`, `status.health.message` | Application health |
 | `status.operationState` | the phase, message, requested revision, finish time and per-resource results of the last sync operation |
 | `status.conditions` | `ComparisonError`, `SyncError` and `InvalidSpecError` conditions |
-| `status.resources` | resources that are not healthy or out of sync, to explain a failure |
+| `status.resources` | resources that are not healthy or out of sync, to explain a failure; and, after a failed attempt, the Deployments, StatefulSets, DaemonSets and Argo Rollouts the Application manages (`Watcher.Workloads`), whose pods [pod diagnostics](engine.md#pod-diagnostics) list |
 | `status.reconciledAt` | when Argo CD last looked at the Application |
 
 ## When a deploy counts as synced
@@ -59,7 +59,7 @@ The host is not compared, so GitHub Enterprise URLs match too. If no source matc
 
 - When the app's own timeout expires, `WaitSynced` returns `core.ErrSyncTimeout` with the last observed status. The message names the reason, for example `argocd: sync timed out after 10m0s: application health is degraded: Deployment web: Deployment exceeded its progress deadline`.
 - If the Application could not be read at all during the wait, the error also wraps `core.ErrSyncUnavailable` and the reason is `unavailable`.
-- If the caller's context has an earlier deadline, or is cancelled (for example on shutdown), `WaitSynced` returns that context error unchanged, never `ErrSyncTimeout`, so a shutdown is not reported as a failed deploy. The engine resumes a wait after a restart with the remaining time as a context deadline (measured from when the deployment entered `syncing`, at least 10 seconds) and tells its own deadline apart from a shutdown, treating the former as a sync timeout ([engine.md](engine.md#resuming-a-sync-wait)).
+- If the caller's context has an earlier deadline, or is cancelled (for example on shutdown), `WaitSynced` returns that context error unchanged, never `ErrSyncTimeout`, so a shutdown is not reported as a failed deploy. The engine resumes a wait after a restart with the remaining time as a context deadline (measured from when the deployment entered `syncing` or its latest [retry](engine.md#retry-before-rollback) ended its pause, at least 10 seconds) and tells its own deadline apart from a shutdown, treating the former as a sync timeout ([engine.md](engine.md#resuming-a-sync-wait)).
 
 The `health` gate has its own `timeout` (default `10m`), measured from its first evaluation. Because `WaitSynced` already waited for health, the gate normally passes on its first evaluation; its timeout only matters when health is lost again after syncing.
 
@@ -82,7 +82,7 @@ An operation's revision is the one in its `syncResult`. A sync that fails before
 
 ## Failure reasons
 
-Every non-ready status carries a `core.SyncFailure` with a stable reason, a class and a message of at most 512 bytes. The class is a hint for rollback policy; the engine decides what to do with it.
+Every non-ready status carries a `core.SyncFailure` with a stable reason, a class and a message of at most 512 bytes. The class is only a hint: the [retry policy](engine.md#classification) refines it with pod signals and history, for example downgrading `degraded` without other evidence to `unknown`, and decides whether to wait again on the same pin or fail.
 
 | Reason | When | Class |
 | --- | --- | --- |
@@ -195,3 +195,4 @@ With `--revision`, it also prints `pin`, `reached`, `ready` and the failure `rea
 | timeouts with reason `not_observed` | Argo CD has not refreshed (configure its webhook), tracks another branch or path, or the GitHub App cannot read the GitOps repository; a `github compare found no such commit` warning means the Application tracks another repository |
 | reason `untracked_revision` | the Application's source is a Helm chart or other non-Git source; point `gitops.repo` at the repository the Application syncs from |
 | timeouts with reason `out_of_sync` and class `configuration` | automated sync is off; sync the Application or enable automated sync |
+| `syncing → syncing` events and a `deploy.retrying` notification | the deploy did not become healthy in time and doorstep is waiting again on the same pin; the event's `diagnosis` names the signal and node ([engine.md](engine.md#retry-before-rollback)) |

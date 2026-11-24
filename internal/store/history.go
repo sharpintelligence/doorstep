@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -360,4 +361,96 @@ func (s *Store) UnreleasedMigrations(ctx context.Context, t core.Target) ([]core
 		return nil, fmt.Errorf("unreleased migrations of %s: %w", t, err)
 	}
 	return ids, nil
+}
+
+type RetryState struct {
+	Retries     int
+	Delay       time.Duration
+	MaxAttempts int
+}
+
+const retryStateSQL = `
+SELECT count(*)::int,
+    COALESCE((array_agg((data->'retry'->>'delay_ms')::bigint ORDER BY id DESC))[1], 0),
+    COALESCE((array_agg((data->'retry'->>'max_attempts')::int ORDER BY id DESC))[1], 0)
+FROM deployment_events
+WHERE deployment_id = $1
+  AND type = 'transition'
+  AND from_state = 'syncing'
+  AND to_state = 'syncing'
+  AND data ? 'retry'`
+
+func (s *Store) RetryState(ctx context.Context, id core.DeploymentID) (RetryState, error) {
+	var state RetryState
+	var delayMS int64
+	if err := s.db.QueryRow(ctx, retryStateSQL, id).Scan(&state.Retries, &delayMS, &state.MaxAttempts); err != nil {
+		return RetryState{}, fmt.Errorf("read the retries of deployment %d: %w", id, err)
+	}
+	state.Delay = time.Duration(max(delayMS, 0)) * time.Millisecond
+	return state, nil
+}
+
+const (
+	DefaultDiagnosisWindow = 7 * 24 * time.Hour
+	MaxDiagnoses           = 50
+)
+
+type Diagnoses struct {
+	Deployment []json.RawMessage
+	Recent     []json.RawMessage
+}
+
+const diagnosesSQL = `
+SELECT e.deployment_id = cur.id, e.data->'diagnosis'
+FROM deployments cur
+JOIN deployment_events e ON e.app_id = cur.app_id
+JOIN deployments d ON d.id = e.deployment_id
+WHERE cur.id = $1
+  AND e.type = 'transition'
+  AND jsonb_typeof(e.data->'diagnosis') = 'object'
+  AND (
+      e.deployment_id = cur.id
+      OR (
+          e.deployment_id < cur.id
+          AND d.image_digest IS NOT NULL
+          AND d.image_digest IS DISTINCT FROM cur.image_digest
+          AND e.occurred_at > now() - $2::interval
+      )
+  )
+ORDER BY e.id DESC
+LIMIT $3`
+
+func (s *Store) Diagnoses(ctx context.Context, id core.DeploymentID, window time.Duration, limit int) (Diagnoses, error) {
+	if window <= 0 {
+		window = DefaultDiagnosisWindow
+	}
+	if limit <= 0 || limit > MaxDiagnoses {
+		limit = MaxDiagnoses
+	}
+	rows, err := s.db.Query(ctx, diagnosesSQL, id, window, limit)
+	if err != nil {
+		return Diagnoses{}, fmt.Errorf("read diagnoses for deployment %d: %w", id, err)
+	}
+	type row struct {
+		own       bool
+		diagnosis json.RawMessage
+	}
+	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (row, error) {
+		var out row
+		err := r.Scan(&out.own, &out.diagnosis)
+		return out, err
+	})
+	if err != nil {
+		return Diagnoses{}, fmt.Errorf("read diagnoses for deployment %d: %w", id, err)
+	}
+	slices.Reverse(found)
+	var out Diagnoses
+	for _, r := range found {
+		if r.own {
+			out.Deployment = append(out.Deployment, r.diagnosis)
+		} else {
+			out.Recent = append(out.Recent, r.diagnosis)
+		}
+	}
+	return out, nil
 }

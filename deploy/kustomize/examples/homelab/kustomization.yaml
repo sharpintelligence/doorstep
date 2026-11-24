@@ -6,6 +6,7 @@ resources:
   - ../../base
 components:
   - ../../components/registry-credentials
+  - ../../components/pod-diagnostics
 images:
   - name: ghcr.io/sharpintelligence/doorstep
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

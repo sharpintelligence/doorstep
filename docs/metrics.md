@@ -38,12 +38,13 @@ spec:
 
 ## Metrics
 
-The [deployment engine](engine.md#notifications-and-metrics) counts `doorstep_deployments_started_total` when a deployment starts (`queued → resolving`) and observes `doorstep_deployment_duration_seconds` for every final outcome it performs or announces: `succeeded` and `failed` for deploys, `rolled_back` and `rollback_failed` for rollbacks, `cancelled` and `superseded`; a deployment that never started is observed with a duration of zero. Gate series come from the gate evaluator. `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). `serve` creates every configured app's labelled series at zero on start (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. `doorstep_migration_detection_failures_total` is incremented by intake. Every `doorstep_notifications_total`, `doorstep_webhook_deliveries_total` and `doorstep_intake_poll_cycles_total` series is created at zero on start.
+The [deployment engine](engine.md#notifications-and-metrics) counts `doorstep_deployments_started_total` when a deployment starts (`queued → resolving`) and observes `doorstep_deployment_duration_seconds` for every final outcome it performs or announces: `succeeded` and `failed` for deploys, `rolled_back` and `rollback_failed` for rollbacks, `cancelled` and `superseded`; a deployment that never started is observed with a duration of zero. Both are recorded once per deployment, however many [retry attempts](engine.md#retry-before-rollback) it took; `doorstep_deployment_retries_total` counts each retry. Gate series come from the gate evaluator. `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). `serve` creates every configured app's labelled series at zero on start (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. `doorstep_migration_detection_failures_total` is incremented by intake. Every `doorstep_notifications_total`, `doorstep_webhook_deliveries_total` and `doorstep_intake_poll_cycles_total` series is created at zero on start.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `doorstep_deployments_started_total` | counter | `app` | Deployments that started. |
 | `doorstep_deployment_duration_seconds` | histogram | `app`, `outcome` | Time from deployment start to a final outcome. Its `_count` is the number of finished deployments per outcome. |
+| `doorstep_deployment_retries_total` | counter | `app`, `class` | Failed attempts that doorstep retried on the same version, by the classifier's verdict (`transient` or `unknown`). Many `transient` retries point at flaky nodes or a slow registry. `transient` and `unknown` are primed at zero for every app. |
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
 | `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time from a gate starting to wait to its verdict, or the duration of a call that failed (see [Labels](#labels)). Its `_count` is the number of verdicts and evaluation errors. |
 | `doorstep_notifications_total` | counter | `type`, `result` | Notification deliveries. `sent` after the target accepted it (possibly after retries), `failed` when every attempt failed or the failure was permanent, `dropped` when it was never attempted because the target's queue was full or doorstep was shutting down. See [notifications.md](notifications.md#delivery). |
@@ -65,6 +66,7 @@ The other labels are fixed sets. Any other value is recorded as `unknown`, excep
 | --- | --- |
 | `outcome` | `succeeded`, `failed` (failed before anything was pinned, nothing to roll back), `rolled_back`, `rollback_failed`, `cancelled`, `superseded`, `unknown` |
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
+| `class` | `transient`, `version`, `configuration`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
 | `gate` | `ci`, `lock` (a manual freeze), `schedule` (a deploy window), `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `job` (a validation Job), `external` (a result posted through the API), `backup` (a pre-deploy backup webhook), `unknown` |
 | `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown`; webhooks: `processed`, `ignored`, `duplicate`, `rejected`, `unauthorized`, `failed`, `unknown`; poll cycles: `succeeded`, `failed`, `unknown` |
@@ -102,6 +104,12 @@ Rollbacks per app and reason in the last week:
 
 ```promql
 sum by (app, reason) (increase(doorstep_rollbacks_total[7d]))
+```
+
+Apps whose deploys needed retries in the last day, by verdict:
+
+```promql
+sum by (app, class) (increase(doorstep_deployment_retries_total[1d])) > 0
 ```
 
 p95 gate latency per gate kind:

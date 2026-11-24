@@ -163,6 +163,34 @@ func resources(app application) []core.ResourceStatus {
 	return out
 }
 
+func workloads(app application) []core.Workload {
+	var out []core.Workload
+	for _, r := range app.Status.Resources {
+		if len(out) == MaxResources {
+			break
+		}
+		if r.Namespace == "" || r.Name == "" || !workloadKind(r.Group, r.Kind) {
+			continue
+		}
+		w := core.Workload{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name}
+		if !slices.Contains(out, w) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func workloadKind(group, kind string) bool {
+	switch group {
+	case "apps":
+		return kind == "Deployment" || kind == "StatefulSet" || kind == "DaemonSet"
+	case "argoproj.io":
+		return kind == "Rollout"
+	default:
+		return false
+	}
+}
+
 func trackable(candidates []string) bool {
 	return len(candidates) == 0 || slices.ContainsFunc(candidates, func(revision string) bool {
 		return core.ValidateCommitSHA(revision) == nil

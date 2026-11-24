@@ -148,6 +148,22 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Engine.Concurrency = 16 },
 		},
 		{
+			name: "pod diagnostics",
+			env:  map[string]string{EnvKubePodDiagnostics: " true "},
+			want: func(c *Config) { c.Kubernetes.PodDiagnostics = true },
+		},
+		{
+			name: "pod diagnostics off",
+			env:  map[string]string{EnvKubePodDiagnostics: "0"},
+			want: func(*Config) {},
+		},
+		{
+			name:    "unparseable pod diagnostics",
+			env:     map[string]string{EnvKubePodDiagnostics: "sometimes"},
+			want:    func(*Config) {},
+			wantErr: []string{EnvKubePodDiagnostics, `"sometimes"`},
+		},
+		{
 			name:    "unparseable engine concurrency",
 			env:     map[string]string{EnvEngineConcurrency: "many"},
 			want:    func(*Config) {},

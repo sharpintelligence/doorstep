@@ -168,6 +168,7 @@ Returns one deployment with its timeline. `{id}` must be a positive integer; the
 ```
 
 - `events` are the newest 500 events of the deployment, listed oldest first, so the terminal transition and the latest lineage notes are always included; `events_truncated` is `true` when older events were left out.
+- An automatic [retry](engine.md#retry-before-rollback) is a `transition` event from `syncing` to `syncing` whose `data` holds `stage`, `failure_class`, `sync_reason`, `retry` (`attempt`, `next_attempt`, `max_attempts`, `delay_ms`, `reason`, `summary`) and `diagnosis` (the classifier's `verdict`, `summary`, `findings`, `nodes`, `evidence` and whether pods were inspected). The `failed` transition's `data` holds `stage`, `failure_class`, `sync_reason`, `attempts`, `decision` (`transient`, `version_caused`, `retries_exhausted`, `not_retryable`, `retries_disabled` or `newer_release_queued`), `rollback_eligible` and, for Argo CD failures, `diagnosis`. Clients should ignore keys they do not know.
 - `gates` holds the latest result of each named gate, ordered by name. `type` is the configured gate type and `phase` is `before` or `after`, so a client can find the `external` gates it may [report](#external-gate-results).
 - `rollbacks` are the deployments whose `rollback_of_id` is this deployment ("was it rolled back, and did that work"); `retries` are those whose `parent_id` is this deployment. Both are newest first.
 - The deployment, its events, gates and related deployments are read from one database snapshot, so they always agree with each other.
