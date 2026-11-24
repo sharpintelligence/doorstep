@@ -10,7 +10,7 @@ The code lives in `internal/store` (pgx pool, transactions, migrations and repos
 - The role in the connection URL needs `CONNECT` on the database and `USAGE` and `CREATE` on the schema doorstep uses (normally `public`, or the first entry of `search_path`). It owns every table it creates, so no further grants are needed. It does not need `SUPERUSER`, `CREATEDB` or `CREATEROLE`.
 - Advisory locks (`pg_advisory_lock`) must be available; they are on every standard Postgres.
 
-The connection is configured with `DOORSTEP_DATABASE_URL` or `DOORSTEP_DATABASE_URL_FILE`; see [configuration.md](configuration.md#database).
+The connection is configured with `DOORSTEP_DATABASE_URL`, `DOORSTEP_DATABASE_URL_FILE` or `database.url_file` in the configuration file; see [configuration.md](configuration.md#database).
 
 ## Migrations
 

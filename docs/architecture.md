@@ -50,8 +50,8 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | Package | Responsibility | Status |
 | --- | --- | --- |
 | `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run` | built |
-| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root | built |
-| `internal/config` | configuration model, defaults, environment overrides and validation | built |
+| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file | built |
+| `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates, notification targets) and secret references | built |
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
@@ -254,7 +254,7 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 - Only image digests are pinned, never mutable tags.
 - Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.
 - Release images are signed with keyless cosign and carry provenance and SBOM attestations tied to the release workflow; verification steps are in [releasing.md](releasing.md).
-- Secrets never appear inline in configuration: they come from environment variables or `*_file` paths (mounted Kubernetes Secrets).
+- Secrets never appear inline in configuration: they come from environment variables or `*_file` paths (mounted Kubernetes Secrets). `Catalog.CheckSecrets` only proves at startup that each one resolves; code that needs a secret calls `SecretRef.Read` with `config.ReadSecretFile` (capped at 64 KiB) each time it uses it, so rotations apply without a restart and values are not kept in memory.
 - The HTTP server sets read-header, read, write and idle timeouts and a header size limit; panics are recovered and logged.
 - CI pins every action by full commit SHA, runs with a read-only token and does not persist checkout credentials. Dependabot keeps pins and Go modules current.
 

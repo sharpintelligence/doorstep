@@ -24,20 +24,31 @@ import (
 func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	defaults := config.Default()
 	var overrides config.Config
+	var configFlag string
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the doorstep server",
 		Long:  "Run the doorstep server. Pending database migrations are applied before the listener opens.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveServeConfig(cmd.Flags().Changed, overrides, lookupEnv)
+			path, err := resolveConfigPath(cmd.Flags().Changed, configFlag, lookupEnv)
 			if err != nil {
 				return err
 			}
-			return serve(cmd.Context(), cmd.ErrOrStderr(), cfg)
+			cfg, catalog, err := resolveServeConfig(cmd.Flags().Changed, overrides, path, lookupEnv)
+			if err != nil {
+				return err
+			}
+			return serve(cmd.Context(), cmd.ErrOrStderr(), serveInput{
+				config:     cfg,
+				catalog:    catalog,
+				configPath: path,
+				lookupEnv:  lookupEnv,
+			})
 		},
 	}
 
+	addConfigFlag(cmd.Flags(), &configFlag)
 	flags := cmd.Flags()
 	flags.StringVar(&overrides.Server.ListenAddr, flagListenAddr, defaults.Server.ListenAddr,
 		"address to listen on as host:port (env "+config.EnvListenAddr+")")
@@ -53,24 +64,50 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	return cmd
 }
 
-func resolveServeConfig(changed func(name string) bool, overrides config.Config, lookupEnv LookupEnv) (config.Config, error) {
-	cfg, err := resolveConfig(changed, overrides, lookupEnv)
+func resolveServeConfig(changed func(name string) bool, overrides config.Config, configPath string, lookupEnv LookupEnv) (config.Config, config.Catalog, error) {
+	file, err := loadConfigFileAt(configPath)
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, config.Catalog{}, err
+	}
+	cfg, err := resolveConfig(changed, overrides, file, lookupEnv)
+	if err != nil {
+		return config.Config{}, config.Catalog{}, err
 	}
 	if changed(flagRegistryAuthFile) {
 		cfg.Registry.CredentialsFile = overrides.Registry.CredentialsFile
 	}
-	if err := cfg.Validate(); err != nil {
-		return config.Config{}, fmt.Errorf("invalid configuration: %w", err)
+	catalog := file.Catalog()
+	if err := errors.Join(cfg.Validate(), catalog.Validate()); err != nil {
+		return config.Config{}, config.Catalog{}, fmt.Errorf("invalid configuration: %w", err)
 	}
-	return cfg, nil
+	return cfg, catalog, nil
 }
 
-func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
+type serveInput struct {
+	config     config.Config
+	catalog    config.Catalog
+	configPath string
+	lookupEnv  LookupEnv
+}
+
+func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
+	cfg := in.config
 	logger, err := logging.New(logOutput, cfg.Log.Level, cfg.Log.Format)
 	if err != nil {
 		return err
+	}
+	if err := in.catalog.CheckSecrets(in.lookupEnv, config.ReadSecretFile); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	if in.configPath != "" {
+		logger.InfoContext(ctx, "configuration loaded",
+			slog.String("path", in.configPath),
+			slog.Int("apps", len(in.catalog.Apps)),
+			slog.Int("notifications", len(in.catalog.Notifications)),
+		)
+	}
+	if len(in.catalog.Apps) == 0 {
+		logger.WarnContext(ctx, "no apps configured")
 	}
 	githubApp, err := newGitHubApp(cfg.GitHub, os.ReadFile, logger)
 	if err != nil {

@@ -16,13 +16,14 @@ import (
 
 func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 	var overrides config.Config
+	var configFlag string
 	cmd := &cobra.Command{
 		Use:   "migrate",
 		Short: "Apply pending database migrations",
 		Long:  "Apply pending database migrations and print each applied version. Migrations are forward-only; serve also applies them on start.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, lookupEnv)
+			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
 			if err != nil {
 				return err
 			}
@@ -30,6 +31,7 @@ func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 		},
 	}
 	flags := cmd.PersistentFlags()
+	addConfigFlag(flags, &configFlag)
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
 
@@ -38,7 +40,7 @@ func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 		Short: "Print applied and pending database migrations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, lookupEnv)
+			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
 			if err != nil {
 				return err
 			}
@@ -48,8 +50,12 @@ func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 	return cmd
 }
 
-func resolveMigrateConfig(changed func(name string) bool, overrides config.Config, lookupEnv LookupEnv) (config.Config, error) {
-	cfg, err := resolveConfig(changed, overrides, lookupEnv)
+func resolveMigrateConfig(changed func(name string) bool, overrides config.Config, configFlag string, lookupEnv LookupEnv) (config.Config, error) {
+	file, err := loadConfigFile(changed, configFlag, lookupEnv)
+	if err != nil {
+		return config.Config{}, err
+	}
+	cfg, err := resolveConfig(changed, overrides, file, lookupEnv)
 	if err != nil {
 		return config.Config{}, err
 	}

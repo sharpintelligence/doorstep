@@ -12,13 +12,6 @@ import (
 
 const testDatabaseURL = "postgres://doorstep@localhost/doorstep"
 
-func envFrom(vars map[string]string) func(string) (string, bool) {
-	return func(key string) (string, bool) {
-		v, ok := vars[key]
-		return v, ok
-	}
-}
-
 func TestDefault(t *testing.T) {
 	t.Parallel()
 
@@ -379,20 +372,63 @@ func TestDatabaseConnString(t *testing.T) {
 	}
 }
 
-func assertErrorContains(t *testing.T, err error, substrings []string) {
-	t.Helper()
-	if len(substrings) == 0 {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		return
+func TestFromEnvReplacesSecretSources(t *testing.T) {
+	t.Parallel()
+
+	base := Default()
+	base.Database = Database{URLFile: "/file/database-url"}
+	base.GitHub.AppID = "42"
+	base.GitHub.PrivateKeyFile = "/file/key.pem"
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want func(*Config)
+	}{
+		{name: "unset keeps the base", want: func(*Config) {}},
+		{
+			name: "database URL replaces a URL file",
+			env:  map[string]string{EnvDatabaseURL: testDatabaseURL},
+			want: func(c *Config) { c.Database = Database{URL: testDatabaseURL} },
+		},
+		{
+			name: "database URL file replaces a URL file",
+			env:  map[string]string{EnvDatabaseURLFile: "/env/database-url"},
+			want: func(c *Config) { c.Database = Database{URLFile: "/env/database-url"} },
+		},
+		{
+			name: "empty database URL counts as set",
+			env:  map[string]string{EnvDatabaseURL: ""},
+			want: func(c *Config) { c.Database = Database{} },
+		},
+		{
+			name: "both database sources conflict",
+			env:  map[string]string{EnvDatabaseURL: testDatabaseURL, EnvDatabaseURLFile: "/env/database-url"},
+			want: func(c *Config) { c.Database = Database{URL: testDatabaseURL, URLFile: "/env/database-url"} },
+		},
+		{
+			name: "inline private key replaces a key file",
+			env:  map[string]string{EnvGitHubAppPrivateKey: "inline"},
+			want: func(c *Config) { c.GitHub.PrivateKey, c.GitHub.PrivateKeyFile = "inline", "" },
+		},
+		{
+			name: "private key file replaces a key file",
+			env:  map[string]string{EnvGitHubAppPrivateKeyFile: "/env/key.pem"},
+			want: func(c *Config) { c.GitHub.PrivateKeyFile = "/env/key.pem" },
+		},
 	}
-	if err == nil {
-		t.Fatalf("expected error containing %q, got nil", substrings)
-	}
-	for _, s := range substrings {
-		if !strings.Contains(err.Error(), s) {
-			t.Errorf("error %q does not contain %q", err, s)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			want := base
+			tt.want(&want)
+			got, err := FromEnv(base, envFrom(tt.env))
+			if err != nil {
+				t.Fatalf("FromEnv: %v", err)
+			}
+			if got != want {
+				t.Errorf("FromEnv() = %+v, want %+v", got, want)
+			}
+		})
 	}
 }

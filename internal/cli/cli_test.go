@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -47,6 +48,47 @@ func envFrom(vars map[string]string) LookupEnv {
 		return v, ok
 	}
 }
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+const oneAppConfig = `
+log:
+  level: debug
+notifications:
+  - name: ops
+    type: slack
+    webhook_url_env: TEST_SLACK_URL
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    notify: [ops]
+`
+
+const invalidAppsConfig = `
+apps:
+  - name: Blog
+    source:
+      repo: blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: /apps/blog
+    notify: [pager]
+`
 
 func TestRunVersion(t *testing.T) {
 	t.Parallel()
@@ -107,6 +149,7 @@ func TestRunErrors(t *testing.T) {
 		name         string
 		args         []string
 		env          map[string]string
+		config       string
 		wantStderr   []string
 		forbidStderr []string
 	}{
@@ -222,6 +265,32 @@ func TestRunErrors(t *testing.T) {
 			wantStderr: []string{"doorstep: read database URL file"},
 		},
 		{
+			name:       "migrate reads the database URL file from the config file",
+			args:       []string{"migrate"},
+			config:     "database:\n  url_file: /nonexistent/file-database-url\n",
+			wantStderr: []string{"doorstep: read database URL file", "/nonexistent/file-database-url"},
+		},
+		{
+			name:       "migrate database environment over config file",
+			args:       []string{"migrate", "status"},
+			env:        map[string]string{config.EnvDatabaseURLFile: "/nonexistent/env-database-url"},
+			config:     "database:\n  url_file: /nonexistent/file-database-url\n",
+			wantStderr: []string{"doorstep: read database URL file", "/nonexistent/env-database-url"},
+		},
+		{
+			name:       "image resolve reads registry credentials from the config file",
+			args:       []string{"image", "resolve", "ghcr.io/owner/app", "v1"},
+			config:     "registry:\n  credentials_file: /nonexistent/doorstep/config.json\n",
+			wantStderr: []string{"doorstep: registry credentials", "/nonexistent/doorstep/config.json"},
+		},
+		{
+			name:       "serve reads github settings from the config file",
+			args:       []string{"serve"},
+			env:        map[string]string{config.EnvDatabaseURL: "postgres://doorstep@localhost/doorstep"},
+			config:     "github:\n  app_id: \"123\"\n",
+			wantStderr: []string{"doorstep: invalid configuration", "github app private key: required"},
+		},
+		{
 			name:       "migrate rejects server flags",
 			args:       []string{"migrate", "--listen-addr", ":0"},
 			wantStderr: []string{"doorstep: unknown flag: --listen-addr"},
@@ -287,13 +356,99 @@ func TestRunErrors(t *testing.T) {
 			args:       []string{"serve", "--listen-addr", "127.0.0.1:8123", "--metrics-listen-addr", "127.0.0.1:8123"},
 			wantStderr: []string{"doorstep: invalid configuration", "metrics listen address", "must differ"},
 		},
+		{
+			name:   "invalid apps report every error",
+			args:   []string{"serve"},
+			config: invalidAppsConfig,
+			wantStderr: []string{
+				"doorstep: invalid configuration",
+				"apps[0] (Blog): name:",
+				"apps[0] (Blog): source.repo:",
+				"apps[0] (Blog): gitops.path: must be relative",
+				`apps[0] (Blog): notify[0]: unknown notification "pager"`,
+			},
+		},
+		{
+			name:       "invalid file settings and apps reported together",
+			args:       []string{"serve"},
+			config:     "log:\n  format: xml\n" + invalidAppsConfig,
+			wantStderr: []string{"doorstep: invalid configuration", "log format", "apps[0] (Blog): name:"},
+		},
+		{
+			name:       "unknown key in file",
+			args:       []string{"serve"},
+			config:     "apps:\n  - appname: blog\n",
+			wantStderr: []string{"doorstep: config file ", "line 2", "field appname not found"},
+		},
+		{
+			name:       "missing config file",
+			args:       []string{"serve", "--config", "/nonexistent/doorstep.yaml"},
+			wantStderr: []string{"doorstep: config file /nonexistent/doorstep.yaml: no such file or directory"},
+		},
+		{
+			name:       "empty config flag",
+			args:       []string{"serve", "--config", ""},
+			wantStderr: []string{"doorstep: --config: must not be empty"},
+		},
+		{
+			name:       "empty config environment variable",
+			args:       []string{"serve"},
+			env:        map[string]string{config.EnvConfig: ""},
+			wantStderr: []string{"doorstep: DOORSTEP_CONFIG: must not be empty"},
+		},
+		{
+			name:       "unresolved secret",
+			args:       []string{"serve", "--listen-addr", "127.0.0.1:0"},
+			config:     oneAppConfig,
+			env:        map[string]string{config.EnvDatabaseURL: "postgres://doorstep@localhost/doorstep"},
+			wantStderr: []string{"doorstep: invalid configuration: notification ops webhook_url: environment variable TEST_SLACK_URL is not set"},
+		},
+		{
+			name:       "empty secret is reported without its value",
+			args:       []string{"serve", "--listen-addr", "127.0.0.1:0"},
+			config:     oneAppConfig,
+			env:        map[string]string{config.EnvDatabaseURL: "postgres://doorstep@localhost/doorstep", "TEST_SLACK_URL": "\n"},
+			wantStderr: []string{"notification ops webhook_url: environment variable TEST_SLACK_URL is empty"},
+		},
+		{
+			name:       "config validate without a file",
+			args:       []string{"config", "validate"},
+			wantStderr: []string{"doorstep: no configuration file: pass --config or set DOORSTEP_CONFIG"},
+		},
+		{
+			name:       "config validate with invalid apps",
+			args:       []string{"config", "validate"},
+			config:     invalidAppsConfig,
+			wantStderr: []string{"doorstep: invalid configuration", "apps[0] (Blog): source.repo:", "notify[0]"},
+		},
+		{
+			name:       "config validate with invalid settings",
+			args:       []string{"config", "validate"},
+			config:     "server:\n  listen_addr: nowhere\n",
+			wantStderr: []string{"doorstep: invalid configuration", "listen address"},
+		},
+		{
+			name:       "config validate with unparseable file",
+			args:       []string{"config", "validate"},
+			config:     "apps: [\n",
+			wantStderr: []string{"doorstep: config file ", "yaml:"},
+		},
+		{
+			name:       "config validate rejects arguments",
+			args:       []string{"config", "validate", "config.yaml"},
+			wantStderr: []string{`unknown command "config.yaml"`},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			args := tt.args
+			if tt.config != "" {
+				args = append(slices.Clone(args), "--config", writeConfig(t, tt.config))
+			}
 			var stdout, stderr bytes.Buffer
-			code := Run(t.Context(), tt.args, &stdout, &stderr, envFrom(tt.env))
+			code := Run(t.Context(), args, &stdout, &stderr, envFrom(tt.env))
 			if code != 1 {
 				t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr.String())
 			}
@@ -326,21 +481,34 @@ func TestRunHelp(t *testing.T) {
 	}{
 		{
 			args: []string{"serve", "--help"},
-			want: []string{"--listen-addr", "--log-level", "--log-format", "--shutdown-delay", "--shutdown-timeout", "--database-url-file", config.EnvListenAddr, config.EnvShutdownDelay, config.EnvDatabaseURL, config.EnvDatabaseURLFile},
+			want: []string{"--config", config.EnvConfig, "--listen-addr", "--log-level", "--log-format", "--shutdown-delay", "--shutdown-timeout", "--database-url-file", config.EnvListenAddr, config.EnvShutdownDelay, config.EnvDatabaseURL, config.EnvDatabaseURLFile},
 		},
 		{
 			args: []string{"migrate", "--help"},
-			want: []string{"status", "--log-level", "--log-format", "--database-url-file", config.EnvDatabaseURLFile},
+			want: []string{"status", "--config", "--log-level", "--log-format", "--database-url-file", config.EnvDatabaseURLFile},
 		},
 		{
 			args: []string{"migrate", "status", "--help"},
-			want: []string{"--database-url-file", "--log-level"},
+			want: []string{"--config", "--database-url-file", "--log-level"},
+		},
+		{
+			args: []string{"image", "resolve", "--help"},
+			want: []string{"--config", "--registry-credentials-file", config.EnvRegistryCredentialsFile},
+		},
+		{
+			args: []string{"config", "validate", "--help"},
+			want: []string{"--config", config.EnvConfig, "without resolving secrets"},
+		},
+		{
+			args: []string{"config"},
+			want: []string{"validate"},
 		},
 		{
 			args: []string{"--help"},
-			want: []string{"serve", "migrate", "version"},
+			want: []string{"config", "serve", "migrate", "version"},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
 			t.Parallel()
@@ -357,6 +525,58 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
+func TestResolveConfigPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		changed   bool
+		flagValue string
+		env       map[string]string
+		want      string
+		wantErr   string
+	}{
+		{name: "none"},
+		{name: "flag", changed: true, flagValue: "/etc/flag.yaml", want: "/etc/flag.yaml"},
+		{name: "environment", env: map[string]string{config.EnvConfig: "/etc/env.yaml"}, want: "/etc/env.yaml"},
+		{
+			name:    "flag over environment",
+			changed: true, flagValue: "/etc/flag.yaml",
+			env:  map[string]string{config.EnvConfig: "/etc/env.yaml"},
+			want: "/etc/flag.yaml",
+		},
+		{
+			name:    "flag over empty environment",
+			changed: true, flagValue: "/etc/flag.yaml",
+			env:  map[string]string{config.EnvConfig: ""},
+			want: "/etc/flag.yaml",
+		},
+		{name: "unchanged flag ignored", flagValue: "/etc/flag.yaml"},
+		{name: "empty flag", changed: true, wantErr: "--config: must not be empty"},
+		{name: "empty environment", env: map[string]string{config.EnvConfig: ""}, wantErr: "DOORSTEP_CONFIG: must not be empty"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			changed := func(name string) bool { return tt.changed && name == flagConfig }
+			got, err := resolveConfigPath(changed, tt.flagValue, envFrom(tt.env))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("resolveConfigPath() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveConfigPath: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveConfigPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveServeConfig(t *testing.T) {
 	t.Parallel()
 
@@ -368,11 +588,49 @@ func TestResolveServeConfig(t *testing.T) {
 		GitHub:   config.Default().GitHub,
 		Registry: config.Registry{CredentialsFile: "/flag/config.json"},
 	}
+	const fileSettings = `
+server:
+  listen_addr: 127.0.0.1:6000
+  metrics_listen_addr: ""
+  shutdown_delay: 0s
+  shutdown_timeout: 1m
+log:
+  level: warn
+  format: text
+database:
+  url_file: /file/database-url
+github:
+  app_id: "42"
+  private_key_file: /file/key.pem
+  api_url: https://ghe.example.com/api/v3
+registry:
+  credentials_file: /file/config.json
+`
+	fileConfig := config.Config{
+		Server:   config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
+		Log:      config.Log{Level: "warn", Format: "text"},
+		Database: config.Database{URL: databaseURL},
+		GitHub:   config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3"},
+		Registry: config.Registry{CredentialsFile: "/file/config.json"},
+	}
+	oneAppCatalog := config.File{
+		Notifications: []config.Notification{{Name: "ops", Type: config.NotifySlack, WebhookURLEnv: "TEST_SLACK_URL"}},
+		Apps: []config.App{{
+			Name:   "blog",
+			Source: config.Source{Repo: "example-user/blog"},
+			Image:  config.Image{Repository: "ghcr.io/example-user/blog"},
+			GitOps: config.GitOps{Repo: "example-user/homelab", Path: "apps/blog"},
+			Notify: []string{"ops"},
+		}},
+	}.Catalog()
+
 	tests := []struct {
-		name    string
-		env     map[string]string
-		changed []string
-		want    func(*config.Config)
+		name        string
+		file        string
+		env         map[string]string
+		changed     []string
+		want        func(*config.Config)
+		wantCatalog config.Catalog
 	}{
 		{
 			name: "defaults",
@@ -463,6 +721,109 @@ func TestResolveServeConfig(t *testing.T) {
 				c.Log.Format = "text"
 			},
 		},
+		{
+			name: "file over defaults",
+			file: fileSettings,
+			want: func(c *config.Config) { *c = fileConfig },
+		},
+		{
+			name: "partial file keeps defaults",
+			file: "log:\n  level: debug\n",
+			want: func(c *config.Config) { c.Log.Level = "debug" },
+		},
+		{
+			name: "environment over file",
+			file: fileSettings,
+			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s"},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Server.ListenAddr = ":9000"
+				c.Server.ShutdownDelay = 2 * time.Second
+			},
+		},
+		{
+			name:    "flag over environment over file",
+			file:    fileSettings,
+			env:     map[string]string{config.EnvListenAddr: ":9000", config.EnvLogLevel: "debug"},
+			changed: []string{flagListenAddr},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Server.ListenAddr = flags.Server.ListenAddr
+				c.Log.Level = "debug"
+			},
+		},
+		{
+			name: "database URL file from the file without environment",
+			file: fileSettings,
+			env:  map[string]string{config.EnvDatabaseURL: ""},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Database = config.Database{URLFile: "/file/database-url"}
+			},
+		},
+		{
+			name: "database URL file environment over file",
+			file: fileSettings,
+			env:  map[string]string{config.EnvDatabaseURL: "", config.EnvDatabaseURLFile: "/env/database-url"},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Database = config.Database{URLFile: "/env/database-url"}
+			},
+		},
+		{
+			name:    "database URL file flag over environment over file",
+			file:    fileSettings,
+			changed: []string{flagDatabaseURLFile},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Database = flags.Database
+			},
+		},
+		{
+			name: "github and registry environment over file",
+			file: fileSettings,
+			env: map[string]string{
+				config.EnvGitHubAppID:             "7",
+				config.EnvGitHubAppPrivateKey:     "inline-key",
+				config.EnvGitHubAPIURL:            "https://api.github.com",
+				config.EnvRegistryCredentialsFile: "/env/config.json",
+				config.EnvMetricsListenAddr:       "127.0.0.1:9100",
+			},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Server.MetricsListenAddr = "127.0.0.1:9100"
+				c.GitHub = config.GitHub{AppID: "7", PrivateKey: "inline-key", APIURL: "https://api.github.com"}
+				c.Registry.CredentialsFile = "/env/config.json"
+			},
+		},
+		{
+			name:    "registry and metrics flags over file",
+			file:    fileSettings,
+			changed: []string{flagRegistryAuthFile, flagMetricsListenAddr},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Server.MetricsListenAddr = flags.Server.MetricsListenAddr
+				c.Registry.CredentialsFile = flags.Registry.CredentialsFile
+			},
+		},
+		{
+			name:    "environment rescues invalid file value",
+			file:    "log:\n  format: xml\n",
+			env:     map[string]string{config.EnvLogFormat: "json"},
+			changed: nil,
+			want:    func(*config.Config) {},
+		},
+		{
+			name:        "apps come from the file",
+			file:        oneAppConfig,
+			want:        func(c *config.Config) { c.Log.Level = "debug" },
+			wantCatalog: oneAppCatalog,
+		},
+		{
+			name: "empty file",
+			file: "\n",
+			want: func(*config.Config) {},
+		},
 	}
 
 	for _, tt := range tests {
@@ -477,13 +838,116 @@ func TestResolveServeConfig(t *testing.T) {
 			want := config.Default()
 			want.Database.URL = databaseURL
 			tt.want(&want)
+			var path string
+			if tt.file != "" {
+				path = writeConfig(t, tt.file)
+			}
 
-			got, err := resolveServeConfig(changed, flags, envFrom(env))
+			got, catalog, err := resolveServeConfig(changed, flags, path, envFrom(env))
 			if err != nil {
 				t.Fatalf("resolveServeConfig: %v", err)
 			}
 			if got != want {
 				t.Errorf("resolveServeConfig() = %+v, want %+v", got, want)
+			}
+			if !reflect.DeepEqual(catalog, tt.wantCatalog) {
+				t.Errorf("resolveServeConfig() catalog = %+v, want %+v", catalog, tt.wantCatalog)
+			}
+		})
+	}
+}
+
+func TestResolveServeConfigErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		file    string
+		path    string
+		env     map[string]string
+		wantErr []string
+	}{
+		{
+			name:    "missing file",
+			path:    "/nonexistent/doorstep.yaml",
+			wantErr: []string{"config file /nonexistent/doorstep.yaml: no such file or directory"},
+		},
+		{
+			name:    "unknown field",
+			file:    "server:\n  listen: :80\n",
+			wantErr: []string{"config file ", "line 2", "field listen not found"},
+		},
+		{
+			name:    "invalid environment over file",
+			file:    "log:\n  level: debug\n",
+			env:     map[string]string{config.EnvShutdownDelay: "later"},
+			wantErr: []string{"invalid environment", config.EnvShutdownDelay},
+		},
+		{
+			name:    "invalid file value",
+			file:    "server:\n  shutdown_timeout: 0s\n",
+			wantErr: []string{"invalid configuration", "shutdown timeout: must be positive"},
+		},
+		{
+			name:    "invalid settings and apps together",
+			file:    "log:\n  level: loud\n" + invalidAppsConfig,
+			wantErr: []string{"invalid configuration", "log level", "apps[0] (Blog): gitops.path"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := tt.path
+			if tt.file != "" {
+				path = writeConfig(t, tt.file)
+			}
+			_, _, err := resolveServeConfig(func(string) bool { return false }, config.Config{}, path, envFrom(tt.env))
+			if err == nil {
+				t.Fatal("resolveServeConfig() = nil error")
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		file    string
+		useEnv  bool
+		wantOut string
+	}{
+		{name: "one app by flag", file: oneAppConfig, wantOut: "ok: 1 apps, 1 notification targets\n"},
+		{name: "one app by environment", file: oneAppConfig, useEnv: true, wantOut: "ok: 1 apps, 1 notification targets\n"},
+		{name: "empty file", file: "\n", wantOut: "ok: 0 apps, 0 notification targets\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeConfig(t, tt.file)
+			args := []string{"config", "validate", "--config", path}
+			env := map[string]string{}
+			if tt.useEnv {
+				args = []string{"config", "validate"}
+				env[config.EnvConfig] = path
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run(t.Context(), args, &stdout, &stderr, envFrom(env)); code != 0 {
+				t.Fatalf("exit code = %d, stderr %q", code, stderr.String())
+			}
+			if stdout.String() != tt.wantOut {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantOut)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("unexpected stderr %q", stderr.String())
 			}
 		})
 	}
@@ -498,7 +962,9 @@ func TestRunServe(t *testing.T) {
 		args     []string
 		env      map[string]string
 		database databaseSource
+		config   string
 		wantLogs []string
+		wantApps float64
 
 		wantCredentialEntries float64
 	}{
@@ -550,6 +1016,13 @@ func TestRunServe(t *testing.T) {
 			},
 			wantLogs: []string{"github app configured"},
 		},
+		{
+			name:     "configuration file",
+			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			env:      map[string]string{"TEST_SLACK_URL": "https://hooks.slack.com/services/T/B/x\n"},
+			config:   oneAppConfig,
+			wantApps: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -561,6 +1034,11 @@ func TestRunServe(t *testing.T) {
 			defer cancel()
 
 			args, env := withDatabase(t, tt.database, tt.args, tt.env)
+			var path string
+			if tt.config != "" {
+				path = writeConfig(t, tt.config)
+				args = append(args, "--config", path)
+			}
 			done := make(chan int, 1)
 			go func() { done <- Run(ctx, args, &stdout, &stderr, envFrom(env)) }()
 
@@ -595,6 +1073,7 @@ func TestRunServe(t *testing.T) {
 					t.Errorf("logs missing %q: %s", msg, stderr.String())
 				}
 			}
+			assertConfigLogs(t, logs, path, tt.wantApps)
 			if stdout.Len() != 0 {
 				t.Errorf("unexpected stdout %q", stdout.String())
 			}
@@ -941,6 +1420,33 @@ func assertCredentialsLog(t *testing.T, logs []map[string]any, wantEntries float
 	}
 }
 
+func assertConfigLogs(t *testing.T, logs []map[string]any, path string, wantApps float64) {
+	t.Helper()
+	loaded := findMessage(logs, "configuration loaded")
+	switch {
+	case path == "" && loaded != nil:
+		t.Errorf("configuration loaded logged without a file: %v", loaded)
+	case path != "" && loaded == nil:
+		t.Errorf("logs missing configuration loaded")
+	case path != "":
+		if loaded["path"] != path || loaded["apps"] != wantApps || loaded["notifications"] != float64(1) {
+			t.Errorf("configuration loaded = %v, want path %s and %v apps", loaded, path, wantApps)
+		}
+	}
+	if warned := findMessage(logs, "no apps configured") != nil; warned != (wantApps == 0) {
+		t.Errorf("no apps configured warning logged = %t, want %t", warned, wantApps == 0)
+	}
+}
+
+func findMessage(entries []map[string]any, msg string) map[string]any {
+	for _, entry := range entries {
+		if entry["msg"] == msg {
+			return entry
+		}
+	}
+	return nil
+}
+
 func waitForListening(t *testing.T, stderr *lockedBuffer, done <-chan int) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -985,12 +1491,7 @@ func parseLogs(t *testing.T, out string) []map[string]any {
 }
 
 func hasMessage(entries []map[string]any, msg string) bool {
-	for _, entry := range entries {
-		if entry["msg"] == msg {
-			return true
-		}
-	}
-	return false
+	return findMessage(entries, msg) != nil
 }
 
 func waitForLogAddr(t *testing.T, stderr *lockedBuffer, done <-chan int, msg string) string {

@@ -6,15 +6,20 @@ Each setting is resolved from the first source that provides it:
 
 1. command-line flags
 2. environment variables (prefix `DOORSTEP_`)
-3. YAML configuration file (`--config` / `DOORSTEP_CONFIG`) (planned, not yet implemented)
+3. YAML configuration file (`--config` / `DOORSTEP_CONFIG`), see [Configuration file](#configuration-file)
 4. built-in defaults
 
 An environment variable that is set but empty counts as set, and is then validated like any other value. All settings are validated together on startup, and every invalid setting is reported in one error.
+
+A secret with several possible sources is resolved as a whole: when any flag or environment variable for the database URL is set, it replaces `database.url_file` from the file, and when either `DOORSTEP_GITHUB_APP_PRIVATE_KEY` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is set, it replaces `github.private_key_file`. Sources at the same level still conflict, so setting both database environment variables is an error.
+
+Apps and notification targets are only read from the configuration file; they have no flags or environment variables.
 
 ## `doorstep serve`
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
+| `--config` | `DOORSTEP_CONFIG` | none | Path to the YAML configuration file. Optional: without it doorstep runs with built-in defaults and no apps, and logs a `no apps configured` warning. A set but empty value is an error. |
 | `--listen-addr` | `DOORSTEP_LISTEN_ADDR` | `:8080` | Address for the HTTP listener as `host:port`. The port must be numeric; `0` picks a free port. |
 | `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | `:9090` | Address for the `/metrics` listener as `host:port`; `/metrics` is served only there. Must differ from `--listen-addr`. Set it to an empty value to serve `/metrics` on the main listener instead, which is only safe when the main listener is not reachable from the internet. See [metrics.md](metrics.md). |
 | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` | `5s` | How long the server keeps serving after `SIGINT`/`SIGTERM` while `/readyz` reports `shutting_down`, before it stops accepting connections. Gives load balancers time to stop routing to the instance. Go duration syntax. `0s` disables it; must not be negative. |
@@ -24,6 +29,8 @@ An environment variable that is set but empty counts as set, and is then validat
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
 | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
+
+The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings).
 
 Example:
 
@@ -43,6 +50,8 @@ On start, `serve` connects to Postgres (giving up after 10 seconds), applies pen
 | --- | --- | --- |
 | | `DOORSTEP_DATABASE_URL` | The URL itself, for example `postgres://doorstep:secret@db:5432/doorstep?sslmode=verify-full`. There is no flag for it, because a flag would show the password in process listings. |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | A file whose content is the URL, such as a mounted Kubernetes Secret. Leading and trailing whitespace is trimmed; an empty file is an error. The flag replaces either environment variable. |
+
+The configuration file can name the URL file as `database.url_file`; either environment variable or the flag replaces it. The file has no key for the URL itself, because the URL carries the password.
 
 The URL is never logged and never included in error messages.
 
@@ -69,25 +78,25 @@ VERSION  STATE    APPLIED AT            NAME
 1        applied  2026-11-23T10:00:00Z  00001_initial_schema.sql
 ```
 
-Both accept `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
+Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
 
 ## GitHub App
 
-GitHub access is optional as a group: with none of these set, `doorstep serve` runs without GitHub. Once the App ID or a private key is set, the App ID and exactly one private key source are required. These settings are environment variables only; there are no flags, so the key never shows up in process listings. See [github-app.md](github-app.md) for creating, installing and rotating the App.
+GitHub access is optional as a group: with none of these set, `doorstep serve` runs without GitHub. Once the App ID or a private key is set, the App ID and exactly one private key source are required. These settings come from environment variables or the configuration file; there are no flags, so the key never shows up in process listings, and the file can only name a key file, never hold the key itself. See [github-app.md](github-app.md) for creating, installing and rotating the App.
 
-| Environment variable | Default | Description |
-| --- | --- | --- |
-| `DOORSTEP_GITHUB_APP_ID` | unset | The App's numeric App ID or its Client ID, used as the JWT issuer. Must not contain whitespace. |
-| `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` | unset | Path to the App's private key: PEM, PKCS #1 (`RSA PRIVATE KEY`, as GitHub downloads it) or PKCS #8 (`PRIVATE KEY`), RSA, at least 2048 bits. Usually a mounted Kubernetes Secret. |
-| `DOORSTEP_GITHUB_APP_PRIVATE_KEY` | unset | The private key inline, same formats. Literal `\n` sequences are turned into newlines, for env files that cannot hold multi-line values. Setting both this and `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is an error. |
-| `DOORSTEP_GITHUB_API_URL` | `https://api.github.com` | REST API root. For GitHub Enterprise Server use `https://<host>/api/v3`. Must be an absolute URL without user information, query or fragment, and must use `https` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`). A trailing slash is ignored. Validated even when no App is configured. |
+| Environment variable | File key | Default | Description |
+| --- | --- | --- | --- |
+| `DOORSTEP_GITHUB_APP_ID` | `github.app_id` | unset | The App's numeric App ID or its Client ID, used as the JWT issuer. Must not contain whitespace. |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` | `github.private_key_file` | unset | Path to the App's private key: PEM, PKCS #1 (`RSA PRIVATE KEY`, as GitHub downloads it) or PKCS #8 (`PRIVATE KEY`), RSA, at least 2048 bits. Usually a mounted Kubernetes Secret. |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY` | none | unset | The private key inline, same formats. Literal `\n` sequences are turned into newlines, for env files that cannot hold multi-line values. Setting both this and `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is an error. |
+| `DOORSTEP_GITHUB_API_URL` | `github.api_url` | `https://api.github.com` | REST API root. For GitHub Enterprise Server use `https://<host>/api/v3`. Must be an absolute URL without user information, query or fragment, and must use `https` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`). A trailing slash is ignored. Validated even when no App is configured. |
 
 The key is read and parsed when `serve` starts; a missing, unreadable or malformed key stops startup. Key values are redacted wherever configuration is printed or logged.
 
 ## `doorstep image resolve`
 
 ```sh
-doorstep image resolve <repository> <tag> [--registry-credentials-file PATH]
+doorstep image resolve <repository> <tag> [--registry-credentials-file PATH] [--config PATH]
 ```
 
 Resolves a tag to the digest it currently points at and prints it on stdout, using the same registry client and credentials as the server. Use it to check that doorstep can reach a registry and that its credentials work before wiring up an application:
@@ -100,13 +109,13 @@ sha256:9b2c...
 - `<repository>` is a repository without a tag or digest: `nginx`, `owner/app` (both Docker Hub), `ghcr.io/owner/app`, `registry.example.com:5000/team/app`. Docker Hub names are normalised the usual way (`nginx` is `index.docker.io/library/nginx`).
 - `<tag>` is required and must be a valid OCI tag; nothing ever defaults to `latest`. doorstep images are tagged with the full commit SHA, but any tag works here.
 - A multi-architecture image resolves to the digest of its index, not of one platform's manifest.
-- `--registry-credentials-file` (env `DOORSTEP_REGISTRY_CREDENTIALS_FILE`) selects the credentials file; without it the request is anonymous.
+- `--registry-credentials-file` (env `DOORSTEP_REGISTRY_CREDENTIALS_FILE`, or `registry.credentials_file` in the file given by `--config` / `DOORSTEP_CONFIG`) selects the credentials file; without any of them the request is anonymous.
 
 On failure it exits with status 1 and prints the reason: `image not found` (the tag or repository does not exist yet), `registry denied access` (missing or wrong credentials; GHCR and Docker Hub also answer this way for a private repository that does not exist), `invalid image reference` (rejected locally or by the registry), or another error such as a transport failure or a host that does not answer the registry API.
 
 ## Registry credentials
 
-doorstep resolves image tags to digests through the OCI distribution API. Registries that allow anonymous pulls need no configuration. For private images, point `DOORSTEP_REGISTRY_CREDENTIALS_FILE` (or `--registry-credentials-file`) at a Docker `config.json` file:
+doorstep resolves image tags to digests through the OCI distribution API. Registries that allow anonymous pulls need no configuration. For private images, point `DOORSTEP_REGISTRY_CREDENTIALS_FILE` (or `--registry-credentials-file`, or `registry.credentials_file` in the configuration file) at a Docker `config.json` file:
 
 ```json
 {
@@ -137,7 +146,7 @@ kubectl create secret docker-registry doorstep-registry \
   --docker-server=ghcr.io --docker-username=robot --docker-password="$GHCR_TOKEN"
 ```
 
-```yaml
+```yaml kubernetes
 containers:
   - name: doorstep
     env:
@@ -173,6 +182,281 @@ The plain HTTP fallback also carries credentials. When a credential matches one 
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.
 
+## Configuration file
+
+`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, notification targets and apps. `doorstep migrate` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep.
+
+Parsing is strict:
+
+- unknown keys are errors, reported with their line number, so a typo never silently falls back to a default;
+- the file holds exactly one YAML document; a second document after `---` is an error;
+- the file may be at most 1 MiB, the Kubernetes ConfigMap limit;
+- an empty file is a valid configuration with no apps;
+- durations use Go syntax with a unit (`30s`, `10m`, `1h30m`); bare numbers are rejected;
+- keys are `snake_case`.
+
+After parsing, defaults are applied and the whole file is validated. Every problem is reported at once, one per line, each prefixed with its location:
+
+```text
+doorstep: invalid configuration: apps[1] (blog): gitops.path: must be relative to the repository root
+apps[1] (blog): notify[0]: unknown notification "pager"
+```
+
+The smallest useful file has one app with three settings:
+
+```yaml
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+```
+
+This deploys every commit merged to `main` of `example-user/blog` once its checks pass: doorstep resolves `ghcr.io/example-user/blog:<full commit SHA>` to a digest, sets it on the `images` entry named `ghcr.io/example-user/blog` in the kustomization in `apps/blog` on `main` of `example-user/homelab`, and waits until the Argo CD Application `argocd/blog` is synced to that commit and healthy.
+
+### Runtime settings
+
+Each key overrides the built-in default and is itself overridden by the environment variable and flag of the same setting (see [Precedence](#precedence)). Values and validation are the same as for the flag or environment variable.
+
+| Key | Flag | Environment variable |
+| --- | --- | --- |
+| `server.listen_addr` | `--listen-addr` | `DOORSTEP_LISTEN_ADDR` |
+| `server.metrics_listen_addr` | `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` |
+| `server.shutdown_delay` | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` |
+| `server.shutdown_timeout` | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` |
+| `log.level` | `--log-level` | `DOORSTEP_LOG_LEVEL` |
+| `log.format` | `--log-format` | `DOORSTEP_LOG_FORMAT` |
+| `database.url_file` | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` or `DOORSTEP_DATABASE_URL` |
+| `github.app_id` | none | `DOORSTEP_GITHUB_APP_ID` |
+| `github.private_key_file` | none | `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY` |
+| `github.api_url` | none | `DOORSTEP_GITHUB_API_URL` |
+| `registry.credentials_file` | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` |
+
+A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL and the GitHub App private key can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
+
+### `notifications[]`
+
+Named notification targets. Apps refer to them by name in `notify`.
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `name` | yes | Unique name; a DNS label (lowercase letters, digits and `-`, starting and ending with a letter or digit, at most 63 characters). |
+| `type` | yes | `slack` or `webhook`. |
+| `webhook_url_env` / `webhook_url_file` | `slack`: exactly one | Environment variable or absolute file path holding the Slack incoming webhook URL. Slack webhook URLs are credentials, so there is no inline form. |
+| `url` / `url_env` / `url_file` | `webhook`: exactly one | The endpoint doorstep posts to: inline (`http` or `https`, with a host, and without `user:password@`, a query string or a fragment, since those often carry tokens), or from an environment variable or absolute file path when the URL itself carries a token. |
+| `secret_env` / `secret_file` | `webhook`: optional, at most one | Secret used to sign webhook payloads. |
+
+Keys that belong to the other type are rejected. Environment variable names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and file paths must be absolute. See [Secrets](#secrets) for how they are read.
+
+### `apps[]`
+
+One app is one deploy target: one image, one place in a GitOps repository and one Argo CD Application. Model environments as separate apps (`blog-staging`, `blog-prod`).
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `name` | required | Unique name; a DNS label. It appears in URLs, commit status contexts and metric labels. |
+| `source.repo` | required | GitHub repository that builds the image, as `owner/name`. Owners can be organizations or personal accounts, and apps from several owners can share one file. |
+| `source.branch` | `main` | Merges to this branch are deployed. |
+| `source.required_checks` | all checks | Names of the checks that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique. |
+| `image.repository` | required | Fully qualified image repository without tag or digest, such as `ghcr.io/example-user/blog`. The registry host must contain a `.` or a `:port`, or be `localhost`; there is no implicit Docker Hub. The path must be lowercase. Images are expected to be tagged with the full commit SHA. |
+| `gitops.repo` | required | GitHub repository Argo CD syncs from, as `owner/name`. |
+| `gitops.branch` | `main` | Branch doorstep commits pins to, or opens pull requests against. |
+| `gitops.path` | repository root | Directory of the app inside the GitOps repository; relative, without `..`. |
+| `pin` | `kustomize` | How the digest is written; see [Pin strategies](#pin-strategies). |
+| `deploy.mode` | `commit` | `commit` pushes the pin straight to `gitops.branch`; `pull_request` opens a pull request with the pin instead. |
+| `argocd.application` | the app name | Name of the Argo CD `Application` to watch; a DNS subdomain. Several apps may share one Application, for example when it runs several images. |
+| `argocd.namespace` | `argocd` | Namespace of that Application; a DNS label. |
+| `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
+| `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
+| `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
+
+#### Pin strategies
+
+`pin` holds exactly one of `kustomize` or `yaml`. Without a `pin` block the app uses `kustomize` with `image` set to `image.repository`.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `pin.kustomize.image` | `image.repository` | The `name` of the entry in the `images` list of the kustomization in `gitops.path` (`kustomization.yaml`, `kustomization.yml` or `Kustomization`). doorstep sets its `digest`. No tag or digest. |
+| `pin.yaml.file` | required | YAML file relative to `gitops.path`, ending in `.yaml` or `.yml`, without `..`. |
+| `pin.yaml.path` | required | Location of the value to set; see below. |
+| `pin.yaml.format` | `digest` | `digest` writes `sha256:...`, for Helm values with a separate digest field; `reference` writes `repository@sha256:...`, for an `image:` field in a plain manifest. |
+
+`pin.yaml.path` is a list of keys separated by `.`; segments must not be empty or start or end with whitespace, and a segment made only of digits is an index into a sequence. `image.digest` addresses `digest` under `image`, and `spec.template.spec.containers.0.image` addresses the image of the first container. Keys that contain a `.` cannot be addressed.
+
+#### Gates
+
+`gates.before` and `gates.after` are lists of gates. Leaving a list out uses its default; an explicit empty list (`before: []`) runs no gates in that phase. Every gate has a `name`, which defaults to its type and must be unique within the app, so two gates of the same type need explicit names.
+
+| `type` | Phase | Settings | Passes when |
+| --- | --- | --- | --- |
+| `checks` | `before` | `timeout`, default `30m` | The checks in `source.required_checks` (or all checks) succeeded on the commit. |
+| `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. |
+| `soak` | `after` | `duration`, required | The Application stays healthy for `duration`. |
+
+A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` on `soak`, `duration` on `checks` or `health`) are errors, even when zero. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
+
+#### Rules across apps
+
+- App names and notification names are unique.
+- Two apps must not write the same pin: the same GitOps repository (compared case-insensitively), branch and file, and the same kustomize image name or YAML path. They would overwrite each other's digests.
+- A `yaml` pin must not target a `kustomization.yaml` or `kustomization.yml` that a `kustomize` pin of another app writes (same GitOps repository, branch and directory); pin that file with `kustomize` instead.
+- Apps may share a source repository, a GitOps repository and an Argo CD Application.
+
+### Full example
+
+Two owners, both pin strategies, both deploy modes, a soak gate and both notification types:
+
+```yaml
+server:
+  shutdown_delay: 10s
+  metrics_listen_addr: :9090
+log:
+  format: json
+database:
+  url_file: /etc/doorstep/secrets/database-url
+github:
+  app_id: "123456"
+  private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+registry:
+  credentials_file: /etc/doorstep/registry/.dockerconfigjson
+
+notifications:
+  - name: ops
+    type: slack
+    webhook_url_file: /etc/doorstep/secrets/slack-webhook-url
+  - name: ntfy
+    type: webhook
+    url: https://ntfy.example.com/doorstep
+    secret_env: DOORSTEP_NTFY_SECRET
+
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    notify: [ops]
+
+  - name: api-staging
+    source:
+      repo: example-org/api
+      required_checks: [test, lint]
+    image:
+      repository: ghcr.io/example-org/api
+    gitops:
+      repo: example-org/platform
+      path: envs/staging/api
+    pin:
+      kustomize:
+        image: api
+    gates:
+      after:
+        - type: health
+          timeout: 5m
+    notify: [ops, ntfy]
+
+  - name: api-prod
+    source:
+      repo: example-org/api
+      branch: release
+      required_checks: [test, lint, e2e]
+    image:
+      repository: ghcr.io/example-org/api
+    gitops:
+      repo: example-org/platform
+      path: charts/api
+    pin:
+      yaml:
+        file: values-prod.yaml
+        path: image.digest
+        format: digest
+    deploy:
+      mode: pull_request
+    argocd:
+      application: api
+      namespace: argo-cd
+    gates:
+      before:
+        - type: checks
+          timeout: 1h
+      after:
+        - type: health
+        - type: soak
+          duration: 30m
+    notify: [ops, ntfy]
+```
+
+### Kubernetes
+
+Keep the file as a ConfigMap in the GitOps repository, mount it, point `DOORSTEP_CONFIG` at it and mount secrets from a Secret:
+
+```yaml kubernetes
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doorstep
+data:
+  config.yaml: |
+    apps:
+      - name: blog
+        source:
+          repo: example-user/blog
+        image:
+          repository: ghcr.io/example-user/blog
+        gitops:
+          repo: example-user/homelab
+          path: apps/blog
+```
+
+```yaml kubernetes
+# excerpt of the doorstep Deployment's pod spec
+containers:
+  - name: doorstep
+    env:
+      - name: DOORSTEP_CONFIG
+        value: /etc/doorstep/config.yaml
+    volumeMounts:
+      - name: config
+        mountPath: /etc/doorstep/config.yaml
+        subPath: config.yaml
+        readOnly: true
+      - name: secrets
+        mountPath: /etc/doorstep/secrets
+        readOnly: true
+volumes:
+  - name: config
+    configMap:
+      name: doorstep
+  - name: secrets
+    secret:
+      secretName: doorstep
+```
+
+Restart the Deployment after changing the ConfigMap.
+
+## `doorstep config validate`
+
+```sh
+doorstep config validate --config config.yaml
+```
+
+Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags, so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
+
 ## Secrets
 
-Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file. Each one is read from an environment variable or from a `*_file` setting that points at a file, which maps directly to a mounted Kubernetes Secret. Settings for those secrets arrive with the features that need them.
+Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file.
+
+Notification secrets are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
+
+`doorstep serve` checks every referenced notification secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
+
+The database URL, the GitHub App private key and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections.
+
+Settings for the remaining secrets arrive with the features that need them.
