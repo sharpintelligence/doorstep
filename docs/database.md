@@ -1,6 +1,6 @@
 # Database
 
-Postgres holds doorstep's operational state: the deploy queue, locks, deployment history and gate results. Git remains the source of truth for what should run (see [ADR 0001](decisions/0001-go-and-core-design.md), decision 3); nothing in the cluster is ever reconciled from this database.
+Postgres holds doorstep's operational state: the deploy queue, locks, deployment history, gate results and the commits waiting for CI. Git remains the source of truth for what should run (see [ADR 0001](decisions/0001-go-and-core-design.md), decision 3); nothing in the cluster is ever reconciled from this database.
 
 The code lives in `internal/store` (pgx pool, transactions, migrations and repositories) with shared domain types in `internal/core`.
 
@@ -38,7 +38,7 @@ All ids are `bigint GENERATED ALWAYS AS IDENTITY`. Timestamps are `timestamptz`.
 
 - **Denormalised `app_id`.** `queue_entries`, `deployment_events` and `locks` carry the target's `app_id` next to `deployment_id`. `deployments` has `UNIQUE (id, app_id)`, and each of those tables references `deployments (id, app_id)` with a composite foreign key, so the copy can never disagree with the deployment it belongs to. Moving a deployment to another app is rejected while anything references it.
 - **Foreign key indexes.** Every foreign key has an index that leads with its first column (partial, `WHERE col IS NOT NULL`, for the nullable lineage columns and `locks.deployment_id`), so cascades and `SET NULL` actions never scan a whole table. A schema test enforces this for every foreign key, including those added by later migrations.
-- **`updated_at`.** A `BEFORE UPDATE` trigger (`set_updated_at()`) sets `updated_at` to `now()` on every update of `deployments` and `gate_results`. Repository code never sets it. Tables added later that have an `updated_at` column attach the same trigger.
+- **`updated_at`.** A `BEFORE UPDATE` trigger (`set_updated_at()`) sets `updated_at` to `now()` on every update of `deployments`, `gate_results` and `tracked_commits`. Repository code never sets it. Tables added later that have an `updated_at` column attach the same trigger.
 
 ### `apps`
 
@@ -111,6 +111,30 @@ The latest result of each named gate for a deployment: `UNIQUE (deployment_id, n
 ### `deployment_events`
 
 The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transition`, `gate`, `lock`, `note`), optional `from_state` and `to_state`, `actor`, `message`, `data jsonb`, `occurred_at`. Indexed by `(deployment_id, id)` for a deployment's timeline and `(app_id, id DESC)` for a target's recent activity. Append-only is a property of the API (there are no update or delete methods), not of triggers, so retention pruning stays possible. Creating a deployment writes its first `transition` event (to `queued`, without `from_state`) in the same transaction; every later transition records both `from_state` and `to_state`. Lineage written outside a transition is recorded as a `note` event with the message `lineage recorded`.
+
+### `tracked_commits`
+
+Added by migration `00005_tracked_commits.sql`. One row per app and pushed commit that doorstep is watching CI for, written by `internal/intake` (see [architecture.md](architecture.md#merge-and-ci-detection)). Tracking is per app rather than per repository because several apps can share a source repository with different required checks.
+
+| Column | Notes |
+| --- | --- |
+| `app_id` | the target |
+| `repository`, `branch`, `commit_sha` | the app's configured repository and branch, and the pushed commit (40 lowercase hex characters) |
+| `source`, `pushed_by` | how the push was observed (`webhook`, `poll`, `api`, `cli`, `system`) and by whom; copied onto the deployment |
+| `checks_state` | `pending`, `success` or `failure` (`core.ChecksState`); starts `pending` |
+| `checks` | the evidence of the last evaluation: a JSON array of `{name, kind, state, detail}` (`core.Check`) |
+| `deployment_id` | the deployment created for the commit; `UNIQUE`, `ON DELETE SET NULL` |
+| `enqueued_at` | when the deployment was created; set together with `deployment_id` (`tracked_commits_enqueued_check`) and kept if the deployment is later deleted, so the commit never deploys twice |
+| `superseded_by_id` | the tracked commit that became the branch head after this one; `ON DELETE SET NULL` |
+| `created_at`, `updated_at`, `evaluated_at` | `evaluated_at` is the time the saved checks were read from GitHub, not the time they were saved |
+
+`UNIQUE (app_id, commit_sha)` keeps one row per app and commit: tracking a known commit again returns the existing row (`existing`), or reopens it when it was superseded and is the branch head again (`reopened`). `tracked_commits_commit_sha_idx` serves the lookup by SHA that every check run and status event performs (most of them for pull request commits nobody tracks), and the partial index `tracked_commits_open_idx` on `app_id` covers the open commits the poller lists.
+
+A commit is open while both `enqueued_at` and `superseded_by_id` are null. Only open commits are evaluated. The rules that keep this consistent with several replicas:
+
+- **Tracking and supersession.** `TrackCommit(ctx, commit, isHead)` locks the app's `apps` row (`FOR NO KEY UPDATE`) and calls `isHead` while holding it. If the commit is not the branch head it returns `stale` without writing. Otherwise it inserts the commit (`created`), reopens a superseded row (`reopened`) or finds the existing one (`existing`), and sets `superseded_by_id` on every other open commit of the app, all in one transaction. Pushes for one app are serialised and each sees the current head, so the branch head always wins regardless of the order in which pushes are delivered.
+- **Settlement.** `SettleTrackedCommit(ctx, id, evaluation, enqueue)` locks the app row and then the tracked row and does nothing for a closed commit. It saves `checks_state`, `checks` and `evaluated_at` only when `evaluated_at` is null or older than the evaluation's read time, so an older snapshot never overwrites a newer one. When the stored state is then `success`, it calls `enqueue` with a store bound to the same transaction and stores the deployment id and `enqueued_at`. The evaluation, the deployment, its queue entry and the link commit together or not at all, so concurrent settlements create exactly one deployment and never deploy on a stale snapshot. Locking the app row first, in the same order as `TrackCommit`, keeps a push and a settlement from deadlocking; whichever commits first wins, and the other sees the commit closed.
+- **Open commits.** `OpenTrackedCommits(ctx, followed, limit)` lists open commits of the given app, repository (case-insensitive) and branch triples, least recently evaluated first, so rows of apps that are no longer configured never take the poller's slots.
 
 ## Transactions
 

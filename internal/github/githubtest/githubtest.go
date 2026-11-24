@@ -50,11 +50,15 @@ type Server struct {
 	repos         map[string]int64
 	installations map[int64]*installation
 	tokens        map[string]grant
+	commits       map[string]*commitChecks
+	branches      map[string]string
 	tokenTTL      time.Duration
 	now           func() time.Time
 
 	lookupCalls atomic.Int64
 	tokenCalls  atomic.Int64
+	checksCalls atomic.Int64
+	branchCalls atomic.Int64
 }
 
 func NewServer(tb testing.TB) *Server {
@@ -70,11 +74,15 @@ func NewServer(tb testing.TB) *Server {
 		repos:         make(map[string]int64),
 		installations: make(map[int64]*installation),
 		tokens:        make(map[string]grant),
+		commits:       make(map[string]*commitChecks),
+		branches:      make(map[string]string),
 		tokenTTL:      DefaultTokenTTL,
 		now:           time.Now,
 	}
 	s.mux.HandleFunc("GET /repos/{owner}/{repo}/installation", s.handleLookup)
 	s.mux.HandleFunc("POST /app/installations/{id}/access_tokens", s.handleMint)
+	s.registerChecks()
+	s.registerBranches()
 	srv := httptest.NewServer(s)
 	tb.Cleanup(srv.Close)
 	s.URL = srv.URL

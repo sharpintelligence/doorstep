@@ -230,6 +230,12 @@ func TestSchemaMaintainsUpdatedAt(t *testing.T) {
 			read:   "SELECT updated_at > created_at AND updated_at > now() - interval '1 minute' FROM deployments WHERE id = $1",
 		},
 		{
+			name:   "tracked_commits",
+			setup:  "INSERT INTO tracked_commits (app_id, repository, branch, commit_sha, source) SELECT app_id, 'acme/web', 'main', commit_sha, 'webhook' FROM deployments WHERE id = $1",
+			update: "UPDATE tracked_commits SET checks_state = 'success', updated_at = '2000-01-01' WHERE app_id = (SELECT app_id FROM deployments WHERE id = $1)",
+			read:   "SELECT updated_at > created_at AND updated_at > now() - interval '1 minute' FROM tracked_commits WHERE app_id = (SELECT app_id FROM deployments WHERE id = $1)",
+		},
+		{
 			name:   "gate_results",
 			setup:  "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'pending')",
 			update: "UPDATE gate_results SET status = 'passed', updated_at = '2000-01-01' WHERE deployment_id = $1",

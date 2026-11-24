@@ -285,7 +285,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `name` | required | Unique name; a DNS label. It appears in URLs, commit status contexts and metric labels. |
 | `source.repo` | required | GitHub repository that builds the image, as `owner/name`. Owners can be organizations or personal accounts, and apps from several owners can share one file. |
 | `source.branch` | `main` | Merges to this branch are deployed. |
-| `source.required_checks` | all checks | Names of the checks that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique. |
+| `source.required_checks` | all checks | Names of the check runs and commit statuses that must pass on the commit before it deploys. Empty means every check reported on the commit must pass. Entries must be unique. See [Required checks](#required-checks). |
 | `image.repository` | required | Fully qualified image repository without tag or digest, such as `ghcr.io/example-user/blog`. The registry host must contain a `.` or a `:port`, or be `localhost`; there is no implicit Docker Hub. The path must be lowercase. Images are expected to be tagged with the full commit SHA. |
 | `gitops.repo` | required | GitHub repository Argo CD syncs from, as `owner/name`. |
 | `gitops.branch` | `main` | Branch doorstep commits pins to, or opens pull requests against. |
@@ -298,6 +298,23 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
 | `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
+
+#### Required checks
+
+When a commit is pushed to `source.branch`, doorstep tracks it for every app that follows that repository and branch and decides from its CI results whether it may deploy. Each app is evaluated against its own `required_checks`, so `blog-staging` and `blog-prod` can share a repository with different requirements.
+
+- Names match check run names and commit status contexts exactly and case-sensitively.
+- A check run that has not completed is pending. Conclusions `success`, `neutral` and `skipped` pass, as in GitHub branch protection; every other conclusion (`failure`, `cancelled`, `timed_out`, `action_required`, `stale`, or anything unknown) fails.
+- A commit status `success` passes and `pending` is pending; `failure`, `error` and anything unknown fail.
+- When a check is re-run, the newest run of that name counts. When a check run and a commit status share a name, the worse result counts.
+- With `required_checks` listed, only those checks count. Each must be reported and pass; one that has not been reported yet is pending, and any failure fails the commit even while others are pending.
+- With `required_checks` empty, every reported check run and commit status must pass, at least one must be reported, and every check suite that has created check runs must have completed. The last rule covers GitHub Actions jobs that wait on `needs:` and are not created until their dependencies finish. A repository with no CI at all therefore never deploys automatically in this mode. Listing the checks explicitly is recommended: it is faster to evaluate and does not depend on other Apps' check suites.
+- Names are the only thing matched; the reporter is not. Any GitHub App or user that can write check runs or commit statuses on the repository can therefore satisfy a required check by reporting a passing result under its name, for example a `build` status posted before the real `build` job has started. Once the real check reports, the worse result counts, so a failing real check still blocks. Give `statuses: write` and `checks: write` on application repositories only to integrations you trust to gate production, and prefer check names that are unlikely to collide with other integrations.
+- A failed commit is re-evaluated when its checks change and on every poll, so re-running a failed job can still deploy it.
+- Only the commit at the head of `source.branch` deploys. Before recording a push, doorstep asks GitHub where the branch points now and ignores the push if it has moved on, so a late or redelivered webhook for an older push never replaces a newer one. Recording the head supersedes every older commit that has not been queued yet, even if their checks later pass; if the head is red, nothing deploys until a green commit follows (or someone deploys manually). A force-push back to an earlier commit makes it the head again, and it deploys once its checks pass.
+- Commits tracked for an app stop being evaluated when the app is removed or its `source.repo` or `source.branch` changes.
+
+There is no timeout while a commit waits for its checks; the `checks` gate's `timeout` bounds the wait once a deployment is underway.
 
 #### Pin strategies
 

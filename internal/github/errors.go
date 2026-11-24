@@ -22,6 +22,10 @@ var (
 	ErrForeignHost           = errors.New("request host does not match the github api url")
 	ErrMissingSignature      = errors.New("missing webhook signature")
 	ErrInvalidSignature      = errors.New("invalid webhook signature")
+	ErrInvalidCommitSHA      = errors.New("invalid commit SHA")
+	ErrTooManyChecks         = errors.New("too many checks reported for the commit")
+	ErrInvalidBranch         = errors.New("invalid branch name")
+	ErrBranchNotFound        = errors.New("branch not found")
 )
 
 type APIError struct {
