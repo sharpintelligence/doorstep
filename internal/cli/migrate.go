@@ -105,9 +105,15 @@ func migrationStatus(ctx context.Context, stdout io.Writer, cfg config.Config) e
 	}
 	defer st.Close()
 
-	states, err := st.MigrationStatus(ctx)
+	states, ahead, err := st.MigrationStatus(ctx)
 	if err != nil {
 		return err
+	}
+	if ahead != nil {
+		if _, err := fmt.Fprintf(stdout, "database schema version %d is newer than this binary (%d); running in one-release compatibility mode (oldest supported binary schema %d)\n",
+			ahead.DatabaseVersion, ahead.BinaryVersion, ahead.MinBinarySchema); err != nil {
+			return err
+		}
 	}
 	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "VERSION\tSTATE\tAPPLIED AT\tNAME")

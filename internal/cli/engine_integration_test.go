@@ -22,6 +22,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/gitops"
 	"github.com/sharpintelligence/doorstep/internal/registry/registrytest"
 	"github.com/sharpintelligence/doorstep/internal/store"
+	"github.com/sharpintelligence/doorstep/internal/store/storetest"
 )
 
 const (
@@ -181,6 +182,7 @@ type engineServe struct {
 	fixture *engineFixture
 	sink    *recordingSink
 	env     map[string]string
+	args    []string
 	store   *store.Store
 	addr    string
 	stderr  *lockedBuffer
@@ -212,8 +214,20 @@ func startEngineServeEnv(t *testing.T, f *engineFixture, cfg string, extra map[s
 		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
 		"--config", writeConfig(t, f.config(cfg)),
 	}, f.env(env))
+	return launchEngineServe(t, f, sink, args, env)
+}
+
+func (s *engineServe) startReplica(extra map[string]string) *engineServe {
+	s.t.Helper()
+	env := maps.Clone(s.env)
+	maps.Copy(env, extra)
+	return launchEngineServe(s.t, s.fixture, s.sink, s.args, env)
+}
+
+func launchEngineServe(t *testing.T, f *engineFixture, sink *recordingSink, args []string, env map[string]string) *engineServe {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, tokens: map[core.Role]string{}, cancel: cancel, done: make(chan int, 1)}
+	s := &engineServe{t: t, fixture: f, sink: sink, env: env, args: args, stderr: &lockedBuffer{}, tokens: map[core.Role]string{}, cancel: cancel, done: make(chan int, 1)}
 	go func() { s.done <- Run(ctx, args, io.Discard, s.stderr, envFrom(env)) }()
 	s.addr = waitForListening(t, s.stderr, s.done)
 	waitForLog(t, s.stderr, s.done, "engine started")
@@ -470,6 +484,117 @@ func TestEngineShutdownMidSyncKeepsDeployment(t *testing.T) {
 	}
 	if got := s.sink.typesFor(id); slices.Contains(got, "deploy.failed") {
 		t.Errorf("notifications = %v, shutdown must not fail the deployment", got)
+	}
+}
+
+func (s *engineServe) awaitClaimed(id core.DeploymentID) {
+	s.t.Helper()
+	deadline := time.Now().Add(engineWaitLimit)
+	for {
+		entries, err := s.store.QueueEntries(s.t.Context(), "blog")
+		if err != nil {
+			s.t.Fatalf("QueueEntries: %v", err)
+		}
+		if len(entries) == 1 && entries[0].Deployment.ID == id && entries[0].LeaseExpiresAt != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("deployment %d was not claimed again: %+v\n%s", id, entries, s.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertHandedOver(t *testing.T, f *engineFixture, finisher *engineServe, id core.DeploymentID, digest core.Digest, replicas ...*engineServe) {
+	t.Helper()
+	d := finisher.awaitState(id, core.StateSucceeded, core.StateFailed)
+	if d.State != core.StateSucceeded || d.Digest != digest || d.ArgoCDRevision != d.PinCommitSHA {
+		t.Fatalf("deployment = %+v, want succeeded with %s", d, digest)
+	}
+	finisher.sink.await(t, id, []string{"deploy.queued", "deploy.started", "deploy.succeeded"})
+	for _, r := range replicas {
+		r.stop()
+	}
+	if got := finisher.transitions(id); !slices.Equal(got, deploySucceeded) {
+		t.Errorf("transitions = %v, want %v", got, deploySucceeded)
+	}
+	pins := 0
+	for _, c := range f.homelab.Commits("main") {
+		if strings.Contains(c.Message, gitops.TrailerDeployment+": ") {
+			pins++
+		}
+	}
+	if pins != 1 {
+		t.Errorf("GitOps pin commits = %d, want exactly 1", pins)
+	}
+	if got := slices.Sorted(slices.Values(finisher.sink.typesFor(id))); !slices.Equal(got, []string{"deploy.queued", "deploy.started", "deploy.succeeded"}) {
+		t.Errorf("notifications = %v, want each event delivered exactly once", got)
+	}
+	entries, err := finisher.store.QueueEntries(t.Context(), "blog")
+	if err != nil || len(entries) != 0 {
+		t.Errorf("queue = %+v, %v, want empty", entries, err)
+	}
+}
+
+func TestEngineHandsOverMidSyncToANewReplica(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	old := startEngineServe(t, f)
+	id, digest := old.push(strings.Repeat("d", 40))
+	syncing := old.awaitState(id, core.StateSyncing)
+	f.argo.AwaitWatch(t, 1)
+
+	replacement := old.startReplica(nil)
+	old.stop()
+	replacement.awaitClaimed(id)
+	f.argo.Set(syncedTo(syncing.PinCommitSHA))
+
+	assertHandedOver(t, f, replacement, id, digest, replacement)
+	if strings.Contains(old.stderr.String(), "deployment succeeded") {
+		t.Errorf("the stopped replica finished the deployment: %s", old.stderr.String())
+	}
+	if !strings.Contains(replacement.stderr.String(), "deployment succeeded") {
+		t.Errorf("the new replica did not finish the deployment: %s", replacement.stderr.String())
+	}
+}
+
+func TestEngineResumesAfterALostLease(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	single := map[string]string{config.EnvEngineConcurrency: "1"}
+	lost := startEngineServeEnv(t, f, engineConfig, single)
+	id, digest := lost.push(strings.Repeat("d", 40))
+	syncing := lost.awaitState(id, core.StateSyncing)
+	f.argo.AwaitWatch(t, 1)
+	survivor := lost.startReplica(single)
+
+	pool := storetest.Pool(t, lost.env[config.EnvDatabaseURL])
+	var lostOwner string
+	if err := pool.QueryRow(t.Context(), "SELECT lease_owner FROM queue_entries WHERE deployment_id = $1", id).Scan(&lostOwner); err != nil || lostOwner == "" {
+		t.Fatalf("lease owner = %q, %v", lostOwner, err)
+	}
+	if _, err := pool.Exec(t.Context(), "UPDATE queue_entries SET lease_expires_at = now() - interval '1 second', available_at = now() WHERE deployment_id = $1", id); err != nil {
+		t.Fatalf("expire the lease: %v", err)
+	}
+	deadline := time.Now().Add(engineWaitLimit)
+	for {
+		var owner *string
+		if err := pool.QueryRow(t.Context(), "SELECT lease_owner FROM queue_entries WHERE deployment_id = $1 AND lease_expires_at > now()", id).Scan(&owner); err == nil && owner != nil && *owner != lostOwner {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the surviving replica did not claim deployment %d\n%s", id, survivor.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	waitForLog(t, lost.stderr, lost.done, "queue lease lost; handler cancelled")
+	f.argo.Set(syncedTo(syncing.PinCommitSHA))
+
+	assertHandedOver(t, f, survivor, id, digest, lost, survivor)
+	if strings.Contains(lost.stderr.String(), "deployment succeeded") {
+		t.Errorf("the replica that lost its lease finished the deployment: %s", lost.stderr.String())
 	}
 }
 

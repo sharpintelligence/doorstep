@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -149,22 +150,62 @@ func assertBindingSubjectsNamespaced(t *testing.T, documents []document, namespa
 func TestRenderedExamples(t *testing.T) {
 	t.Parallel()
 
+	common := map[string]string{
+		"DOORSTEP_CONFIG":            "/etc/doorstep/config/config.yaml",
+		"DOORSTEP_DATABASE_URL_FILE": "/etc/doorstep/secrets/database-url",
+	}
+	examples := map[string]map[string]string{
+		"examples/homelab": {
+			"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "/etc/doorstep/registry/.dockerconfigjson",
+			"DOORSTEP_KUBE_POD_DIAGNOSTICS":      "true",
+		},
+		"examples/self-hosted": {
+			"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "",
+			"DOORSTEP_KUBE_POD_DIAGNOSTICS":      "",
+		},
+	}
 	overlays, err := filepath.Glob("examples/*")
 	if err != nil || len(overlays) == 0 {
 		t.Fatalf("no example overlays found: %v", err)
+	}
+	if want := slices.Sorted(maps.Keys(examples)); !slices.Equal(overlays, want) {
+		t.Fatalf("example overlays = %v, want %v", overlays, want)
 	}
 	for _, overlay := range overlays {
 		t.Run(overlay, func(t *testing.T) {
 			t.Parallel()
 			documents := render(t, overlay)
-			assertRenderedPod(t, documents, map[string]string{
-				"DOORSTEP_CONFIG":                    "/etc/doorstep/config/config.yaml",
-				"DOORSTEP_DATABASE_URL_FILE":         "/etc/doorstep/secrets/database-url",
-				"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "/etc/doorstep/registry/.dockerconfigjson",
-				"DOORSTEP_KUBE_POD_DIAGNOSTICS":      "true",
-			})
+			wantEnv := maps.Clone(common)
+			maps.Copy(wantEnv, examples[overlay])
+			assertRenderedPod(t, documents, wantEnv)
 			assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader")
+			assertRollingUpdateOnReadiness(t, documents)
 		})
+	}
+}
+
+func assertRollingUpdateOnReadiness(t *testing.T, documents []document) {
+	t.Helper()
+	deployments := renderedOfKind(documents, "Deployment")
+	if len(deployments) != 1 {
+		t.Fatalf("got %d deployments, want 1", len(deployments))
+	}
+	deployment := deployments[0]
+	container := []any{"spec", "template", "spec", "containers", 0}
+	checks := []struct {
+		path []any
+		want any
+	}{
+		{[]any{"spec", "strategy", "type"}, "RollingUpdate"},
+		{[]any{"spec", "strategy", "rollingUpdate", "maxUnavailable"}, 0},
+		{[]any{"spec", "strategy", "rollingUpdate", "maxSurge"}, 1},
+		{append(slices.Clone(container), "readinessProbe", "httpGet", "path"), "/readyz"},
+		{append(slices.Clone(container), "readinessProbe", "httpGet", "port"), "http"},
+	}
+	for _, c := range checks {
+		if got := deployment.lookup(t, c.path...); got != c.want {
+			t.Errorf("%v = %v, want %v: a self-deploy must keep the old version until the new one is ready", c.path, got, c.want)
+		}
 	}
 }
 

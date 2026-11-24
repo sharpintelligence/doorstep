@@ -45,9 +45,12 @@ func TestOpenReturnsMigratedStore(t *testing.T) {
 	t.Parallel()
 
 	st := storetest.Open(t)
-	status, err := st.MigrationStatus(t.Context())
+	status, ahead, err := st.MigrationStatus(t.Context())
 	if err != nil {
 		t.Fatalf("MigrationStatus: %v", err)
+	}
+	if ahead != nil {
+		t.Errorf("MigrationStatus reports a newer database: %+v", ahead)
 	}
 	for _, m := range status {
 		if !m.Applied {
@@ -96,5 +99,19 @@ func exec(t *testing.T, databaseURL, sql string) {
 	t.Helper()
 	if _, err := connect(t, databaseURL).Exec(t.Context(), sql); err != nil {
 		t.Fatalf("exec %q: %v", sql, err)
+	}
+}
+
+func TestPoolUsesTheSchemaOfTheURL(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := storetest.DatabaseURL(t)
+	pool := storetest.Pool(t, databaseURL)
+	var current string
+	if err := pool.QueryRow(t.Context(), "SELECT current_schema()").Scan(&current); err != nil {
+		t.Fatalf("query current_schema: %v", err)
+	}
+	if want := searchPath(t, databaseURL); current != want {
+		t.Errorf("current_schema() = %q, want %q", current, want)
 	}
 }

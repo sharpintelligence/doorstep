@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -62,6 +63,16 @@ func Open(tb testing.TB) *store.Store {
 		tb.Fatalf("migrate: %v", err)
 	}
 	return st
+}
+
+func Pool(tb testing.TB, databaseURL string) *pgxpool.Pool {
+	tb.Helper()
+	pool, err := pgxpool.New(tb.Context(), databaseURL)
+	if err != nil {
+		tb.Fatalf("open pool: %v", err)
+	}
+	tb.Cleanup(pool.Close)
+	return pool
 }
 
 func createSchema(tb testing.TB, databaseURL, schema string) {

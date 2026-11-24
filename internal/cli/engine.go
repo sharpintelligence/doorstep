@@ -253,6 +253,7 @@ func (r digestResolver) Resolve(ctx context.Context, ref core.ImageRef) (core.Di
 type gitopsWriter interface {
 	Pin(ctx context.Context, req gitops.Request) (gitops.Result, error)
 	Abandon(ctx context.Context, req gitops.Request) error
+	Current(ctx context.Context, t gitops.Target) (gitops.Pinned, error)
 }
 
 type pinWriter struct {
@@ -278,6 +279,18 @@ func (p pinWriter) Abandon(ctx context.Context, req engine.PinRequest) error {
 		return err
 	}
 	return classifyPinError(p.writer.Abandon(ctx, r))
+}
+
+func (p pinWriter) Current(ctx context.Context, d core.Deployment) (core.Digest, error) {
+	target, ok := p.targets[d.Target]
+	if !ok {
+		return "", fmt.Errorf("%w: no GitOps target is configured for %s", engine.ErrPermanent, d.Target)
+	}
+	pinned, err := p.writer.Current(ctx, target)
+	if err != nil {
+		return "", classifyPinError(err)
+	}
+	return pinned.Digest, nil
 }
 
 func (p pinWriter) request(req engine.PinRequest) (gitops.Request, error) {

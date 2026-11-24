@@ -436,6 +436,10 @@ Setup, permissions and the least-privilege model are described in [github-app.md
 
 Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linux/amd64` and `linux/arm64` distroless image, pushes it to GHCR by digest, attaches SLSA build provenance and an SPDX SBOM as GitHub attestations, signs the image index keylessly with cosign, and publishes a GitHub Release with git-cliff notes. Images are tagged with the version and the full commit SHA, never `latest`. See [releasing.md](releasing.md).
 
+## Self-hosting
+
+doorstep can deploy its own upgrades as an ordinary app. The self-hosted app follows a `release` branch that maintainers fast-forward only to tagged release commits, so the `:<commit SHA>` image tag of each release is the image doorstep resolves ([ADR 0022](decisions/0022-self-hosting-through-a-release-branch.md)). The base's rolling update keeps the old pod until the new one is ready, the new replica resumes the deployment from Postgres when the old one releases its claim or its lease expires, and migrations stay compatible for one release, enforced by a compatibility floor in the database and a migration lint ([ADR 0023](decisions/0023-one-release-schema-compatibility.md)). Reverting the pin commit in the GitOps repository restores the previous version without doorstep. See [self-hosting.md](self-hosting.md).
+
 ## Security posture
 
 - GitHub access is through one GitHub App installed on each owner with *Only select repositories*: one-hour installation tokens, held in memory only, refreshed five minutes before expiry, and only ever sent to the configured API host (requests and redirects to any other host are refused). GitHub applies the App's permissions to every selected repository, so the repository selection is what limits reach. Commits are attributed to and verified as the App.
@@ -499,7 +503,7 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 ## Testing strategy
 
 - Standard library `testing` only (no testify), table-driven with `t.Run` and `t.Parallel`, `httptest` for HTTP.
-- Engine logic is tested against hand-written fakes of every port; no Postgres, GitHub or Kubernetes needed. An integration test runs `serve` end to end against Postgres and the GitHub, registry and Argo CD fakes.
+- Engine logic is tested against hand-written fakes of every port; no Postgres, GitHub or Kubernetes needed. Integration tests run `serve` end to end against Postgres and the GitHub, registry and Argo CD fakes, including two replicas handing a deployment over mid-sync.
 - Tests always run with the race detector and shuffled order (`just test`).
 - Postgres integration tests read `DOORSTEP_TEST_DATABASE_URL` and call `t.Skip` when it is unset. Each test gets an isolated schema through `internal/store/storetest`.
 - CI runs a `postgres:18-alpine` service (pinned by digest), exports `DOORSTEP_TEST_DATABASE_URL` and sets `DOORSTEP_TEST_REQUIRE_DATABASE=true`, so integration tests run on every pull request and a missing database fails the build instead of skipping.
@@ -507,4 +511,4 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 - The queue runner, the intake poller and the webhook delivery sweeper are tested with fakes inside `testing/synctest` bubbles, so wake-ups, polling, heartbeats and backoff run on a fake clock.
 - The Argo CD watcher is tested against `argocdtest`, a real HTTP fake of the Kubernetes API, so the wire format, field selectors, watch reconnects and timeouts are exercised; the assessment itself is a pure function with table tests. `internal/kube` is tested against TLS test servers with generated CAs and client certificates.
 
-See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [authentication.md](authentication.md) for sign-in, tokens and the audit log, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [engine.md](engine.md) for the deployment engine, [gates.md](gates.md) for gate evaluation, [argocd.md](argocd.md) for waiting on Argo CD, [api.md](api.md) for the HTTP API, [ui.md](ui.md) for the web UI, [rollback.md](rollback.md) for rollbacks and blocks and [metrics.md](metrics.md) for the exported metrics.
+See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [authentication.md](authentication.md) for sign-in, tokens and the audit log, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [engine.md](engine.md) for the deployment engine, [gates.md](gates.md) for gate evaluation, [argocd.md](argocd.md) for waiting on Argo CD, [api.md](api.md) for the HTTP API, [ui.md](ui.md) for the web UI, [rollback.md](rollback.md) for rollbacks and blocks, [metrics.md](metrics.md) for the exported metrics and [self-hosting.md](self-hosting.md) for doorstep deploying itself.

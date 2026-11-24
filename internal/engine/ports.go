@@ -65,6 +65,7 @@ type DigestResolver interface {
 type PinWriter interface {
 	Pin(ctx context.Context, req PinRequest) (PinResult, error)
 	Abandon(ctx context.Context, req PinRequest) error
+	Current(ctx context.Context, d core.Deployment) (core.Digest, error)
 }
 
 type SyncWatcher interface {

@@ -10,6 +10,7 @@ doorstep ships a [kustomize](https://kustomize.io) base under `deploy/kustomize`
 | `deploy/kustomize/components/pod-diagnostics` | Optional component that lets doorstep list pods to tell flaky nodes from bad versions before [retrying](#pod-diagnostics) |
 | `deploy/kustomize/components/pod-diagnostics-cluster-wide` | Optional component that grants the pod read in every namespace instead of the namespaces you bind |
 | `deploy/kustomize/examples/homelab` | A complete example overlay with a namespace, an example configuration file, registry credentials and pod diagnostics |
+| `deploy/kustomize/examples/self-hosted` | An example overlay whose configuration lets doorstep deploy its own upgrades ([self-hosting.md](self-hosting.md)) |
 
 ## Prerequisites
 
@@ -102,7 +103,7 @@ images:
 
 Find the digest in the GitHub Release notes, or with `crane digest ghcr.io/sharpintelligence/doorstep:vX.Y.Z`. Verify the signature before deploying; the exact `cosign verify` and `gh attestation verify` commands are in [releasing.md](releasing.md#verifying-an-image).
 
-The `images` entry is the shape doorstep's own kustomize pin strategy writes, so doorstep can deploy itself from the GitOps repository that holds this overlay.
+The `images` entry is the shape doorstep's own kustomize pin strategy writes, so doorstep can deploy itself from the GitOps repository that holds this overlay; see [self-hosting.md](self-hosting.md).
 
 ## Configuration
 
@@ -342,7 +343,7 @@ The base runs one replica, which is the right default for a homelab. More replic
 
 ## Upgrades
 
-Bump the `?ref=` of the base and component and the image digest together, then apply. Migrations run on start and are forward-only, so a rollout of a newer version cannot be undone by deploying the older image against the migrated database.
+Bump the `?ref=` of the base and component and the image digest together, then apply, or let doorstep deploy its own upgrades ([self-hosting.md](self-hosting.md)). Migrations run on start and are forward-only, but they stay compatible for one release: the previous image starts against the migrated database in compatibility mode, so the rolling update keeps the old pod working and reverting the digest to the previous release works. Going back further, or across a release that raised the compatibility floor, needs a database backup ([database.md](database.md#compatibility-across-one-release)).
 
 ## Validating changes
 

@@ -1429,6 +1429,70 @@ func TestRunMigrateThenServe(t *testing.T) {
 	t.Errorf("serve never logged database ready: %s", logs.String())
 }
 
+func TestRunAgainstNewerDatabaseInCompatibilityMode(t *testing.T) {
+	t.Parallel()
+
+	args, env := withDatabase(t, databaseURLEnv, nil, nil)
+	run := func(want int, cmd ...string) (string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := Run(t.Context(), append(slices.Clone(cmd), args...), &stdout, &stderr, envFrom(env)); code != want {
+			t.Fatalf("%v: exit code = %d, want %d, stderr %q", cmd, code, want, stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+	run(0, "migrate")
+	pool := storetest.Pool(t, env[config.EnvDatabaseURL])
+	if _, err := pool.Exec(t.Context(), "INSERT INTO goose_db_version (version_id, is_applied) VALUES (99999, true)"); err != nil {
+		t.Fatalf("record a newer migration: %v", err)
+	}
+
+	const warning = "database schema is newer than this binary; running in one-release compatibility mode"
+	stdout, stderr := run(0, "migrate")
+	assertLines(t, stdout, `^no pending migrations$`)
+	if entry := findMessage(parseLogs(t, stderr), warning); entry == nil || entry["level"] != "WARN" || entry["database_version"] != float64(99999) || entry["min_binary_schema"] != float64(12) {
+		t.Errorf("migrate logged %v, want the compatibility warning", entry)
+	}
+
+	status := []string{
+		`^database schema version 99999 is newer than this binary \(\d+\); running in one-release compatibility mode \(oldest supported binary schema 12\)$`,
+		`^VERSION\s+STATE\s+APPLIED AT\s+NAME$`,
+	}
+	for _, v := range migrationVersionsOf(t) {
+		status = append(status, fmt.Sprintf(`^%d\s+applied\s+\S+\s+%s$`, v.version, regexp.QuoteMeta(v.name)))
+	}
+	stdout, _ = run(0, "migrate", "status")
+	assertLines(t, stdout, status...)
+
+	var logs lockedBuffer
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() {
+		serve := append([]string{"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"}, args...)
+		done <- Run(ctx, serve, io.Discard, &logs, envFrom(env))
+	}()
+	addr := waitForListening(t, &logs, done)
+	if code, body := get(t, "http://"+addr+"/readyz"); code != http.StatusOK {
+		t.Errorf("GET /readyz in compatibility mode = %d %q", code, body)
+	}
+	if findMessage(parseLogs(t, logs.String()), warning) == nil {
+		t.Errorf("serve did not log the compatibility warning: %s", logs.String())
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("serve exit code = %d, stderr %q", code, logs.String())
+	}
+
+	if _, err := pool.Exec(t.Context(), "UPDATE schema_compatibility SET min_binary_schema = 99999"); err != nil {
+		t.Fatalf("raise the floor: %v", err)
+	}
+	_, stderr = run(1, "migrate")
+	if !strings.Contains(stderr, "database schema is newer than this doorstep binary") || !strings.Contains(stderr, "requires binaries that know migration 99999 or newer") {
+		t.Errorf("migrate stderr = %q, want the floor refusal", stderr)
+	}
+}
+
 type databaseSource int
 
 const (

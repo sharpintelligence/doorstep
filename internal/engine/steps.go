@@ -329,7 +329,29 @@ func (e *Engine) verify(ctx context.Context, d core.Deployment) (core.Deployment
 	if d.Kind == core.KindRollback {
 		return e.confirmRollbackPin(ctx, d)
 	}
-	return e.succeed(ctx, d)
+	return e.confirmStillPinned(ctx, d)
+}
+
+func (e *Engine) confirmStillPinned(ctx context.Context, d core.Deployment) (core.Deployment, Result, error) {
+	current, err := e.pins.Current(ctx, d)
+	switch {
+	case err == nil:
+	case ctx.Err() == nil && errors.Is(err, ErrPermanent):
+		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "read the current pin: " + err.Error()})
+	default:
+		return e.retryUntilDeadline(ctx, d, e.verifyTimeout, err, "read the current pin")
+	}
+	if current == d.Digest {
+		return e.succeed(ctx, d)
+	}
+	pinned := string(current)
+	if pinned == "" {
+		pinned = "no digest"
+	}
+	return e.fail(ctx, d, Failure{
+		Class:  core.FailureUnknown,
+		Reason: fmt.Sprintf("the GitOps repository no longer pins %s (it pins %s); the pin was reverted or replaced outside doorstep, so the release is not recorded as succeeded", d.Digest, pinned),
+	})
 }
 
 func (e *Engine) confirmRollbackPin(ctx context.Context, d core.Deployment) (core.Deployment, Result, error) {

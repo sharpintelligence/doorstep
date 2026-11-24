@@ -206,6 +206,65 @@ func TestHandleOutcomes(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:  "pin reverted outside doorstep",
+			start: core.StateVerifying,
+			setup: func(h *harness) {
+				h.pins.current = func(core.Deployment) (core.Digest, error) { return digestOld, nil }
+			},
+			wantStates: []core.State{core.StateFailed},
+			wantStage:  core.StateVerifying,
+			wantClass:  core.FailureUnknown,
+			wantReason: []string{"no longer pins " + string(digestNew), "it pins " + string(digestOld), "reverted or replaced outside doorstep"},
+			wantNotes:  []core.NotificationKind{core.NotificationDeployFailed},
+		},
+		{
+			name:  "pin replaced by a value that is not a digest",
+			start: core.StateVerifying,
+			setup: func(h *harness) {
+				h.pins.current = func(core.Deployment) (core.Digest, error) { return "", nil }
+			},
+			wantStates: []core.State{core.StateFailed},
+			wantStage:  core.StateVerifying,
+			wantClass:  core.FailureUnknown,
+			wantReason: []string{"it pins no digest"},
+			wantNotes:  []core.NotificationKind{core.NotificationDeployFailed},
+		},
+		{
+			name:  "current pin unreadable",
+			start: core.StateVerifying,
+			setup: func(h *harness) {
+				h.pins.current = func(core.Deployment) (core.Digest, error) { return "", transient }
+			},
+			wantErr: true,
+		},
+		{
+			name:  "current pin gone",
+			start: core.StateVerifying,
+			setup: func(h *harness) {
+				h.pins.current = func(core.Deployment) (core.Digest, error) {
+					return "", fmt.Errorf("no kustomization.yaml: %w", engine.ErrPermanent)
+				}
+			},
+			wantStates: []core.State{core.StateFailed},
+			wantStage:  core.StateVerifying,
+			wantClass:  core.FailureConfiguration,
+			wantReason: []string{"read the current pin", "no kustomization.yaml"},
+			wantNotes:  []core.NotificationKind{core.NotificationDeployFailed},
+		},
+		{
+			name:  "current pin unreadable past the deadline",
+			start: core.StateVerifying,
+			setup: func(h *harness) {
+				h.pins.current = func(core.Deployment) (core.Digest, error) { return "", transient }
+				h.clock.Advance(engine.DefaultVerifyTimeout)
+			},
+			wantStates: []core.State{core.StateFailed},
+			wantStage:  core.StateVerifying,
+			wantClass:  core.FailureTransient,
+			wantReason: []string{"read the current pin: gave up after 1h0m0s", "connection reset"},
+			wantNotes:  []core.NotificationKind{core.NotificationDeployFailed},
+		},
+		{
 			name:  "image not ready",
 			start: core.StateResolving,
 			setup: func(h *harness) {
@@ -888,6 +947,25 @@ func TestHandleResumesFromEveryState(t *testing.T) {
 			}
 			if got := len(h.metrics.startedApps()); got != wantStarted {
 				t.Errorf("started metrics = %d, want %d", got, wantStarted)
+			}
+			resolves, pins, waits := 0, 0, 0
+			if i <= 1 {
+				resolves = 1
+			}
+			if i <= 2 {
+				pins = 1
+			}
+			if i <= 3 {
+				waits = 1
+			}
+			if got := h.resolver.calls(); got != resolves {
+				t.Errorf("resolves = %d, want %d: a resumed deployment must not resolve again", got, resolves)
+			}
+			if got := len(h.pins.pinRequests()); got != pins {
+				t.Errorf("pins = %d, want %d: a resumed deployment must not pin again", got, pins)
+			}
+			if got := h.sync.waitCalls(); len(got) != waits || (waits == 1 && got[0].revision != pinSHA) {
+				t.Errorf("sync waits = %+v, want %d for %s", got, waits, pinSHA)
 			}
 		})
 	}

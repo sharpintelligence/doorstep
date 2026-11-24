@@ -214,7 +214,7 @@ func TestTransactionStoreRejectsPoolOperations(t *testing.T) {
 		if _, err := tx.Migrate(t.Context(), nil); err == nil {
 			t.Error("Migrate inside a transaction succeeded")
 		}
-		if _, err := tx.MigrationStatus(t.Context()); err == nil {
+		if _, _, err := tx.MigrationStatus(t.Context()); err == nil {
 			t.Error("MigrationStatus inside a transaction succeeded")
 		}
 		tx.Close()

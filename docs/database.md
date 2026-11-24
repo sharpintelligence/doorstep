@@ -16,12 +16,12 @@ The connection is configured with `DOORSTEP_DATABASE_URL`, `DOORSTEP_DATABASE_UR
 
 Migrations are plain SQL files embedded in the binary (`internal/store/migrations`) and applied with [goose](https://github.com/pressly/goose) through its `Provider` API. goose records applied versions in a `goose_db_version` table in the same schema.
 
-- **Forward-only.** Files contain only a `-- +goose Up` section. To undo a change, write a new migration. Downgrading doorstep across a schema change is not supported.
+- **Forward-only.** Files contain only a `-- +goose Up` section. To undo a change, write a new migration. The schema is never migrated down; instead the previous release can run against the newer schema (see [Compatibility across one release](#compatibility-across-one-release)).
 - **Numbering.** Files are named `NNNNN_description.sql` with a zero-padded, strictly increasing version (`00001_initial_schema.sql`, `00002_...`). Out-of-order versions are rejected.
 - **Transactions.** Each file runs in its own transaction, so a failed migration leaves the schema at the previous version.
 - **When they run.** `doorstep serve` applies pending migrations after connecting and before it opens its listener, so an instance is never ready on an old schema. `doorstep migrate` applies them on demand (for example as a Kubernetes Job before a rollout) and `doorstep migrate status` lists applied and pending versions.
 - **Concurrent starts.** Migration runs hold a Postgres session advisory lock, so several replicas starting together apply each migration exactly once; the others wait (retrying every second, for up to two minutes) and then find nothing pending. The lock ID is derived from the schema being migrated (`store.MigrationLockID`, FNV-1a of `doorstep-migrations:` and `current_schema()`), matching the scope of `goose_db_version`: installations in different schemas of one database never wait for each other, and neither do parallel tests.
-- **Newer schema.** Before applying anything, `doorstep serve` and `doorstep migrate` compare the database version with the newest migration the binary embeds. If the database is newer (an older binary after a downgrade), they fail with `database schema is newer than this doorstep binary` without touching the schema, instead of running against a schema they do not understand. `doorstep migrate status` reports the same error.
+- **Newer schema.** Before applying anything, `doorstep serve` and `doorstep migrate` compare the database version with the newest migration the binary embeds. If the database is newer (the previous release during a rolling update, or after a downgrade), they read the compatibility floor `min_binary_schema` from [`schema_compatibility`](#schema_compatibility). When the binary's newest migration is at least the floor, they start in one-release compatibility mode: nothing is applied, and a warning `database schema is newer than this binary; running in one-release compatibility mode` is logged with `database_version`, `binary_version` and `min_binary_schema`. `doorstep migrate status` prints the same fact as a note above its table. Otherwise, or when the table or its row is missing, they fail with `database schema is newer than this doorstep binary` without touching the schema, naming the floor, instead of running against a schema they do not understand. Binaries older than migration `00012` have no compatibility mode and always fail against a newer schema.
 
 ### Adding a migration
 
@@ -31,6 +31,44 @@ Each feature that needs storage adds its own numbered file in `internal/store/mi
 - Use `text` columns with a named `CHECK` constraint for enumerations, and add the value to the matching `core` constant list in the same change. The schema tests insert every `core` value, so Go and SQL cannot drift.
 - Name constraints and indexes explicitly (`<table>_<column>_check`, `<table>_<columns>_idx`) so errors and later migrations can refer to them.
 - Prefer operations that do not rewrite or long-lock large tables (`CREATE INDEX CONCURRENTLY` needs its own non-transactional migration with `-- +goose NO TRANSACTION`).
+- Keep the previous release working on the new schema ([Compatibility across one release](#compatibility-across-one-release)).
+
+### Compatibility across one release
+
+doorstep upgrades itself with a rolling update, and the way back from a bad release is reverting its pin commit ([self-hosting.md](self-hosting.md)). In both cases the previous release runs against a database the new release already migrated. Migrations therefore follow expand/contract:
+
+- **Expand.** Release N adds tables, nullable columns, columns with defaults, indexes and enumeration values, and writes both the old and the new shape where readers of the old one still exist. Release N-1 must keep working against everything N adds.
+- **Contract.** Only release N+1 may remove or narrow what release N no longer reads or writes: drop a table or column, rename, change a type, make a column `NOT NULL`, remove an enumeration value.
+
+A contract migration is named `NNNNN_contract_<description>.sql` and raises the compatibility floor in the same file, to the newest migration version of the previous release tag:
+
+```sql
+UPDATE schema_compatibility SET min_binary_schema = 14;
+```
+
+Find that version with `git ls-tree --name-only <previous tag> internal/store/migrations/ | tail -1`. The previous release can still start; anything older now refuses to, which is the point. The supported downgrade is exactly one release; the floor is a guard set by hand, not an exact release counter. It is only a lower bound: between contract steps, a binary several expand-only releases behind still starts in compatibility mode. That is not refused, but it is not supported or tested either.
+
+`TestEmbeddedMigrationsFollowCompatibilityPolicy` in `internal/store` enforces the mechanical part without a database, for every migration after `00011` (the earlier ones predate the policy and are grandfathered): a file whose `Up` section contains any of the following must be a contract file; a contract file must update the floor; and a floor must be at least `12`, at least the floor set by earlier files, and below the file's own version. Comments and string literals are ignored.
+
+| Flagged | Examples |
+| --- | --- |
+| any `DROP` of an object | `DROP TABLE`, `DROP COLUMN` (with or without the `COLUMN` keyword), `DROP TYPE`, `DROP VIEW`, `DROP MATERIALIZED VIEW`, `DROP FUNCTION`, `DROP PROCEDURE`, `DROP SCHEMA`, `DROP SEQUENCE`, `DROP INDEX`, `DROP TRIGGER`, `DROP DOMAIN`, `DROP EXTENSION`, `DROP POLICY` |
+| dropping column properties | `ALTER ... DROP DEFAULT`, `ALTER ... DROP IDENTITY` |
+| `DROP CONSTRAINT` | unless the same file adds a `CHECK` constraint with the same name |
+| renames and type changes | `RENAME`, `ALTER COLUMN ... TYPE`, `ALTER ... SET DATA TYPE` |
+| new restrictions on existing rows and writes | `SET NOT NULL`, `ADD COLUMN ... NOT NULL` without `DEFAULT` or `GENERATED`, `ADD [CONSTRAINT name] UNIQUE`, `PRIMARY KEY`, `FOREIGN KEY` or `EXCLUDE` |
+| deleting data | `TRUNCATE` |
+
+Not flagged: `DROP NOT NULL` and `DROP EXPRESSION`, which widen; constraints declared inside `CREATE TABLE`, which only affect the new table; and replacing a `CHECK` constraint under the same name, because that is how enumeration values are added. The test cannot tell whether such a replacement adds or removes values, so narrowing an enumeration is caught only by review, like the rest of the checklist below.
+
+Review every migration for what a pattern cannot see:
+
+- **Enumeration `CHECK` constraints.** Adding a value is an expand step, but the previous release must not crash when it reads a row with the new value (for example an unknown state in a `switch` or a strict decoder). Removing a value is a contract step; put it in a contract file even though the test does not require it.
+- **Values old readers cannot parse.** New JSON shapes in `jsonb` columns, new formats in text columns and new meanings for existing values must be readable by the previous release, or written only once nothing older runs.
+- **Indexes behind `ON CONFLICT`.** Dropping or changing a unique index or constraint that an `INSERT ... ON CONFLICT` of the previous release names breaks it. The test flags `DROP INDEX` and `DROP CONSTRAINT`, but not `CREATE UNIQUE INDEX` on an existing table, which can make the previous release's writes fail.
+- **`NOT NULL` and defaults.** A new required column needs a default the previous release's inserts can rely on; a default that differs from what the previous release writes changes its behaviour.
+- **Backfills.** Large `UPDATE`s run inside the migration's transaction and hold locks while the old pod keeps serving; batch them or move them to a later release.
+- **The trailer.** The pull request's squash-merge commit message carries `Doorstep-Migration: true`, so the self-hosted install flags the release ([self-hosting.md](self-hosting.md#configuration)). The repository squash-merges with the pull request's commit messages, so a `Doorstep-Migration: true` line in any of its commits is enough; the `migration-trailer` CI job fails a pull request that changes `internal/store/migrations` without one.
 
 ## Schema
 
@@ -232,6 +270,10 @@ GitHub `push` deliveries that doorstep has claimed, so a redelivery is answered 
 ### `intake_poll_state`
 
 A single row (`id boolean PRIMARY KEY DEFAULT true CHECK (id)`, inserted by the migration) whose `next_poll_at` (initially `-infinity`) is when the next intake poll cycle may start. `ClaimPoll(ctx, lease)` runs `UPDATE ... SET next_poll_at = now() + lease WHERE next_poll_at <= now() RETURNING next_poll_at`, and only the replica that gets the row runs the cycle, so replicas poll GitHub once per interval between them without holding a lock across GitHub calls. When the cycle ends, `FinishPoll(ctx, leasedUntil, every)` sets `next_poll_at = now() + every`, but only while the row still holds that replica's lease, so the interval is measured from the end of a cycle and a cycle that outlived its lease cannot reschedule another replica's. A replica that dies mid-cycle delays the next cycle until its lease expires.
+
+### `schema_compatibility`
+
+A single row (`singleton boolean PRIMARY KEY DEFAULT true`, `schema_compatibility_singleton_check CHECK (singleton)`) holding `min_binary_schema`, the compatibility floor: the oldest newest-migration a binary may embed and still start against this database in compatibility mode (`schema_compatibility_min_binary_schema_check`, positive). Migration `00012` creates it with `12`; contract migrations raise it ([Compatibility across one release](#compatibility-across-one-release)). It is read only when the database is ahead of the binary.
 
 ## Transactions
 

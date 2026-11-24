@@ -27,6 +27,8 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0019](0019-manual-deploys-and-cancellation.md) | Manual deploys and cancellation | Accepted | 2026-11-24 |
 | [0020](0020-automatic-rollback.md) | Automatic rollback | Accepted | 2026-11-24 |
 | [0021](0021-mvp-acceptance-evidence.md) | MVP acceptance evidence | Accepted | 2026-11-24 |
+| [0022](0022-self-hosting-through-a-release-branch.md) | Self-hosting through a release branch | Accepted | 2026-11-24 |
+| [0023](0023-one-release-schema-compatibility.md) | One-release schema compatibility | Accepted | 2026-11-24 |
 
 ## When to write one
 

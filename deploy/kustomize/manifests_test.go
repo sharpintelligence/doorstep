@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -262,7 +263,9 @@ func TestDeploymentIsRestricted(t *testing.T) {
 		want any
 	}{
 		{"replicas", []any{"spec", "replicas"}, 1},
+		{"strategy", []any{"spec", "strategy", "type"}, "RollingUpdate"},
 		{"max unavailable", []any{"spec", "strategy", "rollingUpdate", "maxUnavailable"}, 0},
+		{"max surge", []any{"spec", "strategy", "rollingUpdate", "maxSurge"}, 1},
 		{"run as non root", with(podSpec, "securityContext", "runAsNonRoot"), true},
 		{"run as user", with(podSpec, "securityContext", "runAsUser"), 65532},
 		{"run as group", with(podSpec, "securityContext", "runAsGroup"), 65532},
@@ -564,5 +567,61 @@ func TestExampleSecretPathsAreMounted(t *testing.T) {
 				t.Error("example references no secret files")
 			}
 		})
+	}
+}
+
+func TestSelfHostedExampleManagesItsOwnImage(t *testing.T) {
+	t.Parallel()
+
+	const dir = "examples/self-hosted"
+	file := loadConfig(t, dir+"/config.yaml")
+	var self *config.App
+	for i, app := range file.Catalog().Apps {
+		if app.Image.Repository == doorstepImage {
+			self = &file.Catalog().Apps[i]
+		}
+	}
+	if self == nil {
+		t.Fatalf("no app in %s deploys %s", dir, doorstepImage)
+	}
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"source repository", string(self.Source.Repo), "sharpintelligence/doorstep"},
+		{"source branch", self.Source.Branch, "release"},
+		{"required checks", strings.Join(self.Source.RequiredChecks, ","), "check,lint-manifests,image"},
+		{"pin strategy", self.Pin.Strategy(), config.PinKustomize},
+		{"pinned image", self.Pin.Kustomize.Image, doorstepImage},
+		{"migration trailer", self.Migrations != nil && self.Migrations.TrailerEnabled() && len(self.Migrations.Labels) == 0, true},
+		{"automatic rollback", self.AutoRollback, true},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	if timeout := self.ArgoCD.Timeout(); timeout < 5*time.Minute+time.Minute {
+		t.Errorf("sync timeout %s does not cover the 300 s startup probe", timeout)
+	}
+	var gates []string
+	for _, gate := range self.Gates.After {
+		gates = append(gates, string(gate.Type))
+	}
+	if !slices.Contains(gates, "health") || !slices.Contains(gates, "soak") {
+		t.Errorf("after gates = %v, want health and soak", gates)
+	}
+
+	kustomization := readDocuments(t, dir+"/kustomization.yaml")[0]
+	var digests []string
+	for _, image := range kustomization.lookup(t, "images").([]any) {
+		if m := image.(map[string]any); m["name"] == self.Pin.Kustomize.Image {
+			digest, _ := m["digest"].(string)
+			digests = append(digests, digest)
+		}
+	}
+	if len(digests) != 1 || !regexp.MustCompile(digestPattern).MatchString(digests[0]) {
+		t.Errorf("images entries for %s = %v, want exactly one with a digest doorstep can pin", self.Pin.Kustomize.Image, digests)
 	}
 }

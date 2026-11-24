@@ -11,6 +11,8 @@ import (
 	"path"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
@@ -20,6 +22,7 @@ const (
 	migrationLockRetrySeconds = 1
 	migrationLockMaxRetries   = 120
 	migrationLockPrefix       = "doorstep-migrations:"
+	undefinedTable            = "42P01"
 )
 
 var ErrDatabaseNewer = errors.New("database schema is newer than this doorstep binary")
@@ -40,6 +43,12 @@ type MigrationState struct {
 	AppliedAt time.Time
 }
 
+type SchemaAhead struct {
+	DatabaseVersion int64
+	BinaryVersion   int64
+	MinBinarySchema int64
+}
+
 type migrateOptions struct {
 	sessionLock bool
 }
@@ -51,6 +60,9 @@ func WithoutSessionLock() MigrateOption {
 }
 
 func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...MigrateOption) (applied []AppliedMigration, err error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	settings := migrateOptions{sessionLock: true}
 	for _, opt := range opts {
 		opt(&settings)
@@ -62,8 +74,16 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 	}
 	defer func() { err = errors.Join(err, closeProvider()) }()
 
-	if err := checkNotNewer(ctx, provider); err != nil {
+	ahead, err := s.schemaAhead(ctx, provider)
+	if err != nil {
 		return nil, err
+	}
+	if ahead != nil {
+		logger.WarnContext(ctx, "database schema is newer than this binary; running in one-release compatibility mode",
+			slog.Int64("database_version", ahead.DatabaseVersion),
+			slog.Int64("binary_version", ahead.BinaryVersion),
+			slog.Int64("min_binary_schema", ahead.MinBinarySchema))
+		return nil, nil
 	}
 	results, err := provider.Up(ctx)
 	if err != nil {
@@ -79,19 +99,20 @@ func (s *Store) Migrate(ctx context.Context, logger *slog.Logger, opts ...Migrat
 	return applied, nil
 }
 
-func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, err error) {
+func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, ahead *SchemaAhead, err error) {
 	provider, closeProvider, err := s.migrationProvider(ctx, slog.New(slog.DiscardHandler), false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { err = errors.Join(err, closeProvider()) }()
 
-	if err := checkNotNewer(ctx, provider); err != nil {
-		return nil, err
+	ahead, err = s.schemaAhead(ctx, provider)
+	if err != nil {
+		return nil, nil, err
 	}
 	statuses, err := provider.Status(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read migration status: %w", err)
+		return nil, nil, fmt.Errorf("read migration status: %w", err)
 	}
 	for _, st := range statuses {
 		states = append(states, MigrationState{
@@ -101,15 +122,12 @@ func (s *Store) MigrationStatus(ctx context.Context) (states []MigrationState, e
 			AppliedAt: st.AppliedAt,
 		})
 	}
-	return states, nil
+	return states, ahead, nil
 }
 
 func (s *Store) migrationProvider(ctx context.Context, logger *slog.Logger, sessionLock bool) (*goose.Provider, func() error, error) {
 	if s.pool == nil {
 		return nil, nil, fmt.Errorf("migrate: %w", errInTransaction)
-	}
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
 	}
 	migrations, err := fs.Sub(embeddedMigrations, "migrations")
 	if err != nil {
@@ -159,15 +177,29 @@ func MigrationLockID(schema string) int64 {
 	return int64(h.Sum32())
 }
 
-func checkNotNewer(ctx context.Context, provider *goose.Provider) error {
+func (s *Store) schemaAhead(ctx context.Context, provider *goose.Provider) (*SchemaAhead, error) {
 	current, err := provider.GetDBVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("read schema version: %w", err)
+		return nil, fmt.Errorf("read schema version: %w", err)
 	}
-	if latest := latestVersion(provider); current > latest {
-		return fmt.Errorf("%w: database is at version %d, newest known migration is %d", ErrDatabaseNewer, current, latest)
+	latest := latestVersion(provider)
+	if current <= latest {
+		return nil, nil
 	}
-	return nil
+	var floor int64
+	err = s.pool.QueryRow(ctx, "SELECT min_binary_schema FROM schema_compatibility").Scan(&floor)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); (ok && pgErr.Code == undefinedTable) || errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: database is at version %d, newest known migration is %d, and the database records no compatibility floor",
+			ErrDatabaseNewer, current, latest)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read schema compatibility floor: %w", err)
+	}
+	if latest < floor {
+		return nil, fmt.Errorf("%w: database is at version %d, newest known migration is %d, and the database requires binaries that know migration %d or newer",
+			ErrDatabaseNewer, current, latest, floor)
+	}
+	return &SchemaAhead{DatabaseVersion: current, BinaryVersion: latest, MinBinarySchema: floor}, nil
 }
 
 func latestVersion(provider *goose.Provider) int64 {

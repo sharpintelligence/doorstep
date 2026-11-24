@@ -63,8 +63,11 @@ Tests that only unit-test logic need none of this; `serve` and `migrate` command
 
 - `storetest.Open(t)` returns a `*store.Store` connected to a fresh schema with all migrations applied, closed when the test ends.
 - `storetest.DatabaseURL(t)` creates a fresh, empty schema and returns a URL whose `search_path` points at it (with `pool_max_conns=5`), for tests that open the store or run commands themselves.
+- `storetest.Pool(t, url)` opens a `pgxpool.Pool` on such a URL, closed when the test ends, for tests outside `internal/store` that need raw SQL, such as expiring a lease or recording a newer schema version.
 
 Each schema is named `t_<random hex>` and dropped with everything in it when the test finishes, so no `CREATEDB` privilege is needed. Migrations take the same session advisory lock as production; its ID is derived from the schema, so parallel tests (and the `serve` and `migrate` command tests) never wait for each other. `store.WithoutSessionLock()` remains for tests that migrate one schema repeatedly.
+
+`TestEmbeddedMigrationsFollowCompatibilityPolicy` in `internal/store` needs no database: it lints every migration after `00011` for destructive statements outside `NNNNN_contract_*.sql` files and for the compatibility floor ([database.md](database.md#compatibility-across-one-release)), so `just check` catches a migration that would break the previous release.
 
 To run the binary locally, point it at the same container:
 
@@ -114,6 +117,8 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 
 `TestMVPDeploysAMergedPullRequestAndRollsBack` (`internal/cli/mvp_acceptance_test.go`) is the MVP acceptance test ([ADR 0021](decisions/0021-mvp-acceptance-evidence.md)): a signed push arrives before CI is green and the image exists, a `check_run` webhook queues the deploy, the lineage is read back through the API, a Slack target receives the messages, and `doorstep rollback` and `doorstep blocks` run through the CLI. With the database variables above exported, run it with `go test -race -count=1 -run TestMVP ./internal/cli/`. The same flow against a real GitHub App, registry and Argo CD is in [mvp-walkthrough.md](mvp-walkthrough.md).
 
+`TestEngineHandsOverMidSyncToANewReplica` and `TestEngineResumesAfterALostLease` run a second `serve` on the same database, as a rolling update of doorstep does ([self-hosting.md](self-hosting.md#what-happens-during-a-self-deploy)): the first replica stops, or loses its lease through an SQL update, while the deployment is `syncing`, and the second one finishes it with one pin commit, one transition history and each notification delivered once. The lost-lease test waits for the first replica's next heartbeat, about 20 seconds.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request); the weekly run executes only `govulncheck`. All jobs run on `ubuntu-24.04`. The `check` job:
@@ -122,9 +127,11 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
 3. runs `just check` and `just build`.
 
-A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Two more jobs run beside it:
+A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Further jobs run beside it:
 
+- `lint-manifests` runs `just lint-manifests`.
 - `govulncheck` runs `just vuln`, using the mise-pinned Go.
+- `migration-trailer`, on pull requests only, fails when the pull request changes `internal/store/migrations` and none of its commit messages has a `Doorstep-Migration: true` line ([database.md](database.md#compatibility-across-one-release)). The repository squash-merges with the pull request's commit messages, so that line reaches the commit on `main`.
 - `image` builds the `Dockerfile` for `linux/amd64` and `linux/arm64` without pushing, with the same `build-push-action` inputs as the release workflow (including the commit and commit time build arguments). It then loads a `linux/amd64` build and asserts that `doorstep version` reports the version, commit SHA and commit time, so a renamed link-time variable fails CI. Cross-compilation keeps it cheap, and it catches Dockerfile and workflow breakage before the first tag.
 
 Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions, Go modules and Docker base images. Releases are described in [releasing.md](releasing.md).
