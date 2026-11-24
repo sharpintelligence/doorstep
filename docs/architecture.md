@@ -56,10 +56,9 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
 | `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
-| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
 | `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
 | `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends only on `core` through a `Repository` port that `*store.Store` satisfies; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
-| `internal/history` | append-only transition log and its read models | planned |
 | `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
 | `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, authenticates extra handlers with installation tokens | built |
 | `internal/intake` | turns GitHub webhooks, registry polls, API and CLI requests into queued deployments | planned |
@@ -70,7 +69,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
 | `internal/notify` | Slack, ntfy and generic webhook notifications | planned |
 | `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
-| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication, queue and lock endpoints; see [api.md](api.md) | built |
+| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication, queue, lock and deploy history endpoints; see [api.md](api.md) | built |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
 | `internal/auth` | hashed API tokens for CLI/CI, OIDC login for the UI | planned |
 | `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener | built |
@@ -83,9 +82,9 @@ The design is ports and adapters.
 
 - `core` imports nothing from `internal/`. Every other package may import it.
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
-- Adapters (`store`, `queue`, `locks`, `history`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `history`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers.
+- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers.
 - `store` imports only `core`.
-- `api` and `web` call `engine` for commands and `store` read models for queries. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
+- `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
 - No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The only exceptions are the link-time `buildinfo.version`, `buildinfo.commit` and `buildinfo.commitTime` variables, which the release image build sets because it has no `.git` directory. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
@@ -99,7 +98,9 @@ Illustrative signatures; the engine bead finalises them.
 type DeploymentStore interface {
 	Create(ctx context.Context, d core.Deployment) (core.Deployment, error)
 	Get(ctx context.Context, id core.DeploymentID) (core.Deployment, error)
-	Transition(ctx context.Context, id core.DeploymentID, from, to core.State, ev core.Event) error
+	TransitionDeployment(ctx context.Context, t store.Transition) (core.Deployment, error)
+	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
+	LastSuccessfulDeployment(ctx context.Context, t core.Target, excludeDigest core.Digest) (core.Deployment, error)
 }
 
 type Queue interface {
@@ -145,6 +146,8 @@ type Clock interface {
 `*queue.Queue` implements the `Queue` port today (see [queue.md](queue.md)); its `Claimed`, `EnqueueOptions` and `EnqueueResult` types live in `queue`, so the engine bead either moves them to `core` or declares the port over its own types with a thin adapter, keeping `engine` free of adapter imports. `queue.Runner` drives the engine through a `Handler` and is started by `serve` once the engine exists.
 
 `Locker` is what `locks.Service` offers the engine: the live freezes (app and global) that block a target, so the engine can record the `lock` gate as pending with the owner and reason as evidence. The claim itself already skips frozen deploys ([locks.md](locks.md)). Per-target serialisation needs no lock rows: head-of-line claiming and the one-active-deployment index provide it, and kind `deployment` lock rows are reserved for the engine.
+
+The store already implements the deployment side: `TransitionDeployment`, `SetLineage` and `LastSuccessfulDeployment` ([database.md](database.md#transitions-and-lineage)). The engine bead decides whether its port takes `store.Transition` as is or a mirror type in `core`, keeping `engine` free of a `store` import.
 
 `PinWriter` has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). Both preserve comments and formatting through the yaml v3 `Node` API.
 
@@ -195,7 +198,7 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - The legal transitions are a table in `core` (`State.CanTransitionTo`), not a switch.
 - A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`.
 
-- Every transition is a compare-and-set on `(id, from_state)` and is recorded in history.
+- Every transition is a compare-and-set on `(id, from_state)` through `store.TransitionDeployment` and is recorded in history in the same transaction; a lost race returns `core.ErrStateConflict` ([database.md](database.md#transitions-and-lineage)).
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
 - Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - A target's queue runs in-flight deployments first, then by priority (`normal` 0, `urgent` 100, `rollback` 200), then oldest first. An urgent deploy jumps queued work but never preempts an in-flight deployment.
@@ -279,6 +282,8 @@ One listener (default `:8080`) serves everything public:
 | `POST /api/v1/apps/{app}/lock`, `DELETE /api/v1/apps/{app}/lock` | freeze or release one app; see [locks.md](locks.md#api) | built |
 | `POST /api/v1/lock`, `DELETE /api/v1/lock` | global freeze | built |
 | `GET /api/v1/locks` | live freezes | built |
+| `GET /api/v1/apps/{app}/deployments` | deploy history of an app, filtered and paginated; same listener as the queue endpoint ([api.md](api.md)) | built |
+| `GET /api/v1/deployments/{id}` | one deployment with its events, gates, rollbacks and retries ([api.md](api.md)) | built |
 | `/api/v1/...` | further JSON API resources; unknown API paths answer with a JSON `404` | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |

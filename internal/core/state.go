@@ -52,7 +52,7 @@ func (s State) Valid() bool {
 }
 
 func (s State) Terminal() bool {
-	return slices.Contains(terminalStates(), s)
+	return slices.Contains(TerminalStates(), s)
 }
 
 func (s State) Claimable() bool {
@@ -69,10 +69,6 @@ func ActiveStates() []State {
 
 func ClaimableStates() []State {
 	return append([]State{StateQueued}, ActiveStates()...)
-}
-
-func terminalStates() []State {
-	return []State{StateSucceeded, StateFailed, StateCancelled, StateSuperseded}
 }
 
 func (s State) CanTransitionTo(to State) bool {

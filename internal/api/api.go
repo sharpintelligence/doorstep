@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
 const Prefix = "/api/v1/"
@@ -31,8 +32,14 @@ type LockService interface {
 
 type KnownApp func(app string) bool
 
+type History interface {
+	ListDeployments(ctx context.Context, f store.DeploymentFilter) (store.DeploymentPage, error)
+	GetDeploymentHistory(ctx context.Context, id core.DeploymentID) (store.DeploymentHistory, error)
+}
+
 type Options struct {
 	Logger        *slog.Logger
+	History       History
 	Queue         QueueReader
 	Apps          AppCatalog
 	Locks         LockService
@@ -42,28 +49,33 @@ type Options struct {
 }
 
 type api struct {
-	logger *slog.Logger
-	queue  QueueReader
-	apps   AppCatalog
-	locks  LockService
-	known  KnownApp
-	auth   Authenticator
+	logger  *slog.Logger
+	history History
+	queue   QueueReader
+	apps    AppCatalog
+	locks   LockService
+	known   KnownApp
+	auth    Authenticator
 }
 
 func New(opts Options) http.Handler {
 	a := &api{
-		logger: opts.Logger,
-		queue:  opts.Queue,
-		apps:   opts.Apps,
-		locks:  opts.Locks,
-		known:  opts.KnownApp,
-		auth:   opts.Authenticator,
+		logger:  opts.Logger,
+		history: opts.History,
+		queue:   opts.Queue,
+		apps:    opts.Apps,
+		locks:   opts.Locks,
+		known:   opts.KnownApp,
+		auth:    opts.Authenticator,
 	}
 	if a.logger == nil {
 		a.logger = slog.New(slog.DiscardHandler)
 	}
 
 	mux := http.NewServeMux()
+	if a.history != nil {
+		a.registerHistory(mux)
+	}
 	if a.queue != nil && a.apps != nil {
 		a.registerQueue(mux)
 	}

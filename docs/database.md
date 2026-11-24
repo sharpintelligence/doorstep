@@ -60,17 +60,24 @@ One row per deployment request, keyed by a store-assigned `id` (`core.Deployment
 | `image_digest` | resolved digest; `sha256:` and 64 lowercase hex characters, or null until resolved |
 | `previous_digest` | digest observed in git before pinning; a recorded observation only, git stays authoritative |
 | `pin_commit_sha` | GitOps commit that pinned the digest |
+| `gitops_repository` | GitOps repository `pin_commit_sha` belongs to; stored beside it because `apps` rows outlive the configuration that names the repository. Null or non-blank |
+| `argocd_revision` | revision Argo CD reported as synced; free text (a commit SHA, a chart version or several sources). Null or non-blank |
 | `parent_id`, `rollback_of_id`, `superseded_by_id` | lineage: retry of, rollback of, superseded by; `ON DELETE SET NULL` |
 | `failure_reason` | human-readable reason for `failed` |
 | `created_at`, `updated_at`, `started_at`, `finished_at` | lifecycle timestamps; `updated_at` is maintained by a trigger |
 
 `deployments_app_id_commit_sha_idx` on `(app_id, commit_sha, id)` serves the enqueue duplicate check and the "first seen" lookup batching uses to order commits.
 
+`image_digest`, `previous_digest`, `gitops_repository`, `pin_commit_sha` and `argocd_revision` are the deployment's lineage; they are written through `SetLineage` or with a transition (see [Transitions and lineage](#transitions-and-lineage)).
+
+
+The partial index `deployments_last_succeeded_idx` on `(app_id, finished_at DESC, id DESC) WHERE state = 'succeeded'` serves the last-successful lookup used for rollbacks.
+
 The partial unique index `deployments_one_active_per_app` on `app_id`, restricted to the active states (`resolving`, `pinning`, `syncing`, `verifying`), enforces at most one active deployment per target regardless of what the queue does.
 
 ### `queue_entries`
 
-The claim table. A row exists from enqueue until the deployment needs no more work. Every transition to a terminal state must delete the deployment's entry in the same transaction; the claim also ignores entries whose deployment is terminal, so a leftover entry can never be handed out again.
+The claim table. A row exists from enqueue until the deployment needs no more work. Every transition to a terminal state deletes the deployment's entry in the same transaction (`TransitionDeployment` does this); the claim also ignores entries whose deployment is terminal, so a leftover entry can never be handed out again.
 
 | Column | Notes |
 | --- | --- |
@@ -103,11 +110,40 @@ The latest result of each named gate for a deployment: `UNIQUE (deployment_id, n
 
 ### `deployment_events`
 
-The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transition`, `gate`, `lock`, `note`), optional `from_state` and `to_state`, `actor`, `message`, `data jsonb`, `occurred_at`. Indexed by `(deployment_id, id)` for a deployment's timeline and `(app_id, id DESC)` for a target's recent activity. Append-only is a property of the API (there are no update or delete methods), not of triggers, so retention pruning stays possible. Creating a deployment writes its first `transition` event (to `queued`) in the same transaction.
+The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transition`, `gate`, `lock`, `note`), optional `from_state` and `to_state`, `actor`, `message`, `data jsonb`, `occurred_at`. Indexed by `(deployment_id, id)` for a deployment's timeline and `(app_id, id DESC)` for a target's recent activity. Append-only is a property of the API (there are no update or delete methods), not of triggers, so retention pruning stays possible. Creating a deployment writes its first `transition` event (to `queued`, without `from_state`) in the same transaction; every later transition records both `from_state` and `to_state`. Lineage written outside a transition is recorded as a `note` event with the message `lineage recorded`.
 
 ## Transactions
 
 `Store.InTx(ctx, func(tx *store.Store) error)` runs the callback in a `READ COMMITTED` transaction and hands it a `Store` bound to that transaction, so every repository method works inside or outside a transaction. The transaction commits when the callback returns nil and rolls back on an error or a panic. Calling `InTx` on a transaction-bound store creates a savepoint. There is no automatic retry. `Migrate`, `MigrationStatus` and `Ping` are only available on the root store.
+
+## Transitions and lineage
+
+`Store.TransitionDeployment(ctx, store.Transition{...})` is the only way a deployment changes state after it is created. It is a compare-and-set on `(id, from_state)`:
+
+1. Before touching the database it checks `From -> To` against the state machine (`core.ErrInvalidTransition`), that `FailureReason` is only set when moving to `failed` and `SupersededByID` only when moving to `superseded`, that `Data` is empty or a JSON object and that the lineage patch is valid.
+2. In one transaction (a savepoint when called inside `InTx`) it runs `UPDATE deployments ... WHERE id = $1 AND state = $from`. When no row matches, a follow-up read tells the two cases apart: a missing deployment is `core.ErrNotFound`, a deployment in another state is `core.ErrStateConflict` (the error names the current state). Exactly one of several racing workers wins; the others get `ErrStateConflict` and should re-read.
+3. It appends a `transition` event with `from_state`, `to_state`, `actor`, `message` and `data`.
+4. When `To` is terminal, it deletes the deployment's queue entry.
+5. It returns the reloaded deployment.
+
+Side effects owned by the transition, all on the database clock: `started_at` is set the first time the deployment enters an active state and never moved afterwards; `finished_at` is set on a terminal state. `failure_reason` and `superseded_by_id` are recorded with their transitions. Because a nested `InTx` is a savepoint, the engine can fail a deployment and enqueue its rollback (`CreateDeployment`) atomically, as [ADR 0002](decisions/0002-rollback-is-a-new-deployment.md) requires.
+
+Lineage (`core.Lineage{Digest, PreviousDigest, GitOpsRepository, PinCommitSHA, ArgoCDRevision}`) is a patch: empty fields leave the column unchanged. It is written either
+
+- by `Store.SetLineage(ctx, id, lineage, actor)` as soon as a step learns it, so a crash before the next transition does not lose it; this appends a `note` event whose `data` holds the fields that were set (`image_digest`, `previous_digest`, `gitops_repository`, `pin_commit_sha`, `argocd_revision`); or
+- with a transition through `Transition.Lineage`, atomically with the state change; the same keys are merged into the transition event's `data`, overriding caller keys of the same name.
+
+The last write wins while the deployment is not terminal, because a resumed step may legitimately report a different commit; the events keep every value auditable. Once a deployment is terminal its lineage is final: `SetLineage` returns `core.ErrStateConflict`, and a missing deployment `core.ErrNotFound`. An empty patch is rejected.
+
+Transitions do not check the queue lease; the compare-and-set is the guard. Lease fencing belongs to the queue and can be added as an optional field later.
+
+## History read models
+
+These back the [HTTP API](api.md) and the engine's rollback lookup.
+
+- `Store.ListDeployments(ctx, store.DeploymentFilter{App, Environment, States, Kinds, CommitSHA, Before, Limit})` returns a `DeploymentPage{Items, Next}` ordered by id, newest first. Every filter field is optional. Pagination is keyset on `id` (`Before` is the previous page's `Next`); the store fetches one extra row to know whether another page exists. `Limit` defaults to 50 and is clamped to 200. Unknown states or kinds, malformed commit SHAs and negative cursors are rejected.
+- `Store.GetDeploymentHistory(ctx, id)` returns a `DeploymentHistory`: the deployment, its events oldest first (capped at 500, with `EventsTruncated`), its gate results ordered by name, and the deployments that roll it back (`rollback_of_id`) or retry it (`parent_id`). On the root store it reads everything in one `REPEATABLE READ`, read-only transaction so the parts agree; inside `InTx` it uses the caller's transaction.
+- `Store.LastSuccessfulDeployment(ctx, target, excludeDigest)` returns the `succeeded` deployment of the target that finished last (`finished_at DESC, id DESC`), or `core.ErrNotFound`. Ordering by finish time matters because a high-priority rollback queued later can finish before an older deploy. A succeeded rollback counts: it is what is running. A non-empty `excludeDigest` skips deployments with that digest, so the automatic rollback of a failed deploy and an operator rollback of a succeeded one (skipping itself and any retry of the same bad digest) share one lookup. Git remains authoritative for the previous digest ([ADR 0001](decisions/0001-go-and-core-design.md)); this lookup supplies the commit and image fields for the rollback deployment.
 
 ## Claiming work
 

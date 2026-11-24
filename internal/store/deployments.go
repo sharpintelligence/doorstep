@@ -27,14 +27,15 @@ RETURNING id`
 const insertQueueEntrySQL = `
 INSERT INTO queue_entries (deployment_id, app_id, priority) VALUES ($1, $2, $3)`
 
-const insertTransitionEventSQL = `
-INSERT INTO deployment_events (deployment_id, app_id, type, to_state, actor, message)
-VALUES ($1, $2, 'transition', $3, $4, $5)`
+const insertEventSQL = `
+INSERT INTO deployment_events (deployment_id, app_id, type, from_state, to_state, actor, message, data)
+VALUES ($1, $2, $3, NULLIF($4::text, ''), NULLIF($5::text, ''), $6, $7, $8::jsonb)`
 
 const deploymentColumns = `
     d.id, a.name, a.environment, d.kind, d.state, d.source, d.requested_by,
     d.source_repository, d.commit_sha, d.image_repository, d.image_tag,
     COALESCE(d.image_digest, ''), COALESCE(d.previous_digest, ''), COALESCE(d.pin_commit_sha, ''),
+    COALESCE(d.gitops_repository, ''), COALESCE(d.argocd_revision, ''),
     d.parent_id, d.rollback_of_id, d.superseded_by_id, d.failure_reason,
     d.created_at, d.updated_at, d.started_at, d.finished_at`
 
@@ -49,9 +50,48 @@ func deploymentFields(d *core.Deployment) []any {
 		&d.ID, &d.Target.App, &d.Target.Environment, &d.Kind, &d.State, &d.Source, &d.RequestedBy,
 		&d.Commit.Repository, &d.Commit.SHA, &d.Image.Repository, &d.Image.Tag,
 		&d.Digest, &d.PreviousDigest, &d.PinCommitSHA,
+		&d.GitOpsRepository, &d.ArgoCDRevision,
 		&d.ParentID, &d.RollbackOfID, &d.SupersededByID, &d.FailureReason,
 		&d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.FinishedAt,
 	}
+}
+
+type event struct {
+	deploymentID core.DeploymentID
+	appID        AppID
+	typ          core.EventType
+	from, to     core.State
+	actor        string
+	message      string
+	data         []byte
+}
+
+func (s *Store) insertEvent(ctx context.Context, e event) error {
+	data := e.data
+	if len(data) == 0 {
+		data = []byte("{}")
+	}
+	_, err := s.db.Exec(ctx, insertEventSQL, e.deploymentID, e.appID, e.typ, e.from, e.to, e.actor, e.message, string(data))
+	if err != nil {
+		return fmt.Errorf("record deployment %d %s event: %w", e.deploymentID, e.typ, err)
+	}
+	return nil
+}
+
+func scanDeployment(row pgx.Row) (core.Deployment, error) {
+	var d core.Deployment
+	err := row.Scan(deploymentFields(&d)...)
+	return d, err
+}
+
+func (s *Store) queryDeployments(ctx context.Context, sql string, args ...any) ([]core.Deployment, error) {
+	rows, err := s.db.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (core.Deployment, error) {
+		return scanDeployment(row)
+	})
 }
 
 func newDeployment(d core.Deployment) (core.Deployment, error) {
@@ -95,8 +135,16 @@ func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priorit
 		if _, err := tx.db.Exec(ctx, insertQueueEntrySQL, id, appID, priority); err != nil {
 			return fmt.Errorf("enqueue deployment %d: %w", id, err)
 		}
-		if _, err := tx.db.Exec(ctx, insertTransitionEventSQL, id, appID, d.State, d.RequestedBy, "queued from "+string(d.Source)); err != nil {
-			return fmt.Errorf("record deployment %d event: %w", id, err)
+		err = tx.insertEvent(ctx, event{
+			deploymentID: id,
+			appID:        appID,
+			typ:          core.EventTransition,
+			to:           d.State,
+			actor:        d.RequestedBy,
+			message:      "queued from " + string(d.Source),
+		})
+		if err != nil {
+			return err
 		}
 		created, err = tx.GetDeployment(ctx, id)
 		return err
@@ -108,8 +156,7 @@ func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priorit
 }
 
 func (s *Store) GetDeployment(ctx context.Context, id core.DeploymentID) (core.Deployment, error) {
-	var d core.Deployment
-	err := s.db.QueryRow(ctx, selectDeploymentSQL, id).Scan(deploymentFields(&d)...)
+	d, err := scanDeployment(s.db.QueryRow(ctx, selectDeploymentSQL, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Deployment{}, fmt.Errorf("deployment %d: %w", id, core.ErrNotFound)
 	}
