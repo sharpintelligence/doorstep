@@ -182,3 +182,83 @@ func TestValidateRepositoryAccepts(t *testing.T) {
 		})
 	}
 }
+
+func TestEvictInstallationCaches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		evict           func(t *testing.T, a *App)
+		wantLookupCalls int64
+		wantTokenCalls  int64
+	}{
+		{
+			name:            "nothing evicted",
+			evict:           func(*testing.T, *App) {},
+			wantLookupCalls: 2,
+			wantTokenCalls:  1,
+		},
+		{
+			name:            "installation drops its lookups and token",
+			evict:           func(_ *testing.T, a *App) { a.EvictInstallation(7) },
+			wantLookupCalls: 4,
+			wantTokenCalls:  2,
+		},
+		{
+			name:            "other installation leaves the caches alone",
+			evict:           func(_ *testing.T, a *App) { a.EvictInstallation(8) },
+			wantLookupCalls: 2,
+			wantTokenCalls:  1,
+		},
+		{
+			name: "repository drops only its own lookup",
+			evict: func(t *testing.T, a *App) {
+				t.Helper()
+				if err := a.EvictRepository("ACME", "App"); err != nil {
+					t.Fatalf("EvictRepository: %v", err)
+				}
+			},
+			wantLookupCalls: 3,
+			wantTokenCalls:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.srv.Install("acme", "app", 7)
+			f.srv.Install("acme", "other", 7)
+			f.srv.SetBranch("acme", "app", "main", checksSHA)
+			f.srv.SetBranch("acme", "other", "main", checksSHA)
+			readHeads := func() {
+				t.Helper()
+				for _, repo := range []string{"app", "other"} {
+					if _, err := f.repoClient(t, "acme", repo).BranchHead(t.Context(), "acme", repo, "main"); err != nil {
+						t.Fatalf("BranchHead(%s): %v", repo, err)
+					}
+				}
+			}
+			readHeads()
+			tt.evict(t, f.app)
+			readHeads()
+			if got := f.srv.LookupCalls(); got != tt.wantLookupCalls {
+				t.Errorf("lookup calls = %d, want %d", got, tt.wantLookupCalls)
+			}
+			if got := f.srv.TokenCalls(); got != tt.wantTokenCalls {
+				t.Errorf("token calls = %d, want %d", got, tt.wantTokenCalls)
+			}
+		})
+	}
+}
+
+func TestEvictRepositoryRejectsInvalidNames(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	for _, name := range [][2]string{{"", "app"}, {"acme", ".."}, {"acme/x", "app"}} {
+		if err := f.app.EvictRepository(name[0], name[1]); !errors.Is(err, ErrInvalidRepository) {
+			t.Errorf("EvictRepository(%q, %q) error = %v, want ErrInvalidRepository", name[0], name[1], err)
+		}
+	}
+}

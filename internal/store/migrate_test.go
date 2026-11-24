@@ -51,7 +51,10 @@ func TestMigrateFreshSchema(t *testing.T) {
 	if len(applied) != len(pending) {
 		t.Fatalf("applied %d migrations, want %d", len(applied), len(pending))
 	}
-	wantNames := []string{"00001_initial_schema.sql", "00002_queue_notify.sql", "00003_lock_scope_and_events.sql", "00004_deployment_lineage.sql"}
+	wantNames := []string{
+		"00001_initial_schema.sql", "00002_queue_notify.sql", "00003_lock_scope_and_events.sql", "00004_deployment_lineage.sql",
+		"00005_tracked_commits.sql", "00006_gate_result_phase.sql", "00007_auth.sql", "00008_webhook_deliveries.sql",
+	}
 	for i, name := range wantNames {
 		if i >= len(applied) || applied[i].Version != int64(i+1) || applied[i].Name != name {
 			t.Errorf("migration %d = %+v, want version %d %s", i, applied[i:min(i+1, len(applied))], i+1, name)

@@ -15,6 +15,8 @@ const (
 	EnvGitHubAppPrivateKey     = "DOORSTEP_GITHUB_APP_PRIVATE_KEY"
 	EnvGitHubAppPrivateKeyFile = "DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE"
 	EnvGitHubAPIURL            = "DOORSTEP_GITHUB_API_URL"
+	EnvGitHubWebhookSecret     = "DOORSTEP_GITHUB_WEBHOOK_SECRET"
+	EnvGitHubWebhookSecretFile = "DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE"
 )
 
 const redacted = "[redacted]"
@@ -35,10 +37,12 @@ func (s Secret) LogValue() slog.Value { return slog.StringValue(s.String()) }
 func (s Secret) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
 
 type GitHub struct {
-	AppID          string
-	PrivateKey     Secret
-	PrivateKeyFile string
-	APIURL         string
+	AppID             string
+	PrivateKey        Secret
+	PrivateKeyFile    string
+	APIURL            string
+	WebhookSecret     Secret
+	WebhookSecretFile string
 }
 
 func defaultGitHub() GitHub {
@@ -47,6 +51,30 @@ func defaultGitHub() GitHub {
 
 func (g GitHub) Enabled() bool {
 	return g.AppID != "" || g.PrivateKey != "" || g.PrivateKeyFile != ""
+}
+
+func (g GitHub) WebhooksEnabled() bool {
+	return g.WebhookSecret != "" || g.WebhookSecretFile != ""
+}
+
+func (g GitHub) ReadWebhookSecret(readFile func(string) ([]byte, error)) ([]byte, error) {
+	if !g.WebhooksEnabled() {
+		return nil, nil
+	}
+	secret := string(g.WebhookSecret)
+	source := EnvGitHubWebhookSecret
+	if g.WebhookSecretFile != "" {
+		data, err := readFile(g.WebhookSecretFile)
+		if err != nil {
+			return nil, fmt.Errorf("read github webhook secret: %w", err)
+		}
+		secret = trimNewline(string(data))
+		source = "file " + g.WebhookSecretFile
+	}
+	if secret == "" {
+		return nil, fmt.Errorf("github webhook secret: %s is empty", source)
+	}
+	return []byte(secret), nil
 }
 
 func githubFromEnv(base GitHub, lookup func(string) (string, bool)) GitHub {
@@ -63,6 +91,12 @@ func githubFromEnv(base GitHub, lookup func(string) (string, bool)) GitHub {
 	if v, ok := lookup(EnvGitHubAPIURL); ok {
 		g.APIURL = v
 	}
+	secret, secretSet := lookup(EnvGitHubWebhookSecret)
+	secretFile, secretFileSet := lookup(EnvGitHubWebhookSecretFile)
+	if secretSet || secretFileSet {
+		g.WebhookSecret = Secret(secret)
+		g.WebhookSecretFile = secretFile
+	}
 	return g
 }
 
@@ -71,7 +105,13 @@ func (g GitHub) validate() []error {
 	if _, err := github.ParseBaseURL(g.APIURL); err != nil {
 		errs = append(errs, fmt.Errorf("github api url: %w", err))
 	}
+	if g.WebhookSecret != "" && g.WebhookSecretFile != "" {
+		errs = append(errs, errors.New("github webhook secret: set only one of "+EnvGitHubWebhookSecretFile+" and "+EnvGitHubWebhookSecret))
+	}
 	if !g.Enabled() {
+		if g.WebhooksEnabled() {
+			errs = append(errs, errors.New("github webhook secret: requires the GitHub App ("+EnvGitHubAppID+" and a private key)"))
+		}
 		return errs
 	}
 	switch {

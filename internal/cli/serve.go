@@ -171,6 +171,20 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		return err
 	}
 
+	intakeWiring, err := newIntake(ctx, intakeInput{
+		config:    cfg,
+		catalog:   in.catalog,
+		githubApp: githubApp,
+		store:     st,
+		maxBatch:  apps.MaxBatch,
+		readFile:  config.ReadSecretFile,
+		recorder:  m.Recorder(),
+		logger:    logger,
+	})
+	if err != nil {
+		return fmt.Errorf("intake: %w", err)
+	}
+
 	authenticator := authService.Authenticator()
 	apiHandler := api.New(api.Options{
 		Logger:        logger,
@@ -191,6 +205,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		maps.Copy(appRoutes, h.Routes())
 	}
 	mainRoutes := wrapRoutes(appRoutes, authenticator.Middleware)
+	maps.Copy(mainRoutes, intakeWiring.routes)
 	checks := map[string]server.Check{"postgres": st.Ping}
 	newServer := func(routes map[string]http.Handler) *server.Server {
 		return server.New(server.Options{
@@ -215,6 +230,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	runs := []func(context.Context) error{
 		func(ctx context.Context) error { return reminder.Run(ctx, locks.SweepInterval) },
 	}
+	runs = append(runs, intakeWiring.runs...)
 	if cfg.Server.MetricsListenAddr == "" {
 		maps.Copy(mainRoutes, metricsRoutes)
 	} else {

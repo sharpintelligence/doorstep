@@ -27,6 +27,7 @@ github:
   app_id: "123"
   private_key_file: /etc/doorstep/secrets/github-app.pem
   api_url: https://ghe.example.com/api/v3
+  webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret
 registry:
   credentials_file: /etc/doorstep/registry/.dockerconfigjson
 locks:
@@ -34,6 +35,8 @@ locks:
 kubernetes:
   kubeconfig: /etc/doorstep/kube/config
   context: homelab
+intake:
+  poll_interval: 2m
 notifications:
   - name: ops
     type: slack
@@ -102,12 +105,14 @@ func TestParse(t *testing.T) {
 		Log:      FileLog{Level: strPtr("debug"), Format: strPtr("text")},
 		Database: FileDatabase{URLFile: strPtr("/etc/doorstep/secrets/database-url")},
 		GitHub: FileGitHub{
-			AppID:          strPtr("123"),
-			PrivateKeyFile: strPtr("/etc/doorstep/secrets/github-app.pem"),
-			APIURL:         strPtr("https://ghe.example.com/api/v3"),
+			AppID:             strPtr("123"),
+			PrivateKeyFile:    strPtr("/etc/doorstep/secrets/github-app.pem"),
+			APIURL:            strPtr("https://ghe.example.com/api/v3"),
+			WebhookSecretFile: strPtr("/etc/doorstep/secrets/github-webhook-secret"),
 		},
 		Registry:   FileRegistry{CredentialsFile: strPtr("/etc/doorstep/registry/.dockerconfigjson")},
 		Locks:      FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
+		Intake:     FileIntake{PollInterval: durPtr(2 * time.Minute)},
 		Kubernetes: FileKubernetes{Kubeconfig: strPtr("/etc/doorstep/kube/config"), Context: strPtr("homelab")},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
@@ -337,6 +342,17 @@ func TestFileApply(t *testing.T) {
 			want: func(c *Config) { c.GitHub.PrivateKey, c.GitHub.PrivateKeyFile = "", "/secrets/key.pem" },
 		},
 		{
+			name: "github webhook secret file replaces an inline secret",
+			file: File{GitHub: FileGitHub{WebhookSecretFile: strPtr("/secrets/webhook")}},
+			base: func(c *Config) { c.GitHub.WebhookSecret = "inline" },
+			want: func(c *Config) { c.GitHub.WebhookSecret, c.GitHub.WebhookSecretFile = "", "/secrets/webhook" },
+		},
+		{
+			name: "zero poll interval is applied",
+			file: File{Intake: FileIntake{PollInterval: durPtr(0)}},
+			want: func(c *Config) { c.Intake.PollInterval = 0 },
+		},
+		{
 			name: "zero lock reminder interval is applied",
 			file: File{Locks: FileLocks{ReminderInterval: durPtr(0)}},
 			want: func(c *Config) { c.Locks.ReminderInterval = 0 },
@@ -347,19 +363,21 @@ func TestFileApply(t *testing.T) {
 				Server:     FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second), PublicURL: strPtr("https://deploy.example.com")},
 				Log:        FileLog{Level: strPtr("warn"), Format: strPtr("text")},
 				Database:   FileDatabase{URLFile: strPtr("/secrets/db")},
-				GitHub:     FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3")},
+				GitHub:     FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3"), WebhookSecretFile: strPtr("/secrets/webhook")},
 				Registry:   FileRegistry{CredentialsFile: strPtr("/secrets/config.json")},
 				Locks:      FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
+				Intake:     FileIntake{PollInterval: durPtr(30 * time.Second)},
 				Kubernetes: FileKubernetes{Kubeconfig: strPtr("/kube/config"), Context: strPtr("lab")},
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second, PublicURL: "https://deploy.example.com"}
 				c.Log = Log{Level: "warn", Format: "text"}
 				c.Database = Database{URLFile: "/secrets/db"}
-				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3"}
+				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3", WebhookSecretFile: "/secrets/webhook"}
 				c.Registry = Registry{CredentialsFile: "/secrets/config.json"}
 				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
 				c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "lab"}
+				c.Intake = Intake{PollInterval: 30 * time.Second}
 			},
 		},
 		{

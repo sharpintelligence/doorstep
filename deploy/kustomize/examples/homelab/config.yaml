@@ -1,6 +1,7 @@
 github:
   app_id: "123456"
   private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+  webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret
 
 notifications:
   - name: ops

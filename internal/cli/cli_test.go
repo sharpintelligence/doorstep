@@ -598,6 +598,7 @@ func TestResolveServeConfig(t *testing.T) {
 		GitHub:     config.Default().GitHub,
 		Registry:   config.Registry{CredentialsFile: "/flag/config.json"},
 		Locks:      config.Default().Locks,
+		Intake:     config.Default().Intake,
 		Kubernetes: config.Kubernetes{Kubeconfig: "/flag/kubeconfig", Context: "flag-context"},
 	}
 	const fileSettings = `
@@ -615,6 +616,7 @@ github:
   app_id: "42"
   private_key_file: /file/key.pem
   api_url: https://ghe.example.com/api/v3
+  webhook_secret_file: /file/webhook-secret
 registry:
   credentials_file: /file/config.json
 locks:
@@ -622,14 +624,17 @@ locks:
 kubernetes:
   kubeconfig: /file/kubeconfig
   context: file-context
+intake:
+  poll_interval: 30s
 `
 	fileConfig := config.Config{
 		Server:     config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
 		Log:        config.Log{Level: "warn", Format: "text"},
 		Database:   config.Database{URL: databaseURL},
-		GitHub:     config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3"},
+		GitHub:     config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3", WebhookSecretFile: "/file/webhook-secret"},
 		Registry:   config.Registry{CredentialsFile: "/file/config.json"},
 		Locks:      config.Locks{ReminderInterval: 6 * time.Hour},
+		Intake:     config.Intake{PollInterval: 30 * time.Second},
 		Kubernetes: config.Kubernetes{Kubeconfig: "/file/kubeconfig", Context: "file-context"},
 	}
 	oneAppCatalog := config.File{
@@ -764,12 +769,13 @@ kubernetes:
 		{
 			name: "environment over file",
 			file: fileSettings,
-			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s", config.EnvLockReminderInterval: "0s"},
+			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s", config.EnvLockReminderInterval: "0s", config.EnvPollInterval: "0s"},
 			want: func(c *config.Config) {
 				*c = fileConfig
 				c.Server.ListenAddr = ":9000"
 				c.Server.ShutdownDelay = 2 * time.Second
 				c.Locks.ReminderInterval = 0
+				c.Intake.PollInterval = 0
 			},
 		},
 		{
@@ -817,13 +823,14 @@ kubernetes:
 				config.EnvGitHubAppID:             "7",
 				config.EnvGitHubAppPrivateKey:     "inline-key",
 				config.EnvGitHubAPIURL:            "https://api.github.com",
+				config.EnvGitHubWebhookSecret:     "inline-secret",
 				config.EnvRegistryCredentialsFile: "/env/config.json",
 				config.EnvMetricsListenAddr:       "127.0.0.1:9100",
 			},
 			want: func(c *config.Config) {
 				*c = fileConfig
 				c.Server.MetricsListenAddr = "127.0.0.1:9100"
-				c.GitHub = config.GitHub{AppID: "7", PrivateKey: "inline-key", APIURL: "https://api.github.com"}
+				c.GitHub = config.GitHub{AppID: "7", PrivateKey: "inline-key", APIURL: "https://api.github.com", WebhookSecret: "inline-secret"}
 				c.Registry.CredentialsFile = "/env/config.json"
 			},
 		},

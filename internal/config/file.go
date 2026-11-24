@@ -23,6 +23,7 @@ type File struct {
 	Registry      FileRegistry   `yaml:"registry"`
 	Locks         FileLocks      `yaml:"locks"`
 	Kubernetes    FileKubernetes `yaml:"kubernetes"`
+	Intake        FileIntake     `yaml:"intake"`
 	Auth          Auth           `yaml:"auth"`
 	Notifications []Notification `yaml:"notifications"`
 	Apps          []App          `yaml:"apps"`
@@ -46,9 +47,10 @@ type FileDatabase struct {
 }
 
 type FileGitHub struct {
-	AppID          *string `yaml:"app_id"`
-	PrivateKeyFile *string `yaml:"private_key_file"`
-	APIURL         *string `yaml:"api_url"`
+	AppID             *string `yaml:"app_id"`
+	PrivateKeyFile    *string `yaml:"private_key_file"`
+	APIURL            *string `yaml:"api_url"`
+	WebhookSecretFile *string `yaml:"webhook_secret_file"`
 }
 
 type FileRegistry struct {
@@ -62,6 +64,10 @@ type FileLocks struct {
 type FileKubernetes struct {
 	Kubeconfig *string `yaml:"kubeconfig"`
 	Context    *string `yaml:"context"`
+}
+
+type FileIntake struct {
+	PollInterval *Duration `yaml:"poll_interval"`
 }
 
 func Parse(r io.Reader) (File, error) {
@@ -129,6 +135,10 @@ func (f File) Apply(base Config) Config {
 	if f.GitHub.APIURL != nil {
 		cfg.GitHub.APIURL = *f.GitHub.APIURL
 	}
+	if f.GitHub.WebhookSecretFile != nil {
+		cfg.GitHub.WebhookSecret = ""
+		cfg.GitHub.WebhookSecretFile = *f.GitHub.WebhookSecretFile
+	}
 	if f.Registry.CredentialsFile != nil {
 		cfg.Registry.CredentialsFile = *f.Registry.CredentialsFile
 	}
@@ -140,6 +150,9 @@ func (f File) Apply(base Config) Config {
 	}
 	if f.Kubernetes.Context != nil {
 		cfg.Kubernetes.Context = *f.Kubernetes.Context
+	}
+	if f.Intake.PollInterval != nil {
+		cfg.Intake.PollInterval = f.Intake.PollInterval.Std()
 	}
 	return cfg
 }

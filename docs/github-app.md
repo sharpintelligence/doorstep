@@ -17,11 +17,11 @@ Create the App once, under whichever account should own it (**Settings → Devel
 | Setting | Value |
 | --- | --- |
 | Homepage URL | your doorstep URL or this repository |
-| Webhook | active; URL `https://<doorstep host>/webhooks/github` |
-| Webhook secret | a long random value, for example `openssl rand -hex 32` (always set one) |
+| Webhook | active when GitHub can reach doorstep; URL `https://<doorstep host>/webhooks/github`. Leave it inactive for a polling-only install |
+| Webhook secret | a long random value, for example `openssl rand -hex 32` (always set one when the webhook is active) |
 | Where can this GitHub App be installed? | **Any account**, so it can be installed on several organizations and personal accounts. Choose *Only on this account* if every repository lives under the owning account. |
 
-The webhook handler is not built yet; until it is, you can leave the webhook inactive. Installing the App does not depend on it.
+Webhooks are optional: doorstep also polls GitHub on an interval, so an install that GitHub cannot reach still deploys, just later. See [Webhooks](#webhooks) and [Polling](#polling).
 
 ### Permissions
 
@@ -61,9 +61,8 @@ Subscribe to:
 - **Check suite**
 - **Check run**
 - **Status**
-- **Pull request**
 
-`installation` and `installation_repositories` events are delivered to every App without a subscription.
+`installation` and `installation_repositories` events are delivered to every App without a subscription. Other events, including **Pull request**, are answered with `200` and ignored, so subscribing to more does no harm.
 
 ## Install the App
 
@@ -119,6 +118,65 @@ Keep `github.env` out of version control.
 
 When `DOORSTEP_GITHUB_APP_ID` or a key is set, `doorstep serve` reads and parses the key at startup and refuses to start if it is missing, malformed or too small. It then logs `github app configured` with the App ID and API URL. It does not call GitHub at startup, and readiness does not depend on GitHub being reachable. Without any GitHub settings it logs `github app not configured` and runs without GitHub access.
 
+## Webhooks
+
+doorstep accepts App webhooks at `POST /webhooks/github` on the main listener. It is the only path GitHub needs to reach; it is not behind doorstep's sign-in, because every delivery is authenticated by its signature instead.
+
+1. Generate a secret: `openssl rand -hex 32`.
+2. On the App's settings page, set the **Webhook URL** to `https://<doorstep host>/webhooks/github`, paste the secret into **Webhook secret**, keep SSL verification on, and mark the webhook **Active**. GitHub Apps always send `application/json`.
+3. Give doorstep the same secret, from exactly one of two sources ([configuration.md](configuration.md#github-app)):
+   - a file: `github.webhook_secret_file` in `config.yaml` or `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE`. On Kubernetes, store it under the key `github-webhook-secret` in the Secret `doorstep` ([install.md](install.md#secret-keys)) and set `webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret`;
+   - inline: `DOORSTEP_GITHUB_WEBHOOK_SECRET` (environment only).
+
+```sh
+kubectl -n doorstep create secret generic doorstep \
+  --from-file=github-app-private-key.pem=./doorstep.2026-01-01.private-key.pem \
+  --from-literal=github-webhook-secret="$(openssl rand -hex 32)" \
+  --from-literal=database-url="$DATABASE_URL"
+```
+
+```yaml kubernetes
+github:
+  app_id: "Iv23liAbCdEf"
+  private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+  webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret
+```
+
+The secret is read once at startup (one trailing newline is trimmed); an empty or unreadable secret stops `serve`. A webhook secret without the App ID and key is a configuration error. Without a secret the route is not mounted at all (`404`) and `serve` logs `github webhooks disabled, polling only`: doorstep never accepts unsigned payloads.
+
+### What a delivery does
+
+| Event | Effect |
+| --- | --- |
+| `push` to `refs/heads/<branch>` | handed to intake with the pusher (`sender.login`, else `pusher.name`). Apps following that repository and branch track the commit if it is still the branch head; other branches match no app and cost nothing. Branch deletions, tag pushes and the all-zero SHA are ignored. |
+| `check_run`, `check_suite`, `status` (any action) | re-evaluates the open tracked commits for that repository and SHA (`check_run.head_sha`, `check_suite.head_sha`, `sha`); a green commit is enqueued once. Commits doorstep does not track cost one database lookup and no GitHub call. |
+| `installation`, `installation_repositories` | drops this replica's cached installation lookup and token for that installation and for every removed repository, so the change applies at once. Other replicas recover on their own through the one-hour cache and the `404`/`403` handling described under [How tokens are handled](#how-tokens-are-handled). |
+| `ping` | answered `200`. |
+| anything else | answered `200` and ignored. |
+
+Deliveries are processed while GitHub waits, with up to 25 seconds of work that is not cut short if GitHub hangs up after its 10 second timeout, so the response GitHub records is the real outcome:
+
+| Response | Meaning |
+| --- | --- |
+| `200 {"status":"processed"}` | handled |
+| `200 {"status":"ignored"}` | not an event or ref doorstep acts on |
+| `200 {"status":"duplicate"}` | this `X-GitHub-Delivery` was already handled; nothing was done again |
+| `400` | missing `X-GitHub-Event` or `X-GitHub-Delivery` header, or a payload that is not valid JSON or lacks the repository or SHA |
+| `401` | missing or wrong `X-Hub-Signature-256`; checked over the raw body before anything is parsed or stored |
+| `405` | not a `POST` |
+| `413` | body larger than 5 MiB |
+| `500` | handling failed, for example GitHub could not be read; the delivery is not marked as handled |
+
+**Redeliveries.** Each handled delivery ID is recorded for seven days, so a redelivery that already succeeded is answered `duplicate`. A failed delivery is not recorded, so redelivering it from **Advanced → Recent Deliveries** on the App's settings page processes it again. GitHub does not redeliver failures by itself; the poller picks up anything a failed or lost delivery missed within one poll interval.
+
+## Polling
+
+Every replica also runs a poller (`intake.poll_interval`, default `1m`; `0` turns it off), so installs that GitHub cannot reach still work. On each cycle one replica, chosen through the database, reads the head of every followed branch (one call per repository and branch, however many apps share it), hands a head it has not seen before to intake exactly like a push, and then re-checks open commits that no webhook evaluated in the last half interval. A green head is therefore deployed at most about one interval after CI finishes, even with webhooks off.
+
+There is no baseline: when an app is added, or after downtime, the first cycle tracks the current branch head and deploys it once it is green. This is what catches pushes missed while doorstep was down; it only ever deploys through the normal queue.
+
+At the default interval polling costs about 60 branch reads per hour per followed branch plus a few calls per open commit, far below GitHub's 5,000 requests per hour per installation. With webhooks working, the poller mostly reads branch heads and finds nothing new. If both webhooks and polling are off, `serve` logs a warning: nothing detects new commits.
+
 ## GitHub Enterprise Server
 
 Set `DOORSTEP_GITHUB_API_URL` to the REST API root, for example `https://ghe.example.com/api/v3`. The URL must use `https`; plain `http` is accepted only for loopback hosts (local fakes and tests).
@@ -139,10 +197,21 @@ Set `DOORSTEP_GITHUB_API_URL` to the REST API root, for example `https://ghe.exa
 
 Installation tokens minted with the old key stay valid until they expire (at most one hour), so a rotation needs no downtime.
 
+## Rotating the webhook secret
+
+GitHub keeps one webhook secret per App, so a rotation has a short window where deliveries fail with `401`:
+
+1. Update the Secret (or environment) with the new value.
+2. Set the new value under **Webhook secret** on the App's settings page and restart or roll doorstep straight away; doorstep reads the secret only at startup.
+3. Redeliver any deliveries that failed in between, or let the poller catch up.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
+| Deliveries fail with `401` | The webhook secret in doorstep and on the App differ, or doorstep was not restarted after a rotation. Set the same value in both and restart. |
+| Deliveries fail with `413` | The payload is larger than 5 MiB, typically a push of very many commits. Nothing is lost: the poller reads the branch head within one interval. |
+| Deliveries get `404` | No webhook secret is configured, so the route is not mounted. Set `github.webhook_secret_file` or turn the webhook off on the App. |
 | `github app is not installed for the repository` | The App is not installed on the repository's owner, or the repository is not in the installation's selected repositories. Install the App on that account or add the repository to the selection. doorstep picks up the change on the next request. |
 | `github app installation is suspended` | An owner of that account suspended the installation. Unsuspend it under the account's **Settings → GitHub Apps**. |
 | `github api: 401 Unauthorized` with `'Expiration time' claim` or `'Issued at' claim` in the message | The host clock is off by more than about a minute. Run NTP on the node. |

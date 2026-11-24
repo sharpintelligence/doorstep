@@ -200,6 +200,17 @@ Who asked doorstep to do what ([authentication.md](authentication.md#audit-log))
 
 There are deliberately no foreign keys, so audit rows outlive the apps and deployments they mention. Indexes serve the newest-first listing (`occurred_at DESC, id DESC`), a target's activity (`app, environment, id DESC`), an actor's activity (`actor_kind, actor_id, id DESC`) and lookups by `deployment_id`. Unlike `deployment_events`, append-only is enforced by triggers: `audit_log_reject_change()` raises on every `UPDATE`, `DELETE` and `TRUNCATE`. A retention policy, if one is ever needed, is a deliberate migration that replaces the trigger.
 
+### `webhook_deliveries`
+
+GitHub webhook deliveries that doorstep has handled, so a redelivery is answered without doing the work again ([github-app.md](github-app.md#webhooks)). `delivery_id` (the `X-GitHub-Delivery` header, 1 to 128 characters) is the primary key, with the `event` name and `received_at`.
+
+- **Claim and release.** `ClaimWebhookDelivery(ctx, id, event)` is `INSERT ... ON CONFLICT DO NOTHING` and reports whether it inserted the row; when it did not, the delivery is a duplicate. It runs after the signature check and only for events that do intake work (`push`, `check_run`, `check_suite`, `status`), so pings, ignored events and installation events are never stored. If handling then fails, `ReleaseWebhookDelivery` deletes the row so a manual redelivery is processed. A crash between the two leaves the claim; the poller covers it. Tracking and settlement are exactly-once on their own (see [`tracked_commits`](#tracked_commits)), so this table only saves GitHub calls.
+- **Retention.** `DeleteWebhookDeliveriesBefore(ctx, age)` deletes rows whose `received_at` is older than `now() - age`, served by an index on `received_at`. `serve` runs it hourly with a seven-day age whenever the webhook route is mounted; GitHub allows redelivery for about three days.
+
+### `intake_poll_state`
+
+A single row (`id boolean PRIMARY KEY DEFAULT true CHECK (id)`, inserted by the migration) whose `polled_at` (initially `-infinity`) is when the last intake poll cycle started. `ClaimPoll(ctx, every)` runs `UPDATE ... SET polled_at = now() WHERE polled_at <= now() - every RETURNING`, and only the replica that gets the row runs the cycle, so replicas poll GitHub once per interval between them without holding a lock across GitHub calls. A replica that dies mid-cycle delays the next cycle by at most one interval.
+
 ## Transactions
 
 `Store.InTx(ctx, func(tx *store.Store) error)` runs the callback in a `READ COMMITTED` transaction and hands it a `Store` bound to that transaction, so every repository method works inside or outside a transaction. The transaction commits when the callback returns nil and rolls back on an error or a panic. Calling `InTx` on a transaction-bound store creates a savepoint. There is no automatic retry. `Migrate`, `MigrationStatus` and `Ping` are only available on the root store.
@@ -282,7 +293,7 @@ The result carries the winner, its claim and the superseded ids. Rollbacks and i
 
 ## Clock
 
-Row timestamps, lease expiry, lock expiry and reminders, and every eligibility comparison use the database's `now()`. Several replicas must agree on when a lease expires, and the database is the only clock they share. This is the one exception to the injected `Clock` rule in [architecture.md](architecture.md#dependency-rules): the engine still uses an injected clock for its own timing, and passes lease lengths to the store as durations. Tests force a lease to expire by updating `lease_expires_at` directly.
+Row timestamps, lease expiry, lock expiry and reminders, webhook delivery retention, the intake poll claim and every eligibility comparison use the database's `now()`. Several replicas must agree on when a lease expires, and the database is the only clock they share. This is the one exception to the injected `Clock` rule in [architecture.md](architecture.md#dependency-rules): the engine still uses an injected clock for its own timing, and passes lease lengths to the store as durations. Tests force a lease to expire by updating `lease_expires_at` directly.
 
 ## Testing
 

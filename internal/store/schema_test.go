@@ -163,6 +163,29 @@ func TestSchemaRejectsInvalidAuthRows(t *testing.T) {
 	}
 }
 
+func TestSchemaRejectsInvalidIntakeRows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sql        string
+		constraint string
+	}{
+		{name: "empty delivery id", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES ('', 'push')", constraint: "webhook_deliveries_delivery_id_check"},
+		{name: "delivery id too long", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES (repeat('x', 129), 'push')", constraint: "webhook_deliveries_delivery_id_check"},
+		{name: "empty event", sql: "INSERT INTO webhook_deliveries (delivery_id, event) VALUES ('d', '')", constraint: "webhook_deliveries_event_check"},
+		{name: "second poll state row", sql: "INSERT INTO intake_poll_state (id) VALUES (false)", constraint: "intake_poll_state_id_check"},
+		{name: "duplicate poll state row", sql: "INSERT INTO intake_poll_state DEFAULT VALUES", constraint: "intake_poll_state_pkey"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			assertConstraint(t, store.ExecSQL(t.Context(), st, tt.sql), tt.constraint)
+		})
+	}
+}
+
 func TestSchemaRejectsInvalidDeployments(t *testing.T) {
 	t.Parallel()
 

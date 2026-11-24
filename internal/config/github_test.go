@@ -45,6 +45,21 @@ func TestGitHubFromEnv(t *testing.T) {
 			want: GitHub{AppID: "Iv23liAbCdEf", PrivateKey: fakeKey, APIURL: "https://ghe.example.com/api/v3"},
 		},
 		{
+			name: "webhook secret file",
+			env:  map[string]string{EnvGitHubWebhookSecretFile: "/etc/doorstep/secrets/github-webhook-secret"},
+			want: GitHub{WebhookSecretFile: "/etc/doorstep/secrets/github-webhook-secret", APIURL: "https://api.github.com"},
+		},
+		{
+			name: "inline webhook secret",
+			env:  map[string]string{EnvGitHubWebhookSecret: fakeKey},
+			want: GitHub{WebhookSecret: fakeKey, APIURL: "https://api.github.com"},
+		},
+		{
+			name: "both webhook secret sources are kept for validation",
+			env:  map[string]string{EnvGitHubWebhookSecret: fakeKey, EnvGitHubWebhookSecretFile: "/secret"},
+			want: GitHub{WebhookSecret: fakeKey, WebhookSecretFile: "/secret", APIURL: "https://api.github.com"},
+		},
+		{
 			name: "empty api url is applied and left to validation",
 			env:  map[string]string{EnvGitHubAPIURL: ""},
 			want: GitHub{},
@@ -55,6 +70,46 @@ func TestGitHubFromEnv(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := FromEnv(Default(), envFrom(tt.env))
+			if err != nil {
+				t.Fatalf("FromEnv: %v", err)
+			}
+			if got.GitHub != tt.want {
+				t.Errorf("GitHub = %#v, want %#v", got.GitHub, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitHubFromEnvWebhookSecretReplacesFileSetting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want GitHub
+	}{
+		{
+			name: "inline environment value replaces a file from the config file",
+			env:  map[string]string{EnvGitHubWebhookSecret: fakeKey},
+			want: GitHub{WebhookSecret: fakeKey, APIURL: "https://api.github.com"},
+		},
+		{
+			name: "file from the environment replaces a file from the config file",
+			env:  map[string]string{EnvGitHubWebhookSecretFile: "/env/secret"},
+			want: GitHub{WebhookSecretFile: "/env/secret", APIURL: "https://api.github.com"},
+		},
+		{
+			name: "unset keeps the config file setting",
+			env:  map[string]string{},
+			want: GitHub{WebhookSecretFile: "/file/secret", APIURL: "https://api.github.com"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := Default()
+			base.GitHub.WebhookSecretFile = "/file/secret"
+			got, err := FromEnv(base, envFrom(tt.env))
 			if err != nil {
 				t.Fatalf("FromEnv: %v", err)
 			}
@@ -117,6 +172,23 @@ func TestGitHubValidate(t *testing.T) {
 			wantErr: []string{"github api url"},
 			wantIs:  github.ErrInvalidBaseURL,
 		},
+		{name: "webhook secret file", github: GitHub{AppID: "1", PrivateKeyFile: "/key.pem", APIURL: "https://api.github.com", WebhookSecretFile: "/webhook"}},
+		{name: "inline webhook secret", github: GitHub{AppID: "1", PrivateKeyFile: "/key.pem", APIURL: "https://api.github.com", WebhookSecret: fakeKey}},
+		{
+			name:    "both webhook secret sources",
+			github:  GitHub{AppID: "1", PrivateKeyFile: "/key.pem", APIURL: "https://api.github.com", WebhookSecret: fakeKey, WebhookSecretFile: "/webhook"},
+			wantErr: []string{"github webhook secret: set only one of", EnvGitHubWebhookSecretFile, EnvGitHubWebhookSecret},
+		},
+		{
+			name:    "webhook secret without the app",
+			github:  GitHub{APIURL: "https://api.github.com", WebhookSecretFile: "/webhook"},
+			wantErr: []string{"github webhook secret: requires the GitHub App", EnvGitHubAppID},
+		},
+		{
+			name:    "inline webhook secret without the app",
+			github:  GitHub{APIURL: "https://api.github.com", WebhookSecret: fakeKey},
+			wantErr: []string{"github webhook secret: requires the GitHub App"},
+		},
 		{
 			name:    "every error is reported",
 			github:  GitHub{AppID: "a b", PrivateKey: fakeKey, PrivateKeyFile: "/key.pem", APIURL: "ftp://x"},
@@ -154,6 +226,7 @@ func TestGitHubEnabled(t *testing.T) {
 		{name: "app id", github: GitHub{AppID: "1"}, want: true},
 		{name: "inline key", github: GitHub{PrivateKey: "k"}, want: true},
 		{name: "key file", github: GitHub{PrivateKeyFile: "/k"}, want: true},
+		{name: "webhook secret alone", github: GitHub{WebhookSecretFile: "/w"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -165,11 +238,81 @@ func TestGitHubEnabled(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhooksEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		github GitHub
+		want   bool
+	}{
+		{name: "nothing set", github: GitHub{AppID: "1", PrivateKeyFile: "/k"}, want: false},
+		{name: "inline secret", github: GitHub{WebhookSecret: "s"}, want: true},
+		{name: "secret file", github: GitHub{WebhookSecretFile: "/s"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.github.WebhooksEnabled(); got != tt.want {
+				t.Errorf("WebhooksEnabled() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitHubReadWebhookSecret(t *testing.T) {
+	t.Parallel()
+
+	errMissing := errors.New("no such file")
+	files := map[string]string{
+		"/secret":       "file-secret\n",
+		"/crlf":         "crlf-secret\r\n",
+		"/two-newlines": "kept\n\n",
+		"/empty":        "",
+		"/newline":      "\n",
+	}
+	readFile := func(name string) ([]byte, error) {
+		if v, ok := files[name]; ok {
+			return []byte(v), nil
+		}
+		return nil, errMissing
+	}
+	tests := []struct {
+		name    string
+		github  GitHub
+		want    string
+		wantErr []string
+		wantIs  error
+	}{
+		{name: "disabled", github: GitHub{}},
+		{name: "inline", github: GitHub{WebhookSecret: fakeKey}, want: fakeKey},
+		{name: "file trims one trailing newline", github: GitHub{WebhookSecretFile: "/secret"}, want: "file-secret"},
+		{name: "file trims a trailing CRLF", github: GitHub{WebhookSecretFile: "/crlf"}, want: "crlf-secret"},
+		{name: "file keeps all but one newline", github: GitHub{WebhookSecretFile: "/two-newlines"}, want: "kept\n"},
+		{name: "empty file", github: GitHub{WebhookSecretFile: "/empty"}, wantErr: []string{"github webhook secret", "file /empty is empty"}},
+		{name: "newline only", github: GitHub{WebhookSecretFile: "/newline"}, wantErr: []string{"is empty"}},
+		{name: "missing file", github: GitHub{WebhookSecretFile: "/missing"}, wantErr: []string{"read github webhook secret"}, wantIs: errMissing},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.github.ReadWebhookSecret(readFile)
+			assertErrorContains(t, err, tt.wantErr)
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("error %v does not wrap %v", err, tt.wantIs)
+			}
+			if string(got) != tt.want {
+				t.Errorf("secret = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSecretRedaction(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
-	cfg.GitHub = GitHub{AppID: "1", PrivateKey: fakeKey}
+	cfg.GitHub = GitHub{AppID: "1", PrivateKey: fakeKey, WebhookSecret: fakeKey}
 
 	var logs bytes.Buffer
 	slog.New(slog.NewJSONHandler(&logs, nil)).Info("config",
