@@ -1,0 +1,48 @@
+{
+  "text": "blog (prod): deploy #42 succeeded",
+  "attachments": [
+    {
+      "color": "#2EB67D",
+      "fallback": "blog (prod): deploy #42 succeeded",
+      "blocks": [
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*blog (prod)*: deploy #42 succeeded"
+          }
+        },
+        {
+          "type": "section",
+          "fields": [
+            {
+              "type": "mrkdwn",
+              "text": "*Commit*\n<https://github.com/example-user/blog/commit/0123456789abcdef0123456789abcdef01234567|example-user/blog@0123456>"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Image*\n`sha256:9b2c4e6a8d0f`"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Requested by*\nalice"
+            },
+            {
+              "type": "mrkdwn",
+              "text": "*Duration*\n1m35s"
+            }
+          ]
+        },
+        {
+          "type": "context",
+          "elements": [
+            {
+              "type": "mrkdwn",
+              "text": "<https://doorstep.example.com/deployments/42|View deployment>"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

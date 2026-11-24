@@ -37,6 +37,14 @@ func TestLabels(t *testing.T) {
 		{"gate unknown", GateKind("my-custom-gate").label(), "unknown"},
 		{"gate empty", GateKind("").label(), "unknown"},
 		{"result unknown", GateResult("maybe").label(), "unknown"},
+		{"notification slack", NotificationSlack.label(), "slack"},
+		{"notification webhook", NotificationWebhook.label(), "webhook"},
+		{"notification github", NotificationGitHub.label(), "github"},
+		{"notification type unknown", NotificationType("ntfy").label(), "unknown"},
+		{"notification sent", NotificationSent.label(), "sent"},
+		{"notification failed", NotificationFailed.label(), "failed"},
+		{"notification dropped", NotificationDropped.label(), "dropped"},
+		{"notification result unknown", NotificationResult("lost").label(), "unknown"},
 	}
 
 	for _, tt := range tests {

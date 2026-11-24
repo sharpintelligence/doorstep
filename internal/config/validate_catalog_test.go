@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -800,6 +801,35 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: nil,
 		},
 		{
+			name:   "events for a slack target",
+			mutate: func(c *Catalog) { c.Notifications[0].Events = []string{"deploy.failed", "deploy.rolled_back"} },
+		},
+		{
+			name:   "every event for a webhook target",
+			mutate: func(c *Catalog) { c.Notifications[1].Events = NotificationEvents() },
+		},
+		{
+			name:    "events empty",
+			mutate:  func(c *Catalog) { c.Notifications[0].Events = []string{} },
+			wantErr: []string{"notifications[0] (ops): events: must not be empty; leave it out for the default events"},
+		},
+		{
+			name:    "events unknown",
+			mutate:  func(c *Catalog) { c.Notifications[1].Events = []string{"deploy.failed", "deploy_failed"} },
+			wantErr: []string{`notifications[1] (hook): events[1]: unknown event "deploy_failed" (want one of deploy.queued,`},
+		},
+		{
+			name: "events duplicate",
+			mutate: func(c *Catalog) {
+				c.Notifications[1].Events = []string{"lock.changed", "deploy.failed", "lock.changed"}
+			},
+			wantErr: []string{`notifications[1] (hook): events[2]: duplicate event "lock.changed"`},
+		},
+		{
+			name:   "deployments disabled",
+			mutate: func(c *Catalog) { c.Apps[0].Source.Deployments = new(false) },
+		},
+		{
 			name: "every error is reported in file order",
 			mutate: func(c *Catalog) {
 				c.Notifications[0].Type = "email"
@@ -1035,6 +1065,63 @@ func TestNotificationEndpoints(t *testing.T) {
 			refs := Catalog{Notifications: []Notification{tt.n}}.SecretRefs()
 			if len(refs) != tt.secretRefs {
 				t.Errorf("SecretRefs() = %+v, want %d refs", refs, tt.secretRefs)
+			}
+		})
+	}
+}
+
+func TestNotificationEventNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		events []string
+		want   []string
+	}{
+		{name: "omitted uses defaults", events: nil, want: DefaultNotificationEvents()},
+		{name: "explicit list", events: []string{"deploy.failed"}, want: []string{"deploy.failed"}},
+		{name: "empty list stays empty", events: []string{}, want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := Notification{Events: tt.events}
+			got := n.EventNames()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("EventNames() = %v, want %v", got, tt.want)
+			}
+			if len(got) > 0 {
+				got[0] = "changed"
+				if len(tt.events) > 0 && tt.events[0] == "changed" {
+					t.Error("EventNames() shares memory with the configuration")
+				}
+			}
+		})
+	}
+	for _, event := range DefaultNotificationEvents() {
+		if !slices.Contains(NotificationEvents(), event) {
+			t.Errorf("default event %q is not a known event", event)
+		}
+	}
+}
+
+func TestSourceDeploymentsEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "omitted", in: nil, want: true},
+		{name: "true", in: new(true), want: true},
+		{name: "false", in: new(false), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := (Source{Deployments: tt.in}).DeploymentsEnabled(); got != tt.want {
+				t.Errorf("DeploymentsEnabled() = %v, want %v", got, tt.want)
 			}
 		})
 	}

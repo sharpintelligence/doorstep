@@ -38,6 +38,21 @@ func ParseBaseURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+func WebBaseURL(api *url.URL) *url.URL {
+	host := strings.ToLower(api.Hostname())
+	switch {
+	case host == "api.github.com":
+		return &url.URL{Scheme: "https", Host: "github.com"}
+	case strings.HasPrefix(host, "api.") && strings.HasSuffix(host, ".ghe.com"):
+		return &url.URL{Scheme: api.Scheme, Host: api.Host[len("api."):]}
+	}
+	return &url.URL{
+		Scheme: api.Scheme,
+		Host:   api.Host,
+		Path:   strings.TrimSuffix(strings.TrimRight(api.Path, "/"), "/api/v3"),
+	}
+}
+
 func isLoopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

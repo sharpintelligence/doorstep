@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment, rollback and gate series appear once the engine records into them. Until then `doorstep_build_info`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event.
+Deployment, rollback and gate series appear once the engine records into them. Until then `doorstep_build_info`, `doorstep_notifications_total`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total` series is created at zero on start.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -46,6 +46,7 @@ Deployment, rollback and gate series appear once the engine records into them. U
 | `doorstep_deployment_duration_seconds` | histogram | `app`, `outcome` | Time from deployment start to a final outcome. Its `_count` is the number of finished deployments per outcome. |
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
 | `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time from a gate starting to wait to its verdict, or the duration of a call that failed (see [Labels](#labels)). Its `_count` is the number of verdicts and evaluation errors. |
+| `doorstep_notifications_total` | counter | `type`, `result` | Notification deliveries. `sent` after the target accepted it (possibly after retries), `failed` when every attempt failed or the failure was permanent, `dropped` when it was never attempted because the target's queue was full or doorstep was shutting down. See [notifications.md](notifications.md#delivery). |
 | `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time: queue entries whose deployment is `queued` and not leased, across all apps. In-flight deployments are not counted ([queue.md](queue.md#observability)). The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
 | `doorstep_queue_depth_errors_total` | counter | none | Scrapes where the queue depth could not be read. The first failure of a streak is logged at `warn` and the recovery at `info`; further failures are only counted. |
 | `doorstep_build_info` | gauge | `version`, `commit`, `go_version` | Always 1; identifies the running build. |
@@ -63,7 +64,8 @@ The other labels are fixed sets. Any other value is recorded as `unknown`.
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
 | `gate` | `ci`, `lock`, `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
-| `result` | `passed`, `failed`, `error` (the gate could not be evaluated), `unknown` |
+| `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown` |
+| `type` | `slack`, `webhook`, `github` (deployment statuses), `unknown` |
 
 ### Histogram buckets
 
@@ -103,6 +105,14 @@ p95 gate latency per gate kind:
 ```promql
 histogram_quantile(0.95, sum by (gate, le) (rate(doorstep_gate_evaluation_duration_seconds_bucket[1h])))
 ```
+
+Notifications that are not getting through (failed or dropped in the last 30 minutes, by target type):
+
+```promql
+sum by (type) (increase(doorstep_notifications_total{result=~"failed|dropped"}[30m])) > 0
+```
+
+A `github` failure usually means the App lacks the *Deployments* permission on a repository; the logs name it.
 
 Queue alerts:
 

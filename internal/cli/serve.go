@@ -63,6 +63,8 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 		"time to keep serving while reporting not ready before draining on shutdown (env "+config.EnvShutdownDelay+")")
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
 		"time allowed for in-flight requests on shutdown (env "+config.EnvShutdownTimeout+")")
+	flags.StringVar(&overrides.Server.PublicURL, flagPublicURL, defaults.Server.PublicURL,
+		"external base URL of doorstep, used for links in notifications and GitHub deployment statuses; links are left out when empty (env "+config.EnvPublicURL+")")
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
 	addRegistryCredentialsFlag(flags, &overrides.Registry.CredentialsFile)

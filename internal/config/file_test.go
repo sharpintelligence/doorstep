@@ -15,6 +15,7 @@ server:
   metrics_listen_addr: 127.0.0.1:9001
   shutdown_delay: 0s
   shutdown_timeout: 1m
+  public_url: https://doorstep.example.com
 log:
   level: debug
   format: text
@@ -36,12 +37,14 @@ notifications:
     type: webhook
     url: https://hooks.example.com/doorstep
     secret_file: /etc/doorstep/secrets/hook-secret
+    events: [deploy.failed, deploy.rolled_back]
 apps:
   - name: blog
     source:
       repo: example-user/blog
       branch: trunk
       required_checks: [test, lint]
+      deployments: false
     image:
       repository: ghcr.io/example-user/blog
     gitops:
@@ -88,6 +91,7 @@ func TestParse(t *testing.T) {
 			MetricsListenAddr: strPtr("127.0.0.1:9001"),
 			ShutdownDelay:     durPtr(0),
 			ShutdownTimeout:   durPtr(time.Minute),
+			PublicURL:         strPtr("https://doorstep.example.com"),
 		},
 		Log:      FileLog{Level: strPtr("debug"), Format: strPtr("text")},
 		Database: FileDatabase{URLFile: strPtr("/etc/doorstep/secrets/database-url")},
@@ -100,11 +104,14 @@ func TestParse(t *testing.T) {
 		Locks:    FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
-			{Name: "hook", Type: NotifyWebhook, URL: "https://hooks.example.com/doorstep", SecretFile: "/etc/doorstep/secrets/hook-secret"},
+			{
+				Name: "hook", Type: NotifyWebhook, URL: "https://hooks.example.com/doorstep", SecretFile: "/etc/doorstep/secrets/hook-secret",
+				Events: []string{"deploy.failed", "deploy.rolled_back"},
+			},
 		},
 		Apps: []App{{
 			Name:   "blog",
-			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}},
+			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}, Deployments: new(false)},
 			Image:  Image{Repository: "ghcr.io/example-user/blog"},
 			GitOps: GitOps{Repo: "example-org/homelab", Branch: "deploy", Path: "apps/blog/"},
 			Pin:    Pin{YAML: &YAMLPin{File: "values.yaml", Path: "image.digest"}},
@@ -304,6 +311,11 @@ func TestFileApply(t *testing.T) {
 			name: "empty metrics listen address is applied",
 			file: File{Server: FileServer{MetricsListenAddr: strPtr("")}},
 			want: func(c *Config) { c.Server.MetricsListenAddr = "" },
+		},
+		{
+			name: "public url",
+			file: File{Server: FileServer{PublicURL: strPtr("https://doorstep.example.com")}},
+			want: func(c *Config) { c.Server.PublicURL = "https://doorstep.example.com" },
 		},
 		{
 			name: "database URL file replaces an inline URL",
@@ -517,6 +529,11 @@ func TestFileCatalogDefaults(t *testing.T) {
 			want:   func(a *App) { a.Gates.Before = []Gate{{Type: "metric", Name: "metric"}} },
 		},
 		{
+			name:   "deployments switch kept",
+			mutate: func(a *App) { a.Source.Deployments = new(false) },
+			want:   func(a *App) { a.Source.Deployments = new(false) },
+		},
+		{
 			name:   "notify kept",
 			mutate: func(a *App) { a.Notify = []string{"ops"} },
 			want:   func(a *App) { a.Notify = []string{"ops"} },
@@ -551,9 +568,10 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Gates.Before = []Gate{{Type: GateChecks, Timeout: durPtr(time.Hour)}}
 	app.Gates.After = []Gate{{Type: GateHealth}}
 	app.Notify = []string{"ops"}
+	app.Source.Deployments = new(true)
 	file := File{
 		Apps:          []App{app},
-		Notifications: []Notification{{Name: "ops", Type: NotifySlack, WebhookURLEnv: "X"}},
+		Notifications: []Notification{{Name: "ops", Type: NotifySlack, WebhookURLEnv: "X", Events: []string{"deploy.failed"}}},
 	}
 
 	catalog := file.Catalog()
@@ -563,10 +581,13 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	*catalog.Apps[0].Gates.Before[0].Timeout = 0
 	catalog.Apps[0].Notify[0] = "changed"
 	catalog.Notifications[0].Name = "changed"
+	catalog.Notifications[0].Events[0] = "changed"
+	*catalog.Apps[0].Source.Deployments = false
 
 	original := file.Apps[0]
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
-		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" {
+		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
+		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments {
 		t.Errorf("Catalog() shares memory with the file: %+v", file)
 	}
 }
@@ -580,5 +601,33 @@ func TestFileCatalogEmpty(t *testing.T) {
 	}
 	if err := got.Validate(); err != nil {
 		t.Errorf("empty catalog Validate() = %v", err)
+	}
+}
+
+func TestParseEmptyEventsIsRejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{name: "omitted", yaml: "notifications:\n  - {name: ops, type: slack, webhook_url_env: X}\n"},
+		{name: "empty list", yaml: "notifications:\n  - {name: ops, type: slack, webhook_url_env: X, events: []}\n", wantErr: true},
+		{name: "null", yaml: "notifications:\n  - {name: ops, type: slack, webhook_url_env: X, events: null}\n"},
+		{name: "listed", yaml: "notifications:\n  - {name: ops, type: slack, webhook_url_env: X, events: [deploy.failed]}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, err := Parse(strings.NewReader(tt.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = f.Catalog().Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

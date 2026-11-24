@@ -92,10 +92,47 @@ func (k GateKind) label() string {
 	}
 }
 
+type NotificationType string
+
+const (
+	NotificationSlack   NotificationType = "slack"
+	NotificationWebhook NotificationType = "webhook"
+	NotificationGitHub  NotificationType = "github"
+)
+
+func (t NotificationType) label() string {
+	switch t {
+	case NotificationSlack, NotificationWebhook, NotificationGitHub:
+		return string(t)
+	default:
+		return unknownLabel
+	}
+}
+
+type NotificationResult string
+
+const (
+	NotificationSent    NotificationResult = "sent"
+	NotificationFailed  NotificationResult = "failed"
+	NotificationDropped NotificationResult = "dropped"
+)
+
+func (r NotificationResult) label() string {
+	switch r {
+	case NotificationSent, NotificationFailed, NotificationDropped:
+		return string(r)
+	default:
+		return unknownLabel
+	}
+}
+
 var (
 	allOutcomes = []Outcome{OutcomeSucceeded, OutcomeFailed, OutcomeRolledBack, OutcomeRollbackFailed, OutcomeCancelled, OutcomeSuperseded}
 	allReasons  = []RollbackReason{RollbackReasonGateFailed, RollbackReasonSyncFailed, RollbackReasonManual}
 	allPhases   = []Phase{PhaseDeploy, PhaseRollback}
 	allResults  = []GateResult{GateResultPassed, GateResultFailed, GateResultError}
 	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual}
+
+	allNotificationTypes   = []NotificationType{NotificationSlack, NotificationWebhook, NotificationGitHub}
+	allNotificationResults = []NotificationResult{NotificationSent, NotificationFailed, NotificationDropped}
 )

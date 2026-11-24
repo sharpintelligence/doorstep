@@ -18,10 +18,11 @@ type Recorder struct {
 	deploymentDuration *prometheus.HistogramVec
 	rollbacks          *prometheus.CounterVec
 	gateDuration       *prometheus.HistogramVec
+	notifications      *prometheus.CounterVec
 }
 
 func newRecorder() *Recorder {
-	return &Recorder{
+	r := &Recorder{
 		deploymentsStarted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "deployments_started_total",
@@ -44,11 +45,22 @@ func newRecorder() *Recorder {
 			Help:      "Time spent evaluating a gate, by application, gate kind, phase and result.",
 			Buckets:   gateDurationBuckets,
 		}, []string{"app", "gate", "phase", "result"}),
+		notifications: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "notifications_total",
+			Help:      "Notification deliveries, by target type and result.",
+		}, []string{"type", "result"}),
 	}
+	for _, t := range allNotificationTypes {
+		for _, result := range allNotificationResults {
+			r.notifications.WithLabelValues(t.label(), result.label())
+		}
+	}
+	return r
 }
 
 func (r *Recorder) collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration}
+	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications}
 }
 
 func (r *Recorder) DeploymentStarted(app string) {
@@ -65,6 +77,10 @@ func (r *Recorder) Rollback(app string, reason RollbackReason) {
 
 func (r *Recorder) GateEvaluated(app string, gate GateKind, phase Phase, result GateResult, duration time.Duration) {
 	r.gateDuration.WithLabelValues(app, gate.label(), phase.label(), result.label()).Observe(duration.Seconds())
+}
+
+func (r *Recorder) NotificationDelivered(t NotificationType, result NotificationResult) {
+	r.notifications.WithLabelValues(t.label(), result.label()).Inc()
 }
 
 func (r *Recorder) PrimeApp(app string) {

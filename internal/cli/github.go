@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/github"
 )
@@ -30,7 +29,7 @@ func newGitHubApp(cfg config.GitHub, readFile func(string) ([]byte, error), logg
 		AppID:      cfg.AppID,
 		PrivateKey: key,
 		BaseURL:    cfg.APIURL,
-		UserAgent:  "doorstep/" + buildinfo.Read().Version,
+		UserAgent:  userAgent(),
 		Logger:     logger,
 	})
 }

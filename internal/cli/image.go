@@ -6,7 +6,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/registry"
 )
@@ -35,7 +34,7 @@ func newImageResolveCommand(lookupEnv LookupEnv) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := registry.Options{UserAgent: "doorstep/" + buildinfo.Read().Version}
+			opts := registry.Options{UserAgent: userAgent()}
 			if path != "" {
 				creds, err := registry.LoadDockerConfigFile(path)
 				if err != nil {

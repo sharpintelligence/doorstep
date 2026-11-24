@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ const (
 	EnvMetricsListenAddr = "DOORSTEP_METRICS_LISTEN_ADDR"
 	EnvShutdownTimeout   = "DOORSTEP_SHUTDOWN_TIMEOUT"
 	EnvShutdownDelay     = "DOORSTEP_SHUTDOWN_DELAY"
+	EnvPublicURL         = "DOORSTEP_PUBLIC_URL"
 	EnvLogLevel          = "DOORSTEP_LOG_LEVEL"
 	EnvLogFormat         = "DOORSTEP_LOG_FORMAT"
 	EnvDatabaseURL       = "DOORSTEP_DATABASE_URL"
@@ -44,6 +46,7 @@ type Server struct {
 	MetricsListenAddr string
 	ShutdownDelay     time.Duration
 	ShutdownTimeout   time.Duration
+	PublicURL         string
 }
 
 type Log struct {
@@ -89,6 +92,9 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	}
 	if v, ok := lookup(EnvMetricsListenAddr); ok {
 		cfg.Server.MetricsListenAddr = v
+	}
+	if v, ok := lookup(EnvPublicURL); ok {
+		cfg.Server.PublicURL = v
 	}
 	errs = append(errs,
 		lookupDuration(lookup, EnvShutdownDelay, &cfg.Server.ShutdownDelay),
@@ -153,6 +159,11 @@ func (c Config) ValidateSettings() error {
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("shutdown timeout: must be positive, got %s", c.Server.ShutdownTimeout))
 	}
+	if c.Server.PublicURL != "" {
+		if err := validatePublicURL(c.Server.PublicURL); err != nil {
+			errs = append(errs, fmt.Errorf("public url: %w", err))
+		}
+	}
 	errs = append(errs, c.Log.Validate(), c.Locks.Validate())
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
@@ -202,6 +213,27 @@ func (d Database) ConnString(readFile func(string) ([]byte, error)) (string, err
 		return "", fmt.Errorf("database URL file %s is empty", d.URLFile)
 	}
 	return connString, nil
+}
+
+func (s Server) PublicBaseURL() string {
+	return strings.TrimRight(s.PublicURL, "/")
+}
+
+func validatePublicURL(raw string) error {
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q is not a valid URL", raw)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fmt.Errorf("%q must use http or https", raw)
+	case u.Host == "" || u.Opaque != "":
+		return fmt.Errorf("%q must be an absolute URL with a host", raw)
+	case u.User != nil:
+		return fmt.Errorf("%q must not include user information", raw)
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
+		return fmt.Errorf("%q must not include a query string or fragment", raw)
+	}
+	return nil
 }
 
 func validateListenAddr(addr string) error {

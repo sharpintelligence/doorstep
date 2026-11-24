@@ -99,6 +99,11 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Database = Database{URL: testDatabaseURL, URLFile: "/run/secrets/db"} },
 		},
 		{
+			name: "public url",
+			env:  map[string]string{EnvPublicURL: "https://doorstep.example.com"},
+			want: func(c *Config) { c.Server.PublicURL = "https://doorstep.example.com" },
+		},
+		{
 			name: "registry credentials file",
 			env:  map[string]string{EnvRegistryCredentialsFile: "/etc/doorstep/registry/.dockerconfigjson"},
 			want: func(c *Config) { c.Registry.CredentialsFile = "/etc/doorstep/registry/.dockerconfigjson" },
@@ -231,6 +236,43 @@ func TestValidate(t *testing.T) {
 			mutate: func(c *Config) { c.Server.MetricsListenAddr = "" },
 		},
 		{name: "text format", mutate: func(c *Config) { c.Log.Format = "text" }},
+		{name: "public url", mutate: func(c *Config) { c.Server.PublicURL = "https://doorstep.example.com" }},
+		{name: "public url with path and trailing slash", mutate: func(c *Config) { c.Server.PublicURL = "http://homelab.lan:8080/doorstep/" }},
+		{
+			name:    "public url relative",
+			mutate:  func(c *Config) { c.Server.PublicURL = "doorstep.example.com" },
+			wantErr: []string{"public url", "must use http or https"},
+		},
+		{
+			name:    "public url without host",
+			mutate:  func(c *Config) { c.Server.PublicURL = "https:///deployments" },
+			wantErr: []string{"public url", "absolute URL with a host"},
+		},
+		{
+			name:    "public url with credentials",
+			mutate:  func(c *Config) { c.Server.PublicURL = "https://user:pw@doorstep.example.com" },
+			wantErr: []string{"public url", "user information"},
+		},
+		{
+			name:    "public url with query",
+			mutate:  func(c *Config) { c.Server.PublicURL = "https://doorstep.example.com/?token=x" },
+			wantErr: []string{"public url", "query string or fragment"},
+		},
+		{
+			name:    "public url with fragment",
+			mutate:  func(c *Config) { c.Server.PublicURL = "https://doorstep.example.com/#top" },
+			wantErr: []string{"public url", "query string or fragment"},
+		},
+		{
+			name:    "public url unparseable",
+			mutate:  func(c *Config) { c.Server.PublicURL = "http://[::1" },
+			wantErr: []string{"public url", "not a valid URL"},
+		},
+		{
+			name:    "public url with another scheme",
+			mutate:  func(c *Config) { c.Server.PublicURL = "ftp://doorstep.example.com" },
+			wantErr: []string{"public url", "must use http or https"},
+		},
 		{
 			name:    "missing port",
 			mutate:  func(c *Config) { c.Server.ListenAddr = "localhost" },
@@ -459,5 +501,21 @@ func TestFromEnvReplacesSecretSources(t *testing.T) {
 				t.Errorf("FromEnv() = %+v, want %+v", got, want)
 			}
 		})
+	}
+}
+
+func TestServerPublicBaseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ in, want string }{
+		{in: "", want: ""},
+		{in: "https://doorstep.example.com", want: "https://doorstep.example.com"},
+		{in: "https://doorstep.example.com/", want: "https://doorstep.example.com"},
+		{in: "https://example.com/doorstep//", want: "https://example.com/doorstep"},
+	}
+	for _, tt := range tests {
+		if got := (Server{PublicURL: tt.in}).PublicBaseURL(); got != tt.want {
+			t.Errorf("PublicBaseURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
