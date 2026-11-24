@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -277,6 +278,30 @@ func TestExternalGateWithEvaluator(t *testing.T) {
 			},
 			wantStatus: core.GateFailed, wantMessage: "timed out after 30m0s",
 			wantObserve: []string{"e2e=pending", "e2e=failed"},
+		},
+		{
+			name: "a report racing the timeout wins",
+			steps: func(t *testing.T, h *harness, reports *fakeReports, d core.Deployment) core.GateOutcome {
+				t.Helper()
+				mustEvaluate(t, h, d, core.GatePhaseAfter)
+				h.clock.Advance(time.Hour)
+				h.store.mu.Lock()
+				h.store.refuse = func(r core.GateResult) error {
+					if r.Status != core.GateFailed {
+						return nil
+					}
+					reports.set(externalReport(core.GatePassed, "green just in time"))
+					return fmt.Errorf("record: %w", core.ErrGateReported)
+				}
+				h.store.mu.Unlock()
+				out := mustEvaluate(t, h, d, core.GatePhaseAfter)
+				if out.Status != core.GatePending {
+					t.Errorf("outcome while the report races = %s, want pending", out.Status)
+				}
+				return mustEvaluate(t, h, d, core.GatePhaseAfter)
+			},
+			wantStatus: core.GatePassed, wantMessage: "green just in time",
+			wantObserve: []string{"e2e=pending", "e2e=passed"},
 		},
 		{
 			name: "reevaluate keeps the reported verdict",

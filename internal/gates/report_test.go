@@ -70,11 +70,13 @@ func reportCatalog() config.Catalog {
 				Before: []config.Gate{
 					{Type: config.GateChecks, Name: "checks"},
 					{Type: config.GateExternal, Name: "approval"},
+					{Type: config.GateExternal, Name: "signoff", Reporters: []string{"user:github:42"}},
 				},
 				After: []config.Gate{
 					{Type: config.GateHealth, Name: "health"},
 					{Type: config.GateExternal, Name: "e2e", Timeout: &timeout},
 					{Type: config.GateExternal, Name: "smoke", ApplyToRollbacks: true},
+					{Type: config.GateExternal, Name: "load", Reporters: []string{"user:github:42", "token:ci"}},
 				},
 			},
 		},
@@ -180,6 +182,23 @@ func TestReporterReport(t *testing.T) {
 			wantSaved: true,
 		},
 		{
+			name:      "listed reporter",
+			req:       gates.ReportRequest{DeploymentID: 1, Gate: "load", Status: core.GatePassed},
+			wantID:    1,
+			wantPhase: core.GatePhaseAfter,
+			wantSaved: true,
+		},
+		{
+			name:    "reporter not listed",
+			req:     gates.ReportRequest{DeploymentID: 5, Gate: "signoff", Status: core.GatePassed},
+			wantErr: gates.ErrReporterNotAllowed,
+		},
+		{
+			name:    "admin not listed",
+			req:     gates.ReportRequest{DeploymentID: 5, Gate: "signoff", Status: core.GatePassed, Role: core.RoleAdmin},
+			wantErr: gates.ErrReporterNotAllowed,
+		},
+		{
 			name:    "unknown deployment",
 			req:     gates.ReportRequest{DeploymentID: 99, Gate: "e2e", Status: core.GatePassed},
 			wantErr: core.ErrNotFound,
@@ -262,7 +281,10 @@ func TestReporterReport(t *testing.T) {
 				t.Fatalf("NewReporter: %v", err)
 			}
 			req := tt.req
-			req.Actor, req.Role = ciCaller, core.RoleReporter
+			req.Actor = ciCaller
+			if req.Role == "" {
+				req.Role = core.RoleReporter
+			}
 			res, err := reporter.Report(t.Context(), req)
 
 			if tt.wantLookup != "" && (len(st.lookups) != 1 || st.lookups[0] != tt.wantLookup) {

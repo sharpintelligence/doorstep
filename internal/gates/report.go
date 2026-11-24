@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
@@ -16,6 +17,7 @@ var (
 	ErrDeploymentFinished = errors.New("deployment has finished")
 	ErrGateNotApplicable  = errors.New("gate does not apply to rollbacks")
 	ErrGateNotReady       = errors.New("gate is not being evaluated yet")
+	ErrReporterNotAllowed = errors.New("caller may not report this gate")
 )
 
 type ReportStore interface {
@@ -72,6 +74,9 @@ func (r *Reporter) Report(ctx context.Context, req ReportRequest) (ReportResult,
 	gate, phase, err := r.externalGate(d, req.Gate)
 	if err != nil {
 		return ReportResult{}, err
+	}
+	if gate.Reporters != nil && !slices.Contains(gate.Reporters, req.Actor.String()) {
+		return ReportResult{}, fmt.Errorf("%w: %s is not in the reporters of gate %s of app %s", ErrReporterNotAllowed, req.Actor, gate.Name, d.Target.App)
 	}
 	switch {
 	case d.State.Terminal():

@@ -106,6 +106,8 @@ func (a *api) gateReportError(w http.ResponseWriter, r *http.Request, req gates.
 		writeError(w, http.StatusNotFound, codeNotFound, "unknown gate "+req.Gate)
 	case errors.Is(err, core.ErrInvalidGateReport):
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+	case errors.Is(err, gates.ErrReporterNotAllowed):
+		writeError(w, http.StatusForbidden, codeForbidden, "gate "+req.Gate+" accepts results only from its configured reporters")
 	case errors.Is(err, gates.ErrGateNotExternal):
 		writeError(w, http.StatusConflict, codeGateNotExternal, err.Error())
 	case errors.Is(err, gates.ErrDeploymentFinished):

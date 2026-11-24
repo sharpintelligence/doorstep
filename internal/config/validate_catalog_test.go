@@ -756,11 +756,58 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"gates.after[1].timezone: not allowed for type soak"},
 		},
 		{
-			name: "external gate before deploy without timeout",
+			name: "external gate before deploy with a long timeout",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval", Timeout: durPtr(7 * 24 * time.Hour)})
+			},
+			wantErr: nil,
+		},
+		{
+			name: "external gate without timeout",
 			mutate: func(c *Catalog) {
 				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval"})
 			},
+			wantErr: []string{"gates.before[1].timeout: must be positive"},
+		},
+		{
+			name: "external gate reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{
+					Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour),
+					Reporters: []string{"token:cab", "user:github:12345", "user:oidc:https://idp.example.com:alice"},
+				})
+			},
 			wantErr: nil,
+		},
+		{
+			name: "external gate invalid reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{
+					Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour),
+					Reporters: []string{"cab", "token:", "system:x", "token: cab", "token:cab", "token:cab"},
+				})
+			},
+			wantErr: []string{
+				`gates.before[1].reporters[0]: "cab" must be token:<name> or user:<provider>:<subject>`,
+				"gates.before[1].reporters[1]: actor id must not be empty",
+				`gates.before[1].reporters[2]: "system:x" must be token:<name> or user:<provider>:<subject>`,
+				`gates.before[1].reporters[3]: actor id " cab" must not contain control characters or surrounding whitespace`,
+				`gates.before[1].reporters[5]: duplicate reporter "token:cab"`,
+			},
+		},
+		{
+			name: "external gate empty reporters",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "approval", Timeout: durPtr(time.Hour), Reporters: []string{}})
+			},
+			wantErr: []string{"gates.before[1].reporters: must not be empty; leave it out to accept any reporter"},
+		},
+		{
+			name: "reporters on a built-in gate",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before[0].Reporters = []string{"token:ci"}
+			},
+			wantErr: []string{"gates.before[0].reporters: not allowed for type checks"},
 		},
 		{
 			name: "external gate after deploy with timeout and rollback opt-in",
@@ -780,7 +827,7 @@ func TestCatalogValidate(t *testing.T) {
 			name: "external gate rejects duration and windows",
 			mutate: func(c *Catalog) {
 				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{
-					Type: GateExternal, Name: "e2e", Duration: Duration(time.Minute), Timezone: "UTC",
+					Type: GateExternal, Name: "e2e", Timeout: durPtr(time.Hour), Duration: Duration(time.Minute), Timezone: "UTC",
 					Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}},
 				})
 			},
@@ -793,8 +840,8 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name: "external gates share the name space",
 			mutate: func(c *Catalog) {
-				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "review"})
-				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateExternal, Name: "review"})
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateExternal, Name: "review", Timeout: durPtr(time.Hour)})
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateExternal, Name: "review", Timeout: durPtr(time.Hour)})
 			},
 			wantErr: []string{"gates.after[1].name: duplicate of gates.before[1]"},
 		},

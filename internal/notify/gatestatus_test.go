@@ -40,7 +40,7 @@ func (f *statusFixture) mirror(t *testing.T, mutate ...func(*GateStatusOptions))
 	f.logs = logs
 	opts := GateStatusOptions{
 		Repos:    f.app,
-		Apps:     map[string]bool{"blog": true, "off": false},
+		Apps:     map[string]GateStatusApp{"blog": {}},
 		Links:    testLinks(),
 		Logger:   logger,
 		Observer: f.observer,
@@ -123,15 +123,16 @@ func TestGateStatusShape(t *testing.T) {
 		name       string
 		deployment *core.Deployment
 		result     core.GateResult
+		messages   bool
 		noLinks    bool
 		want       githubtest.Status
 	}{
 		{
 			name:       "pending",
 			deployment: baseDeployment(42, core.StateVerifying),
-			result:     gate("health", core.GatePhaseAfter, core.GatePending, "Application blog is Progressing"),
+			result:     gate("health", core.GatePhaseAfter, core.GatePending, "Application blog is Progressing on argocd.internal"),
 			want: githubtest.Status{
-				Context: "doorstep/blog/after/health", State: "pending", Description: "Application blog is Progressing",
+				Context: "doorstep/blog/after/health", State: "pending", Description: "Gate pending",
 				TargetURL: "https://doorstep.example.com/deployments/42",
 			},
 		},
@@ -140,25 +141,25 @@ func TestGateStatusShape(t *testing.T) {
 			deployment: baseDeployment(42, core.StateQueued),
 			result:     gate("checks", core.GatePhaseBefore, core.GatePassed, "all 3 checks passed"),
 			want: githubtest.Status{
-				Context: "doorstep/blog/before/checks", State: "success", Description: "all 3 checks passed",
+				Context: "doorstep/blog/before/checks", State: "success", Description: "Gate passed",
 				TargetURL: "https://doorstep.example.com/deployments/42",
 			},
 		},
 		{
 			name:       "skipped counts as success",
 			deployment: baseDeployment(42, core.StateQueued),
-			result:     gate("lock", core.GatePhaseBefore, core.GateSkipped, ""),
+			result:     gate("lock", core.GatePhaseBefore, core.GateSkipped, "skipped for rollback"),
 			want: githubtest.Status{
-				Context: "doorstep/blog/before/lock", State: "success", Description: "skipped",
+				Context: "doorstep/blog/before/lock", State: "success", Description: "Gate skipped",
 				TargetURL: "https://doorstep.example.com/deployments/42",
 			},
 		},
 		{
 			name:       "failed",
 			deployment: baseDeployment(42, core.StateVerifying),
-			result:     gate("e2e", core.GatePhaseAfter, core.GateFailed, "timed out after 30m0s"),
+			result:     gate("e2e", core.GatePhaseAfter, core.GateFailed, "e2e failed against staging.internal"),
 			want: githubtest.Status{
-				Context: "doorstep/blog/after/e2e", State: "failure", Description: "timed out after 30m0s",
+				Context: "doorstep/blog/after/e2e", State: "failure", Description: "Gate failed",
 				TargetURL: "https://doorstep.example.com/deployments/42",
 			},
 		},
@@ -171,14 +172,49 @@ func TestGateStatusShape(t *testing.T) {
 			}(),
 			result: gate("health", core.GatePhaseAfter, core.GatePassed, "Healthy"),
 			want: githubtest.Status{
+				Context: "doorstep/blog/after/health", State: "success", Description: "Rollback #43: Gate passed",
+				TargetURL: "https://doorstep.example.com/deployments/43",
+			},
+		},
+		{
+			name:       "message opted in",
+			deployment: baseDeployment(42, core.StateVerifying),
+			result:     gate("health", core.GatePhaseAfter, core.GatePending, "Application blog is Progressing"),
+			messages:   true,
+			want: githubtest.Status{
+				Context: "doorstep/blog/after/health", State: "pending", Description: "Application blog is Progressing",
+				TargetURL: "https://doorstep.example.com/deployments/42",
+			},
+		},
+		{
+			name: "message opted in on a rollback",
+			deployment: func() *core.Deployment {
+				d := rollbackDeployment(core.StateVerifying)
+				d.Commit.SHA = testSHA
+				return d
+			}(),
+			result:   gate("health", core.GatePhaseAfter, core.GatePassed, "Healthy"),
+			messages: true,
+			want: githubtest.Status{
 				Context: "doorstep/blog/after/health", State: "success", Description: "Rollback #43: Healthy",
 				TargetURL: "https://doorstep.example.com/deployments/43",
 			},
 		},
 		{
-			name:       "long message",
+			name:       "message opted in but empty",
+			deployment: baseDeployment(42, core.StateVerifying),
+			result:     gate("health", core.GatePhaseAfter, core.GateFailed, "  "),
+			messages:   true,
+			want: githubtest.Status{
+				Context: "doorstep/blog/after/health", State: "failure", Description: "Gate failed",
+				TargetURL: "https://doorstep.example.com/deployments/42",
+			},
+		},
+		{
+			name:       "long message opted in",
 			deployment: baseDeployment(42, core.StateVerifying),
 			result:     gate("health", core.GatePhaseAfter, core.GateFailed, long),
+			messages:   true,
 			want: githubtest.Status{
 				Context: "doorstep/blog/after/health", State: "failure", Description: strings.Repeat("ü", 139) + "…",
 				TargetURL: "https://doorstep.example.com/deployments/42",
@@ -189,7 +225,7 @@ func TestGateStatusShape(t *testing.T) {
 			deployment: baseDeployment(42, core.StateVerifying),
 			result:     gate("health", core.GatePhaseAfter, core.GatePending, "  "),
 			noLinks:    true,
-			want:       githubtest.Status{Context: "doorstep/blog/after/health", State: "pending", Description: "pending"},
+			want:       githubtest.Status{Context: "doorstep/blog/after/health", State: "pending", Description: "Gate pending"},
 		},
 	}
 	for _, tt := range tests {
@@ -197,6 +233,7 @@ func TestGateStatusShape(t *testing.T) {
 			t.Parallel()
 			f := newStatusFixture(t)
 			g := f.mirror(t, func(o *GateStatusOptions) {
+				o.Apps = map[string]GateStatusApp{"blog": {Messages: tt.messages}}
 				if tt.noLinks {
 					o.Links = Links{}
 				}
@@ -235,8 +272,7 @@ func TestGateStatusesIgnore(t *testing.T) {
 		name   string
 		mutate func(d *core.Deployment, r *core.GateResult)
 	}{
-		{name: "disabled app", mutate: func(d *core.Deployment, _ *core.GateResult) { d.Target.App = "off" }},
-		{name: "unknown app", mutate: func(d *core.Deployment, _ *core.GateResult) { d.Target.App = "other" }},
+		{name: "app not listed", mutate: func(d *core.Deployment, _ *core.GateResult) { d.Target.App = "other" }},
 		{name: "invalid commit", mutate: func(d *core.Deployment, _ *core.GateResult) { d.Commit.SHA = "abc" }},
 		{name: "invalid repository", mutate: func(d *core.Deployment, _ *core.GateResult) { d.Commit.Repository = "no-slash" }},
 		{name: "unknown status", mutate: func(_ *core.Deployment, r *core.GateResult) { r.Status = "running" }},
@@ -271,7 +307,7 @@ func TestGateStatusesCoalesceWhileGitHubIsSlow(t *testing.T) {
 	f := newStatusFixture(t)
 	h := newGatedHook("doorstep/blog/before/checks")
 	f.srv.OnCreateStatus(h.hook)
-	g := f.mirror(t)
+	g := f.mirror(t, func(o *GateStatusOptions) { o.Apps = map[string]GateStatusApp{"blog": {Messages: true}} })
 	d := *baseDeployment(42, core.StateVerifying)
 
 	record(t, g, d, gate("checks", core.GatePhaseBefore, core.GatePassed, "green"))

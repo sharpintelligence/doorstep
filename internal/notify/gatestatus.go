@@ -23,9 +23,13 @@ const (
 	gateStatusPermissionHint  = "grant the GitHub App 'Commit statuses: Read and write' on the repository, or set apps[].source.statuses: false; see docs/github-app.md"
 )
 
+type GateStatusApp struct {
+	Messages bool
+}
+
 type GateStatusOptions struct {
 	Repos      RepoClients
-	Apps       map[string]bool
+	Apps       map[string]GateStatusApp
 	Links      Links
 	Logger     *slog.Logger
 	Observer   Observer
@@ -36,7 +40,7 @@ type GateStatusOptions struct {
 
 type GateStatuses struct {
 	repos      RepoClients
-	apps       map[string]bool
+	apps       map[string]GateStatusApp
 	links      Links
 	logger     *slog.Logger
 	observer   Observer
@@ -77,7 +81,7 @@ func NewGateStatuses(opts GateStatusOptions) (*GateStatuses, error) {
 	}
 	g := &GateStatuses{
 		repos:      opts.Repos,
-		apps:       make(map[string]bool, len(opts.Apps)),
+		apps:       make(map[string]GateStatusApp, len(opts.Apps)),
 		links:      opts.Links,
 		logger:     opts.Logger,
 		observer:   opts.Observer,
@@ -86,8 +90,8 @@ func NewGateStatuses(opts GateStatusOptions) (*GateStatuses, error) {
 		done:       make(chan struct{}),
 		latest:     make(map[statusKey]gateStatus),
 	}
-	for app, enabled := range opts.Apps {
-		g.apps[app] = enabled
+	for app, settings := range opts.Apps {
+		g.apps[app] = settings
 	}
 	if g.logger == nil {
 		g.logger = slog.New(slog.DiscardHandler)
@@ -117,7 +121,8 @@ func (g *GateStatuses) GateRecorded(ctx context.Context, d core.Deployment, r co
 }
 
 func (g *GateStatuses) status(d core.Deployment, r core.GateResult) (gateStatus, bool) {
-	if !g.apps[d.Target.App] || d.Commit.Validate() != nil || !r.Phase.Valid() || strings.TrimSpace(r.Name) == "" {
+	app, enabled := g.apps[d.Target.App]
+	if !enabled || d.Commit.Validate() != nil || !r.Phase.Valid() || strings.TrimSpace(r.Name) == "" {
 		return gateStatus{}, false
 	}
 	owner, repo, ok := splitRepository(d.Commit.Repository)
@@ -138,7 +143,7 @@ func (g *GateStatuses) status(d core.Deployment, r core.GateResult) (gateStatus,
 		request: github.CommitStatusRequest{
 			State:       state,
 			Context:     GateStatusContext(d.Target.App, r.Phase, r.Name),
-			Description: gateStatusDescription(d, r),
+			Description: gateStatusDescription(d, r, app.Messages),
 			TargetURL:   g.links.deployment(&d),
 		},
 	}, true
@@ -285,10 +290,10 @@ func commitStatusState(status core.GateStatus) (github.CommitStatusState, bool) 
 	return "", false
 }
 
-func gateStatusDescription(d core.Deployment, r core.GateResult) string {
-	description := strings.TrimSpace(r.Message)
-	if description == "" {
-		description = string(r.Status)
+func gateStatusDescription(d core.Deployment, r core.GateResult, withMessage bool) string {
+	description := fixedGateDescription(r.Status)
+	if message := strings.TrimSpace(r.Message); withMessage && message != "" {
+		description = message
 	}
 	if d.Kind == core.KindRollback {
 		description = "Rollback " + deploymentRef(d.ID) + ": " + description
@@ -297,4 +302,18 @@ func gateStatusDescription(d core.Deployment, r core.GateResult) string {
 		return description
 	}
 	return string([]rune(description)[:maxStatusDescriptionRunes-1]) + "…"
+}
+
+func fixedGateDescription(status core.GateStatus) string {
+	switch status {
+	case core.GatePending:
+		return "Gate pending"
+	case core.GatePassed:
+		return "Gate passed"
+	case core.GateSkipped:
+		return "Gate skipped"
+	case core.GateFailed:
+		return "Gate failed"
+	}
+	return string(status)
 }

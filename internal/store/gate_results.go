@@ -111,6 +111,9 @@ func (s *Store) upsertGateResult(ctx context.Context, r core.GateResult, evidenc
 	if err := s.db.QueryRow(ctx, lockGateResultSQL, r.DeploymentID, r.Name).Scan(&previous); err != nil {
 		return core.GateResult{}, false, fmt.Errorf("lock: %w", err)
 	}
+	if err := s.checkReportAgrees(ctx, r); err != nil {
+		return core.GateResult{}, false, err
+	}
 	updated, err := scanGateResult(s.db.QueryRow(ctx, updateGateResultSQL, args...))
 	if err != nil {
 		return core.GateResult{}, false, fmt.Errorf("update: %w", err)

@@ -42,11 +42,14 @@ SELECT ` + gateReportColumns + `
 FROM gate_reports
 WHERE deployment_id = $1 AND gate = $2`
 
-const gateResultDecidedSQL = `
-SELECT EXISTS (
-    SELECT 1 FROM gate_results
-    WHERE deployment_id = $1 AND name = $2 AND status <> 'pending'
-)`
+const lockGateResultStatusSQL = `
+SELECT status FROM gate_results
+WHERE deployment_id = $1 AND name = $2
+FOR UPDATE`
+
+const selectGateReportStatusSQL = `
+SELECT status FROM gate_reports
+WHERE deployment_id = $1 AND gate = $2`
 
 const activeDeploymentForCommitSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE a.name = $1
@@ -138,12 +141,34 @@ func (s *Store) upsertGateReport(ctx context.Context, r core.GateReport, args []
 }
 
 func (s *Store) checkGateUndecided(ctx context.Context, r core.GateReport) error {
-	var decided bool
-	if err := s.db.QueryRow(ctx, gateResultDecidedSQL, r.DeploymentID, r.Gate).Scan(&decided); err != nil {
-		return fmt.Errorf("read gate result: %w", err)
+	var status core.GateStatus
+	err := s.db.QueryRow(ctx, lockGateResultStatusSQL, r.DeploymentID, r.Gate).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
 	}
-	if decided {
+	if err != nil {
+		return fmt.Errorf("lock gate result: %w", err)
+	}
+	if status.Terminal() {
 		return fmt.Errorf("%w: gate %s already has a final result", core.ErrGateDecided, r.Gate)
+	}
+	return nil
+}
+
+func (s *Store) checkReportAgrees(ctx context.Context, r core.GateResult) error {
+	if !r.Status.Terminal() {
+		return nil
+	}
+	var reported core.GateStatus
+	err := s.db.QueryRow(ctx, selectGateReportStatusSQL, r.DeploymentID, r.Name).Scan(&reported)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read gate report: %w", err)
+	}
+	if reported.Terminal() && reported != r.Status {
+		return fmt.Errorf("%w: gate %s was reported %s, not %s", core.ErrGateReported, r.Name, reported, r.Status)
 	}
 	return nil
 }

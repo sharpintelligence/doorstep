@@ -18,6 +18,7 @@ const (
 
 var (
 	ErrGateDecided       = errors.New("gate already decided")
+	ErrGateReported      = errors.New("gate has a reported verdict")
 	ErrInvalidGateReport = errors.New("invalid gate report")
 )
 

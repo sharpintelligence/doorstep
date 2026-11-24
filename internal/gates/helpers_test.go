@@ -46,6 +46,7 @@ type fakeStore struct {
 	records   []core.GateResult
 	recordErr error
 	listErr   error
+	refuse    func(core.GateResult) error
 }
 
 func newStore(clock *fakeClock) *fakeStore {
@@ -64,6 +65,11 @@ func (s *fakeStore) RecordGateResult(_ context.Context, r core.GateResult) (core
 	}
 	if !r.Phase.Valid() || !r.Status.Valid() || r.Name == "" || r.Type == "" {
 		return core.GateResult{}, false, fmt.Errorf("fake store: invalid result %+v", r)
+	}
+	if s.refuse != nil {
+		if err := s.refuse(r); err != nil {
+			return core.GateResult{}, false, err
+		}
 	}
 	if len(r.Evidence) == 0 {
 		r.Evidence = json.RawMessage(`{}`)

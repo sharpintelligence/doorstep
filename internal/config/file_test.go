@@ -56,6 +56,7 @@ apps:
       required_checks: [test, lint]
       deployments: false
       statuses: false
+      status_messages: true
     image:
       repository: ghcr.io/example-user/blog
     gitops:
@@ -82,6 +83,9 @@ apps:
           name: argo-health
         - type: soak
           duration: 15m
+        - type: external
+          name: e2e
+          reporters: [token:ci-e2e]
     notify: [ops, hook]
 `
 
@@ -127,7 +131,7 @@ func TestParse(t *testing.T) {
 		},
 		Apps: []App{{
 			Name:   "blog",
-			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}, Deployments: new(false), Statuses: new(false)},
+			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}, Deployments: new(false), Statuses: new(false), StatusMessages: true},
 			Image:  Image{Repository: "ghcr.io/example-user/blog"},
 			GitOps: GitOps{Repo: "example-org/homelab", Branch: "deploy", Path: "apps/blog/"},
 			Pin:    Pin{YAML: &YAMLPin{File: "values.yaml", Path: "image.digest"}},
@@ -138,6 +142,7 @@ func TestParse(t *testing.T) {
 				After: []Gate{
 					{Type: GateHealth, Name: "argo-health"},
 					{Type: GateSoak, Duration: Duration(15 * time.Minute)},
+					{Type: GateExternal, Name: "e2e", Reporters: []string{"token:ci-e2e"}},
 				},
 			},
 			Notify: []string{"ops", "hook"},
@@ -623,17 +628,19 @@ func TestFileCatalogDefaults(t *testing.T) {
 			},
 		},
 		{
-			name:   "external gate without timeout stays without one",
+			name:   "external gate timeout defaults to a day",
 			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateExternal}} },
-			want:   func(a *App) { a.Gates.After = []Gate{{Type: GateExternal, Name: "external"}} },
+			want: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateExternal, Name: "external", Timeout: durPtr(DefaultExternalGateTimeout)}}
+			},
 		},
 		{
 			name: "external gate timeout kept",
 			mutate: func(a *App) {
-				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true}}
+				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true, Reporters: []string{"token:cab"}}}
 			},
 			want: func(a *App) {
-				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true}}
+				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true, Reporters: []string{"token:cab"}}}
 			},
 		},
 		{

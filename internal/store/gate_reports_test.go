@@ -278,6 +278,88 @@ func TestSaveGateReportRejectsDecidedGateResult(t *testing.T) {
 	}
 }
 
+func externalResult(id core.DeploymentID, status core.GateStatus) core.GateResult {
+	r := gateResult(id, "e2e", status)
+	r.Type = "external"
+	return r
+}
+
+func TestRecordGateResultRespectsReportedVerdict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		report  core.GateStatus
+		record  core.GateStatus
+		wantErr error
+	}{
+		{name: "no report, timeout", record: core.GateFailed},
+		{name: "pending report, timeout", report: core.GatePending, record: core.GateFailed},
+		{name: "passed report, timeout", report: core.GatePassed, record: core.GateFailed, wantErr: core.ErrGateReported},
+		{name: "failed report, passed result", report: core.GateFailed, record: core.GatePassed, wantErr: core.ErrGateReported},
+		{name: "passed report, passed result", report: core.GatePassed, record: core.GatePassed},
+		{name: "passed report, pending result", report: core.GatePassed, record: core.GatePending},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			d := mustCreate(t, st, newDeployment("web"), 0)
+			mustRecord(t, st, externalResult(d.ID, core.GatePending))
+			if tt.report != "" {
+				mustSaveReport(t, st, d, gateReport(d.ID, tt.report))
+			}
+
+			_, _, err := st.RecordGateResult(t.Context(), externalResult(d.ID, tt.record))
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("RecordGateResult = %v, want %v", err, tt.wantErr)
+			}
+			results, err := st.ListGateResults(t.Context(), d.ID)
+			if err != nil {
+				t.Fatalf("ListGateResults: %v", err)
+			}
+			want := tt.record
+			if tt.wantErr != nil {
+				want = core.GatePending
+			}
+			if len(results) != 1 || results[0].Status != want {
+				t.Errorf("results = %+v, want one %s", results, want)
+			}
+		})
+	}
+}
+
+func TestReportAndTimeoutRaceHasOneWinner(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	const rounds = 20
+	for range rounds {
+		d := mustCreate(t, st, newDeployment("web"), 0)
+		mustRecord(t, st, externalResult(d.ID, core.GatePending))
+
+		var (
+			wg        sync.WaitGroup
+			reportErr error
+			recordErr error
+		)
+		wg.Go(func() {
+			_, _, reportErr = st.SaveGateReport(t.Context(), gateReport(d.ID, core.GatePassed), reportAudit(d, core.GatePassed))
+		})
+		wg.Go(func() {
+			_, _, recordErr = st.RecordGateResult(t.Context(), externalResult(d.ID, core.GateFailed))
+		})
+		wg.Wait()
+
+		switch {
+		case reportErr == nil && errors.Is(recordErr, core.ErrGateReported):
+		case recordErr == nil && errors.Is(reportErr, core.ErrGateDecided):
+		default:
+			t.Fatalf("deployment %d: report = %v, timeout = %v; want exactly one to win", d.ID, reportErr, recordErr)
+		}
+	}
+}
+
 func TestSaveGateReportTerminalRetryAfterGateDecided(t *testing.T) {
 	t.Parallel()
 

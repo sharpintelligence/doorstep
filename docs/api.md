@@ -181,7 +181,7 @@ The canonical form, for tools that know doorstep's deployment id (for example fr
 
 ### `POST /api/v1/apps/{app}/commits/{sha}/gates/{gate}`
 
-A convenience for CI jobs that know the repository and commit but not the deployment. `{sha}` must be 40 lowercase hex characters. It resolves to the newest unfinished deployment of `{app}` whose own commit is `{sha}`, then behaves exactly like the canonical form. When a queued batch deploys only its newest commit, only that commit matches; posting for an earlier commit of the batch answers `404`.
+A convenience for CI jobs that know the repository and commit but not the deployment. `{sha}` must be 40 lowercase hex characters. It resolves to the newest unfinished deployment of `{app}` whose own commit is `{sha}`, then behaves exactly like the canonical form. The lookup is in the app's `default` environment, the only environment doorstep deploys to today; it takes no `environment` parameter until apps can have more than one. When a queued batch deploys only its newest commit, only that commit matches; posting for an earlier commit of the batch answers `404`.
 
 ### Request
 
@@ -225,12 +225,15 @@ The body must be `application/json`, at most 64 KiB, and must not contain unknow
 
 The verdict is not applied synchronously: the gate reads the report on the engine's next evaluation of the phase, which then records the gate result, emits the event and updates the commit status.
 
+A `200` for a `passed` or `failed` report is a guarantee: the stored report and the gate result are serialised on the gate result's row, so either the report is accepted and the gate ends with that verdict, or the gate was decided first (for example by its timeout) and the report answers `409 gate_decided`. A timeout that races an accepted final report is discarded and the next evaluation records the reported verdict. A `200` for a `pending` report promises nothing about the verdict: the gate can still time out.
+
 ### Rules
 
 - `pending` reports are progress updates and may be replaced by any later report.
 - A `passed` or `failed` report is final. Posting the same verdict again is an idempotent `200` that changes nothing (so CI retries are safe); a different verdict answers `409 gate_decided`.
 - When the gate already has a final recorded result (for example it timed out), any report answers `409 gate_decided`.
 - The gate must be configured for the deployment's app (`404` otherwise) with type `external` (`409 gate_not_external` otherwise).
+- When the gate lists `reporters` ([configuration.md](configuration.md#gates)), the caller's actor (`token:<name>` or `user:<provider>:<subject>`, as in `reported_by`) must be one of them, whatever its role (`403 forbidden` otherwise). Without `reporters`, any caller with the `reporter` role or higher may report any external gate of any app.
 - The deployment must be unfinished (`409 deployment_finished`).
 - Rollbacks accept reports only when the gate sets `apply_to_rollbacks: true` (`409 gate_not_applicable`).
 - A gate in `gates.after` accepts reports only while the deployment is `verifying`, so a verdict about the old version cannot land before Argo CD synced the new one (`409 gate_not_ready` with `Retry-After: 5`). A gate in `gates.before` accepts reports any time before the deployment finishes.

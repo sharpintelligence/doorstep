@@ -95,6 +95,7 @@ type Source struct {
 	RequiredChecks []string `yaml:"required_checks"`
 	Deployments    *bool    `yaml:"deployments"`
 	Statuses       *bool    `yaml:"statuses"`
+	StatusMessages bool     `yaml:"status_messages"`
 }
 
 func (s Source) DeploymentsEnabled() bool {
@@ -206,7 +207,10 @@ const (
 	GateExternal   GateType = "external"
 )
 
-const DefaultTimeoutAllowance = 10 * time.Minute
+const (
+	DefaultTimeoutAllowance    = 10 * time.Minute
+	DefaultExternalGateTimeout = 24 * time.Hour
+)
 
 type GatePhase string
 
@@ -237,6 +241,7 @@ type Gate struct {
 	FailureThreshold *int         `yaml:"failure_threshold"`
 	NoData           NoDataPolicy `yaml:"no_data"`
 	Baseline         *Baseline    `yaml:"baseline"`
+	Reporters        []string     `yaml:"reporters"`
 }
 
 type WindowEffect string
@@ -262,6 +267,7 @@ type gateSpec struct {
 	requiresWindows     bool
 	allowsRollbackOptIn bool
 	prometheus          bool
+	allowsReporters     bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
@@ -272,7 +278,7 @@ func gateSpecs() map[GateType]gateSpec {
 		GateHealth:     {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute)},
 		GateSoak:       {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
 		GatePrometheus: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: prometheusTimeout, prometheus: true},
-		GateExternal:   {allowsTimeout: true, allowsRollbackOptIn: true},
+		GateExternal:   {allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultExternalGateTimeout), allowsRollbackOptIn: true, allowsReporters: true},
 	}
 }
 
@@ -400,6 +406,7 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 		if known && spec.requiresWindows {
 			g.Timezone = orDefault(g.Timezone, DefaultScheduleZone)
 		}
+		g.Reporters = slices.Clone(g.Reporters)
 		g.Windows = slices.Clone(g.Windows)
 		for i := range g.Windows {
 			g.Windows[i].Timezone = orDefault(g.Windows[i].Timezone, g.Timezone)

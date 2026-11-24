@@ -59,7 +59,7 @@ func registerPrometheusGateFromDeps(r *gates.Registry, deps gateDeps) error {
 }
 
 func registerExternalGateFromDeps(r *gates.Registry, deps gateDeps) error {
-	return registerExternalGate(r, deps.store)
+	return gates.RegisterExternal(r, deps.store)
 }
 
 func newGateEvaluator(deps gateDeps) (*gates.Evaluator, error) {

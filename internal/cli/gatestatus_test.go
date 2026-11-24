@@ -16,32 +16,6 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/metrics"
 )
 
-type noReports struct{}
-
-func (noReports) GetGateReport(context.Context, core.DeploymentID, string) (core.GateReport, error) {
-	return core.GateReport{}, core.ErrNotFound
-}
-
-func TestRegisterExternalGate(t *testing.T) {
-	t.Parallel()
-
-	r := gates.NewRegistry()
-	if err := registerExternalGate(r, noReports{}); err != nil {
-		t.Fatalf("registerExternalGate: %v", err)
-	}
-	app := config.App{Name: "blog", Gates: config.Gates{Before: []config.Gate{{Type: config.GateExternal, Name: "approval"}}}}
-	plan, err := r.Plan(app)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if len(plan.Before) != 1 || plan.Before[0].Kind != metrics.GateKindExternal {
-		t.Errorf("plan = %+v", plan)
-	}
-	if err := registerExternalGate(r, noReports{}); err == nil {
-		t.Error("registering twice succeeded")
-	}
-}
-
 func TestNewGateStatusMirrorWithoutGitHub(t *testing.T) {
 	t.Parallel()
 
@@ -57,6 +31,7 @@ func TestNewGateStatusMirror(t *testing.T) {
 	srv := githubtest.NewServer(t)
 	srv.Install("example-user", "blog", 1)
 	srv.Install("example-user", "api", 1)
+	srv.Install("example-user", "docs", 1)
 	app, err := github.New(github.Options{AppID: srv.AppID, PrivateKey: srv.PrivateKey, BaseURL: srv.URL})
 	if err != nil {
 		t.Fatalf("github.New: %v", err)
@@ -64,6 +39,7 @@ func TestNewGateStatusMirror(t *testing.T) {
 	catalog := config.File{Apps: []config.App{
 		{Name: "blog"},
 		{Name: "api", Source: config.Source{Statuses: new(false)}},
+		{Name: "docs", Source: config.Source{StatusMessages: true}},
 	}}.Catalog()
 	cfg := config.Default()
 	cfg.GitHub.APIURL = srv.URL
@@ -75,7 +51,7 @@ func TestNewGateStatusMirror(t *testing.T) {
 		t.Fatalf("newGateStatusMirror = %v, %v", mirror, err)
 	}
 	var observer gates.Observer = mirror
-	for _, name := range []string{"blog", "api"} {
+	for _, name := range []string{"blog", "api", "docs"} {
 		d := *deployNotification(name, core.NotificationDeployStarted, 3).Deployment
 		result := core.GateResult{DeploymentID: 3, Name: "e2e", Type: "external", Phase: core.GatePhaseAfter, Status: core.GatePassed, Message: "green"}
 		if err := observer.GateRecorded(t.Context(), d, result); err != nil {
@@ -89,9 +65,14 @@ func TestNewGateStatusMirror(t *testing.T) {
 	}
 
 	posted := srv.PostedStatuses("example-user", "blog", notifyTestSHA)
-	want := githubtest.Status{Context: "doorstep/blog/after/e2e", State: "success", Description: "green", TargetURL: "https://doorstep.example.com/deployments/3"}
+	want := githubtest.Status{Context: "doorstep/blog/after/e2e", State: "success", Description: "Gate passed", TargetURL: "https://doorstep.example.com/deployments/3"}
 	if len(posted) != 1 || posted[0] != want {
 		t.Errorf("blog statuses = %+v, want %+v", posted, want)
+	}
+	posted = srv.PostedStatuses("example-user", "docs", notifyTestSHA)
+	want = githubtest.Status{Context: "doorstep/docs/after/e2e", State: "success", Description: "green", TargetURL: "https://doorstep.example.com/deployments/3"}
+	if len(posted) != 1 || posted[0] != want {
+		t.Errorf("docs statuses = %+v, want %+v", posted, want)
 	}
 	if posted := srv.PostedStatuses("example-user", "api", notifyTestSHA); len(posted) != 0 {
 		t.Errorf("api opted out but got %+v", posted)
@@ -105,7 +86,7 @@ doorstep_notifications_total{result="dropped",type="webhook"} 0
 doorstep_notifications_total{result="failed",type="github"} 0
 doorstep_notifications_total{result="failed",type="slack"} 0
 doorstep_notifications_total{result="failed",type="webhook"} 0
-doorstep_notifications_total{result="sent",type="github"} 1
+doorstep_notifications_total{result="sent",type="github"} 2
 doorstep_notifications_total{result="sent",type="slack"} 0
 doorstep_notifications_total{result="sent",type="webhook"} 0
 `
