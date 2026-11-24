@@ -3,7 +3,10 @@ package store_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -259,6 +262,10 @@ func TestRecordGateResultRejectsInvalidInput(t *testing.T) {
 		{name: "empty phase", mutate: func(r *core.GateResult) { r.Phase = "" }},
 		{name: "unknown status", mutate: func(r *core.GateResult) { r.Status = "running" }},
 		{name: "invalid evidence", mutate: func(r *core.GateResult) { r.Evidence = json.RawMessage(`{"job":`) }},
+		{name: "oversized evidence", mutate: func(r *core.GateResult) {
+			r.Evidence = json.RawMessage(`"` + strings.Repeat("x", core.MaxGateEvidenceBytes) + `"`)
+		}},
+		{name: "NUL in evidence", mutate: func(r *core.GateResult) { r.Evidence = json.RawMessage(`{"a":"\u0000"}`) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -390,5 +397,103 @@ func TestRecordGateResultInTransaction(t *testing.T) {
 	}
 	if n := countGateEvents(t, st, d.ID); n != 1 {
 		t.Errorf("gate events after commit = %d, want 1", n)
+	}
+}
+
+func TestRecordGateResultCleansMessage(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	d := mustCreate(t, st, newDeployment("web"), 0)
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{name: "NUL removed", message: "a\x00b", want: "ab"},
+		{name: "invalid UTF-8 replaced", message: "a\xffb", want: "a\uFFFDb"},
+		{name: "truncated", message: strings.Repeat("a", core.MaxGateMessageBytes+5), want: strings.Repeat("a", core.MaxGateMessageBytes)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := gateResult(d.ID, "health-"+tt.name, core.GatePending)
+			r.Message = tt.message
+			stored, _ := mustRecord(t, st, r)
+			if stored.Message != tt.want {
+				t.Errorf("message = %q, want %q", stored.Message, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecordGateResultConcurrentWriters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		prepare  core.GateStatus
+		statuses []core.GateStatus
+		changes  int
+	}{
+		{name: "first pending", statuses: []core.GateStatus{core.GatePending}, changes: 1},
+		{name: "first verdict", statuses: []core.GateStatus{core.GatePassed}, changes: 1},
+		{name: "pending to verdict", prepare: core.GatePending, statuses: []core.GateStatus{core.GatePassed}, changes: 1},
+		{name: "repeated pending", prepare: core.GatePending, statuses: []core.GateStatus{core.GatePending}, changes: 0},
+		{name: "alternating", statuses: []core.GateStatus{core.GatePending, core.GatePassed}},
+	}
+	const gatesPerDeployment, writersPerGate = 10, 8
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			d := mustCreate(t, st, newDeployment("web"), 0)
+			names := make([]string, gatesPerDeployment)
+			for i := range names {
+				names[i] = fmt.Sprintf("gate-%d", i)
+				if tt.prepare != "" {
+					mustRecord(t, st, gateResult(d.ID, names[i], tt.prepare))
+				}
+			}
+			eventsBefore := countGateEvents(t, st, d.ID)
+
+			var (
+				wg      sync.WaitGroup
+				mu      sync.Mutex
+				changes = map[string]int{}
+			)
+			for _, name := range names {
+				for w := range writersPerGate {
+					status := tt.statuses[w%len(tt.statuses)]
+					wg.Go(func() {
+						_, changed, err := st.RecordGateResult(t.Context(), gateResult(d.ID, name, status))
+						if err != nil {
+							t.Errorf("RecordGateResult(%s %s): %v", name, status, err)
+							return
+						}
+						if changed {
+							mu.Lock()
+							changes[name]++
+							mu.Unlock()
+						}
+					})
+				}
+			}
+			wg.Wait()
+
+			total := 0
+			for _, name := range names {
+				total += changes[name]
+				if len(tt.statuses) == 1 && changes[name] != tt.changes {
+					t.Errorf("%s changed %d times, want %d", name, changes[name], tt.changes)
+				}
+			}
+			if events := countGateEvents(t, st, d.ID) - eventsBefore; events != total {
+				t.Errorf("gate events = %d, want one per reported change (%d)", events, total)
+			}
+			if n := queryInt(t, st, "SELECT count(*) FROM gate_results WHERE deployment_id = $1", d.ID); n != gatesPerDeployment {
+				t.Errorf("gate_results rows = %d, want %d", n, gatesPerDeployment)
+			}
+		})
 	}
 }

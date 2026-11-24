@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -344,7 +345,7 @@ func TestEvaluateRejectsInvalidEvaluations(t *testing.T) {
 		{name: "empty status", evaluation: gates.Evaluation{}, message: `evaluation error: gate returned unknown status ""`},
 		{name: "unknown status", evaluation: gates.Evaluation{Status: "running"}, message: `evaluation error: gate returned unknown status "running"`},
 		{name: "invalid JSON", evaluation: gates.Evaluation{Status: core.GatePassed, Evidence: json.RawMessage(`{"a":`)}, message: "evaluation error: gate evidence is not valid JSON"},
-		{name: "oversized evidence", evaluation: gates.Evaluation{Status: core.GatePassed, Evidence: json.RawMessage(`"` + strings.Repeat("x", gates.MaxEvidenceBytes) + `"`)}, message: "evaluation error: gate evidence is 65538 bytes, over the 65536 byte limit"},
+		{name: "oversized evidence", evaluation: gates.Evaluation{Status: core.GatePassed, Evidence: json.RawMessage(`"` + strings.Repeat("x", core.MaxGateEvidenceBytes) + `"`)}, message: "evaluation error: gate evidence is 65538 bytes, over the 65536 byte limit"},
 		{name: "NUL in evidence", evaluation: gates.Evaluation{Status: core.GatePassed, Evidence: json.RawMessage(`{"a":"\u0000"}`)}, message: `evaluation error: gate evidence contains \u0000, which Postgres cannot store`},
 	}
 	for _, tt := range tests {
@@ -379,9 +380,9 @@ func TestEvaluateCleansMessages(t *testing.T) {
 		want    string
 	}{
 		{name: "short", message: "ok", want: "ok"},
-		{name: "exact limit", message: strings.Repeat("a", gates.MaxMessageBytes), want: strings.Repeat("a", gates.MaxMessageBytes)},
-		{name: "over limit", message: strings.Repeat("a", gates.MaxMessageBytes+10), want: strings.Repeat("a", gates.MaxMessageBytes)},
-		{name: "multibyte at limit", message: strings.Repeat("a", gates.MaxMessageBytes-1) + "é", want: strings.Repeat("a", gates.MaxMessageBytes-1)},
+		{name: "exact limit", message: strings.Repeat("a", core.MaxGateMessageBytes), want: strings.Repeat("a", core.MaxGateMessageBytes)},
+		{name: "over limit", message: strings.Repeat("a", core.MaxGateMessageBytes+10), want: strings.Repeat("a", core.MaxGateMessageBytes)},
+		{name: "multibyte at limit", message: strings.Repeat("a", core.MaxGateMessageBytes-1) + "é", want: strings.Repeat("a", core.MaxGateMessageBytes-1)},
 		{name: "NUL removed", message: "a\x00b", want: "ab"},
 		{name: "invalid UTF-8 replaced", message: "a\xffb", want: "a�b"},
 	}
@@ -395,7 +396,7 @@ func TestEvaluateCleansMessages(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("message = %q (%d bytes), want %q (%d bytes)", got, len(got), tt.want, len(tt.want))
 			}
-			if !utf8.ValidString(got) || len(got) > gates.MaxMessageBytes {
+			if !utf8.ValidString(got) || len(got) > core.MaxGateMessageBytes {
 				t.Errorf("message is not valid UTF-8 within the limit: %d bytes", len(got))
 			}
 		})
@@ -405,11 +406,11 @@ func TestEvaluateCleansMessages(t *testing.T) {
 func TestEvaluateErrorMessageIsTruncated(t *testing.T) {
 	t.Parallel()
 
-	gate := &scriptedGate{errs: []error{errors.New(strings.Repeat("x", 4*gates.MaxMessageBytes))}}
+	gate := &scriptedGate{errs: []error{errors.New(strings.Repeat("x", 4*core.MaxGateMessageBytes))}}
 	h := newHarness(t, gates.Plan{Before: []gates.Binding{bind("checks", core.GatePhaseBefore, gate)}})
 	out := mustEvaluate(t, h, deployment(core.KindDeploy), core.GatePhaseBefore)
 	msg := out.Results[0].Message
-	if len(msg) != gates.MaxMessageBytes || !strings.HasPrefix(msg, "evaluation error: xxx") {
+	if len(msg) != core.MaxGateMessageBytes || !strings.HasPrefix(msg, "evaluation error: xxx") {
 		t.Errorf("message has %d bytes and starts %q", len(msg), msg[:min(len(msg), 24)])
 	}
 }
@@ -441,6 +442,91 @@ func TestEvaluateCallTimeout(t *testing.T) {
 			out := mustEvaluate(t, h, deployment(core.KindDeploy), core.GatePhaseAfter)
 			if out.Status != core.GatePending || out.Results[0].Message != "evaluation error: no verdict within 20ms" {
 				t.Errorf("outcome = %s %q", out.Status, out.Results[0].Message)
+			}
+		})
+	}
+}
+
+func TestEvaluateSkipsGateWithAbandonedCall(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var calls atomic.Int32
+	gate := gates.GateFunc(func(context.Context, gates.Request) (gates.Evaluation, error) {
+		if calls.Add(1) == 1 {
+			<-release
+		}
+		return gates.Evaluation{Status: core.GatePassed, Message: "ok"}, nil
+	})
+	h := newHarness(t, gates.Plan{After: []gates.Binding{bind("health", core.GatePhaseAfter, gate)}}, func(o *gates.Options) {
+		o.EvaluationTimeout = 20 * time.Millisecond
+	})
+	d := deployment(core.KindDeploy)
+	other := deployment(core.KindDeploy)
+	other.ID = 8
+
+	out := mustEvaluate(t, h, d, core.GatePhaseAfter)
+	if out.Results[0].Message != "evaluation error: no verdict within 20ms" {
+		t.Fatalf("first message = %q", out.Results[0].Message)
+	}
+	if !strings.Contains(h.logs.String(), "gate call abandoned while still running") {
+		t.Errorf("abandoned call not logged: %s", h.logs.String())
+	}
+
+	out = mustEvaluate(t, h, d, core.GatePhaseAfter)
+	if out.Status != core.GatePending || out.Results[0].Message != "evaluation error: previous call has not returned yet" {
+		t.Errorf("while abandoned = %s %q", out.Status, out.Results[0].Message)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("gate called %d times while its abandoned call was running, want 1", n)
+	}
+
+	out = mustEvaluate(t, h, other, core.GatePhaseAfter)
+	if out.Status != core.GatePassed {
+		t.Errorf("other deployment = %s %q, want passed", out.Status, out.Results[0].Message)
+	}
+
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out = mustEvaluate(t, h, d, core.GatePhaseAfter)
+		if out.Status == core.GatePassed || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if out.Status != core.GatePassed {
+		t.Errorf("after the abandoned call returned = %s %q, want passed", out.Status, out.Results[0].Message)
+	}
+}
+
+func TestEvaluateMetricDurationIncludesCall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		statuses []core.GateStatus
+		wait     time.Duration
+		want     time.Duration
+	}{
+		{name: "verdict on first evaluation", statuses: []core.GateStatus{core.GatePassed}, want: 3 * time.Second},
+		{name: "failed on first evaluation", statuses: []core.GateStatus{core.GateFailed}, want: 3 * time.Second},
+		{name: "verdict after pending", statuses: []core.GateStatus{core.GatePending, core.GatePassed}, wait: time.Minute, want: time.Minute + 6*time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gate := verdicts(tt.statuses...)
+			h := newHarness(t, gates.Plan{After: []gates.Binding{bind("health", core.GatePhaseAfter, gate)}})
+			gate.before = func() { h.clock.Advance(3 * time.Second) }
+			d := deployment(core.KindDeploy)
+			for range tt.statuses {
+				mustEvaluate(t, h, d, core.GatePhaseAfter)
+				h.clock.Advance(tt.wait)
+			}
+			obs := h.metrics.all()
+			if len(obs) != 1 || obs[0].duration != tt.want {
+				t.Errorf("metrics = %+v, want one observation of %s", obs, tt.want)
 			}
 		})
 	}

@@ -121,9 +121,9 @@ The latest result of each named gate for a deployment: `UNIQUE (deployment_id, n
 | `finished_at` | set to `now()` when the status becomes a verdict, kept while the same verdict is recorded again, cleared while `pending` |
 | `updated_at` | maintained by the trigger on every recording, including an unchanged `pending` poll; the gate timeout compares it with `started_at`, so both readings come from the database clock |
 
-`Store.RecordGateResult` upserts a row in one statement and, in the same transaction, appends a `gate` event to `deployment_events` whenever the status changed (including the first recording), with the message `<name> <status>` and `data` `{"gate", "type", "phase", "status"}`. An unchanged `pending` poll updates the row but writes no event. It returns the stored row and whether the status changed, and `core.ErrNotFound` for an unknown deployment. `Store.ListGateResults` returns a deployment's rows in creation order.
+`Store.RecordGateResult` cleans the message and validates the evidence with the same limits as the evaluator ([gates.md](gates.md#limits)), then, in one transaction, inserts the row (`ON CONFLICT DO NOTHING`) or, when it exists, locks it with `SELECT ... FOR UPDATE`, reads the previous status and updates it. Concurrent writers of one gate are therefore serialised and exactly one of them sees each change of status. In the same transaction it appends a `gate` event to `deployment_events` whenever the status changed (including the first recording), with the message `<name> <status>` and `data` `{"gate", "type", "phase", "status"}`. An unchanged `pending` poll updates the row but writes no event. It returns the stored row and whether the status changed, and `core.ErrNotFound` for an unknown deployment. `Store.ListGateResults` returns a deployment's rows in creation order.
 
-Migration `00002_gate_result_phase.sql` added `type` and `phase`. Both are `NOT NULL` with no default, so every writer must state them; the temporary defaults used to add the columns are dropped in the same migration.
+Migration `00006_gate_result_phase.sql` added `type` and `phase`. Both are `NOT NULL` with no default, so every writer must state them; the temporary defaults used to add the columns are dropped in the same migration.
 
 ### `deployment_events`
 

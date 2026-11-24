@@ -68,6 +68,8 @@ A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for
 
 A gate that cannot reach a verdict (it returns an error, panics, returns an unknown status, invalid or oversized evidence, or gives no answer within 30 seconds) is treated as a transient problem. It is recorded as `pending` with the message `evaluation error: <reason>` and keeps its previous evidence, the error is logged at `warn` and counted in metrics, and the phase stays `pending` until the gate recovers or its timeout fails it. A Prometheus or GitHub blip therefore never fails a deploy by itself, but it is visible, and it cannot hold a deploy forever.
 
+A gate call that gives no answer within 30 seconds is abandoned: the evaluator stops waiting and logs `gate call abandoned while still running` at `warn`. A gate that ignores `ctx` keeps running in the background, so while an abandoned call of a gate for a deployment has not returned, later passes do not call that gate for that deployment again; they record the evaluation error `previous call has not returned yet` instead. A stuck gate therefore costs at most one goroutine per deployment, and its timeout still fails it.
+
 `Evaluate` itself returns an error only when the result store fails, the app has no gate plan (`ErrNoPlan`), the phase is invalid (`ErrInvalidPhase`) or `ctx` is cancelled. Nothing is recorded for a gate whose call was cut short by cancellation.
 
 ### Rollbacks
@@ -77,7 +79,8 @@ A rollback re-pins a digest that already passed CI and soak, but it still waits 
 ## Limits
 
 - Messages are cut to 1024 bytes (on a UTF-8 boundary); NUL bytes are removed and invalid UTF-8 is replaced.
-- Evidence must be valid JSON of at most 64 KiB and must not contain `\u0000`, which Postgres `jsonb` cannot store. Anything else is an evaluation error.
+- Evidence must be valid JSON of at most 64 KiB and no string in it (key or value) may contain the NUL character `\u0000`, which Postgres `jsonb` cannot store. An escaped backslash followed by `u0000` (`"\\u0000"`) is ordinary text and allowed. Anything else is an evaluation error.
+- The limits live in `core` (`core.CleanGateMessage`, `core.ValidateGateEvidence`) and are enforced by both the evaluator and `Store.RecordGateResult`, so any other writer of gate results gets the same cleaning and a validation error instead of a raw Postgres error.
 - Evidence and messages are shown in the UI and mirrored to GitHub. Gates must never put secrets, tokens or credentials in them.
 
 ## Adding a gate type
@@ -121,6 +124,6 @@ Evaluations are recorded in `doorstep_gate_evaluation_duration_seconds` ([metric
 
 - `gate` is the kind from the gate type's registration (`ci`, `argocd`, `soak`, ...), never the configured name;
 - `phase` is the deployment kind (`deploy` or `rollback`), not `before`/`after`;
-- one `passed` or `failed` observation when a gate reaches that verdict, with the time from `StartedAt` to `FinishedAt` (a timeout counts as `failed`);
+- one `passed` or `failed` observation when a gate reaches that verdict, with the time from `StartedAt` to `FinishedAt` plus the wall time of the call that produced the verdict (`StartedAt` is stamped after the first call returns, so a gate that decides on its first evaluation records the duration of that call, not 0; a timeout counts as `failed`);
 - one `error` observation per evaluation error, with the wall time of that call;
 - nothing for `pending` polls or `skipped` gates.

@@ -1,15 +1,12 @@
 package gates
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
+	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
@@ -17,8 +14,6 @@ import (
 
 const (
 	DefaultEvaluationTimeout = 30 * time.Second
-	MaxMessageBytes          = 1024
-	MaxEvidenceBytes         = 64 << 10
 
 	skippedForRollback = "skipped for rollback"
 	evaluationErrorTag = "evaluation error: "
@@ -56,6 +51,19 @@ type Evaluator struct {
 	logger            *slog.Logger
 	now               func() time.Time
 	evaluationTimeout time.Duration
+
+	mu        sync.Mutex
+	abandoned map[callKey]int
+}
+
+type callKey struct {
+	deployment core.DeploymentID
+	gate       string
+}
+
+type callState struct {
+	returned  bool
+	abandoned bool
 }
 
 func NewEvaluator(opts Options) (*Evaluator, error) {
@@ -75,6 +83,7 @@ func NewEvaluator(opts Options) (*Evaluator, error) {
 		logger:            opts.Logger,
 		now:               opts.Now,
 		evaluationTimeout: opts.EvaluationTimeout,
+		abandoned:         map[callKey]int{},
 	}
 	for app, plan := range opts.Plans {
 		e.plans[app] = plan
@@ -171,9 +180,9 @@ func (e *Evaluator) evaluateGate(ctx context.Context, d core.Deployment, b Bindi
 			candidate.Evidence = ev.Evidence
 		}
 	}
-	candidate.Message = cleanMessage(candidate.Message)
+	candidate.Message = core.CleanGateMessage(candidate.Message)
 
-	stored, err := e.record(ctx, d, b, candidate)
+	stored, err := e.record(ctx, d, b, candidate, callDuration)
 	if err != nil {
 		return core.GateResult{}, err
 	}
@@ -188,12 +197,12 @@ func (e *Evaluator) evaluateGate(ctx context.Context, d core.Deployment, b Bindi
 		timedOut.Status = core.GateFailed
 		timedOut.Message = fmt.Sprintf("timed out after %s", b.Timeout)
 		timedOut.Evidence = stored.Evidence
-		return e.record(ctx, d, b, timedOut)
+		return e.record(ctx, d, b, timedOut, callDuration)
 	}
 	return stored, nil
 }
 
-func (e *Evaluator) record(ctx context.Context, d core.Deployment, b Binding, candidate core.GateResult) (core.GateResult, error) {
+func (e *Evaluator) record(ctx context.Context, d core.Deployment, b Binding, candidate core.GateResult, callDuration time.Duration) (core.GateResult, error) {
 	stored, changed, err := e.store.RecordGateResult(ctx, candidate)
 	if err != nil {
 		return core.GateResult{}, fmt.Errorf("record gate %s of deployment %d: %w", b.Name, d.ID, err)
@@ -202,7 +211,7 @@ func (e *Evaluator) record(ctx context.Context, d core.Deployment, b Binding, ca
 		return stored, nil
 	}
 	if outcome, ok := metricsResult(stored.Status); ok && stored.FinishedAt != nil {
-		e.metrics.GateEvaluated(d.Target.App, b.Kind, metricsPhase(d), outcome, stored.FinishedAt.Sub(stored.StartedAt))
+		e.metrics.GateEvaluated(d.Target.App, b.Kind, metricsPhase(d), outcome, stored.FinishedAt.Sub(stored.StartedAt)+callDuration)
 	}
 	for _, o := range e.observers {
 		if err := o.GateRecorded(ctx, d, stored); err != nil {
@@ -221,19 +230,31 @@ type callResult struct {
 }
 
 func (e *Evaluator) call(ctx context.Context, b Binding, req Request) (Evaluation, time.Duration, error) {
+	key := callKey{deployment: req.Deployment.ID, gate: b.Name}
+	e.mu.Lock()
+	stuck := e.abandoned[key] > 0
+	e.mu.Unlock()
+	if stuck {
+		return Evaluation{}, 0, errors.New("previous call has not returned yet")
+	}
+
 	callCtx, cancel := context.WithTimeout(ctx, e.evaluationTimeout)
 	defer cancel()
 
 	started := e.now()
+	state := &callState{}
 	done := make(chan callResult, 1)
 	go func() {
+		var res callResult
 		defer func() {
 			if r := recover(); r != nil {
-				done <- callResult{err: fmt.Errorf("gate panicked: %v", r)}
+				res = callResult{err: fmt.Errorf("gate panicked: %v", r)}
 			}
+			done <- res
+			e.callReturned(key, state)
 		}()
 		ev, err := b.Gate.Evaluate(callCtx, req)
-		done <- callResult{evaluation: ev, err: err}
+		res = callResult{evaluation: ev, err: err}
 	}()
 
 	var res callResult
@@ -241,6 +262,7 @@ func (e *Evaluator) call(ctx context.Context, b Binding, req Request) (Evaluatio
 	case res = <-done:
 	case <-callCtx.Done():
 		res = callResult{err: callCtx.Err()}
+		e.abandonCall(ctx, key, state)
 	}
 	elapsed := e.now().Sub(started)
 	if errors.Is(res.err, context.DeadlineExceeded) && ctx.Err() == nil {
@@ -249,35 +271,35 @@ func (e *Evaluator) call(ctx context.Context, b Binding, req Request) (Evaluatio
 	return res.evaluation, elapsed, res.err
 }
 
+func (e *Evaluator) abandonCall(ctx context.Context, key callKey, state *callState) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if state.returned {
+		return
+	}
+	state.abandoned = true
+	e.abandoned[key]++
+	e.logger.WarnContext(ctx, "gate call abandoned while still running",
+		slog.Int64("deployment", int64(key.deployment)), slog.String("gate", key.gate))
+}
+
+func (e *Evaluator) callReturned(key callKey, state *callState) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	state.returned = true
+	if !state.abandoned {
+		return
+	}
+	if e.abandoned[key]--; e.abandoned[key] <= 0 {
+		delete(e.abandoned, key)
+	}
+}
+
 func validateEvaluation(ev Evaluation) error {
 	if !ev.Status.Valid() {
 		return fmt.Errorf("gate returned unknown status %q", ev.Status)
 	}
-	if len(ev.Evidence) == 0 {
-		return nil
-	}
-	if len(ev.Evidence) > MaxEvidenceBytes {
-		return fmt.Errorf("gate evidence is %d bytes, over the %d byte limit", len(ev.Evidence), MaxEvidenceBytes)
-	}
-	if !json.Valid(ev.Evidence) {
-		return errors.New("gate evidence is not valid JSON")
-	}
-	if bytes.Contains(ev.Evidence, []byte(`\u0000`)) {
-		return errors.New(`gate evidence contains \u0000, which Postgres cannot store`)
-	}
-	return nil
-}
-
-func cleanMessage(message string) string {
-	message = strings.ToValidUTF8(strings.ReplaceAll(message, "\x00", ""), "�")
-	if len(message) <= MaxMessageBytes {
-		return message
-	}
-	cut := MaxMessageBytes
-	for cut > 0 && !utf8.RuneStart(message[cut]) {
-		cut--
-	}
-	return message[:cut]
+	return core.ValidateGateEvidence(ev.Evidence)
 }
 
 func metricsPhase(d core.Deployment) metrics.Phase {

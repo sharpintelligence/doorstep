@@ -17,28 +17,33 @@ const foreignKeyViolation = "23503"
 
 const gateResultColumns = `deployment_id, name, type, phase, status, message, evidence, started_at, finished_at, updated_at`
 
-const upsertGateResultSQL = `
-WITH previous AS (
-    SELECT status FROM gate_results WHERE deployment_id = $1 AND name = $2
-)
-INSERT INTO gate_results AS g (deployment_id, name, type, phase, status, message, evidence, finished_at)
+const insertGateResultSQL = `
+INSERT INTO gate_results (deployment_id, name, type, phase, status, message, evidence, finished_at)
 VALUES ($1, $2, $3, $4, $5::text, $6, $7::jsonb, CASE WHEN $5::text = 'pending' THEN NULL ELSE now() END)
-ON CONFLICT (deployment_id, name) DO UPDATE SET
-    type = EXCLUDED.type,
-    phase = EXCLUDED.phase,
-    status = EXCLUDED.status,
-    message = EXCLUDED.message,
-    evidence = EXCLUDED.evidence,
+ON CONFLICT (deployment_id, name) DO NOTHING
+RETURNING ` + gateResultColumns
+
+const lockGateResultSQL = `
+SELECT status FROM gate_results WHERE deployment_id = $1 AND name = $2 FOR UPDATE`
+
+const updateGateResultSQL = `
+UPDATE gate_results AS g SET
+    type = $3,
+    phase = $4,
+    status = $5::text,
+    message = $6,
+    evidence = $7::jsonb,
     started_at = CASE
-        WHEN g.status <> 'pending' AND EXCLUDED.status = 'pending' THEN now()
+        WHEN g.status <> 'pending' AND $5::text = 'pending' THEN now()
         ELSE g.started_at
     END,
     finished_at = CASE
-        WHEN EXCLUDED.status = 'pending' THEN NULL
-        WHEN g.status = EXCLUDED.status THEN g.finished_at
+        WHEN $5::text = 'pending' THEN NULL
+        WHEN g.status = $5::text THEN g.finished_at
         ELSE now()
     END
-RETURNING ` + gateResultColumns + `, (SELECT status FROM previous)`
+WHERE deployment_id = $1 AND name = $2
+RETURNING ` + gateResultColumns
 
 const insertGateEventSQL = `
 INSERT INTO deployment_events (deployment_id, app_id, type, message, data)
@@ -62,23 +67,17 @@ func (s *Store) RecordGateResult(ctx context.Context, r core.GateResult) (core.G
 	if err != nil {
 		return core.GateResult{}, false, fmt.Errorf("record gate result: %w", err)
 	}
+	r.Message = core.CleanGateMessage(r.Message)
 
 	var (
 		stored  core.GateResult
 		changed bool
 	)
 	err = s.InTx(ctx, func(tx *Store) error {
-		var previous *core.GateStatus
-		row := tx.db.QueryRow(ctx, upsertGateResultSQL,
-			r.DeploymentID, r.Name, r.Type, r.Phase, r.Status, r.Message, string(evidence))
-		result, err := scanGateResult(row, &previous)
-		if err != nil {
-			return fmt.Errorf("upsert: %w", err)
-		}
-		stored = result
-		changed = previous == nil || *previous != stored.Status
-		if !changed {
-			return nil
+		var upsertErr error
+		stored, changed, upsertErr = tx.upsertGateResult(ctx, r, evidence)
+		if upsertErr != nil || !changed {
+			return upsertErr
 		}
 		data, err := json.Marshal(gateEventData{Gate: stored.Name, Type: stored.Type, Phase: stored.Phase, Status: stored.Status})
 		if err != nil {
@@ -97,6 +96,26 @@ func (s *Store) RecordGateResult(ctx context.Context, r core.GateResult) (core.G
 		return core.GateResult{}, false, fmt.Errorf("record gate %s for deployment %d: %w", r.Name, r.DeploymentID, err)
 	}
 	return stored, changed, nil
+}
+
+func (s *Store) upsertGateResult(ctx context.Context, r core.GateResult, evidence json.RawMessage) (core.GateResult, bool, error) {
+	args := []any{r.DeploymentID, r.Name, r.Type, r.Phase, r.Status, r.Message, string(evidence)}
+	inserted, err := scanGateResult(s.db.QueryRow(ctx, insertGateResultSQL, args...))
+	if err == nil {
+		return inserted, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return core.GateResult{}, false, fmt.Errorf("insert: %w", err)
+	}
+	var previous core.GateStatus
+	if err := s.db.QueryRow(ctx, lockGateResultSQL, r.DeploymentID, r.Name).Scan(&previous); err != nil {
+		return core.GateResult{}, false, fmt.Errorf("lock: %w", err)
+	}
+	updated, err := scanGateResult(s.db.QueryRow(ctx, updateGateResultSQL, args...))
+	if err != nil {
+		return core.GateResult{}, false, fmt.Errorf("update: %w", err)
+	}
+	return updated, previous != updated.Status, nil
 }
 
 func (s *Store) ListGateResults(ctx context.Context, id core.DeploymentID) ([]core.GateResult, error) {
@@ -130,25 +149,25 @@ func validateGateResult(r core.GateResult) (json.RawMessage, error) {
 	if !r.Status.Valid() {
 		errs = append(errs, fmt.Errorf("unknown gate status %q", r.Status))
 	}
+	if err := core.ValidateGateEvidence(r.Evidence); err != nil {
+		errs = append(errs, err)
+	}
 	evidence := r.Evidence
 	if len(evidence) == 0 {
 		evidence = json.RawMessage(`{}`)
-	} else if !json.Valid(evidence) {
-		errs = append(errs, errors.New("gate evidence is not valid JSON"))
 	}
 	return evidence, errors.Join(errs...)
 }
 
-func scanGateResult(row pgx.Row, extra ...any) (core.GateResult, error) {
+func scanGateResult(row pgx.Row) (core.GateResult, error) {
 	var (
 		r        core.GateResult
 		evidence []byte
 	)
-	dest := append([]any{
+	if err := row.Scan(
 		&r.DeploymentID, &r.Name, &r.Type, &r.Phase, &r.Status, &r.Message, &evidence,
 		&r.StartedAt, &r.FinishedAt, &r.UpdatedAt,
-	}, extra...)
-	if err := row.Scan(dest...); err != nil {
+	); err != nil {
 		return core.GateResult{}, err
 	}
 	r.Evidence = json.RawMessage(evidence)
