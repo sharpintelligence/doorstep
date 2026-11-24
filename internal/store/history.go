@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -59,12 +60,6 @@ FROM deployment_events
 WHERE deployment_id = $1
 ORDER BY id DESC
 LIMIT $2`
-
-const selectGateResultsSQL = `
-SELECT name, status, message, evidence, started_at, finished_at
-FROM gate_results
-WHERE deployment_id = $1
-ORDER BY name`
 
 const selectRelatedDeploymentsSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE d.rollback_of_id = $1 OR d.parent_id = $1
@@ -208,18 +203,11 @@ func (s *Store) events(ctx context.Context, d core.Deployment, limit int) ([]cor
 }
 
 func (s *Store) gateResults(ctx context.Context, id core.DeploymentID) ([]core.GateResult, error) {
-	rows, err := s.db.Query(ctx, selectGateResultsSQL, id)
+	gates, err := s.ListGateResults(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("list deployment %d gate results: %w", id, err)
+		return nil, err
 	}
-	gates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (core.GateResult, error) {
-		var g core.GateResult
-		err := row.Scan(&g.Name, &g.Status, &g.Message, &g.Evidence, &g.StartedAt, &g.FinishedAt)
-		return g, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list deployment %d gate results: %w", id, err)
-	}
+	slices.SortFunc(gates, func(a, b core.GateResult) int { return strings.Compare(a.Name, b.Name) })
 	return gates, nil
 }
 

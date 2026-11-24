@@ -224,8 +224,8 @@ func TestGetDeploymentHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
-	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, status, message, evidence, finished_at) VALUES ($1, 'soak', 'passed', 'quiet', '{\"minutes\":10}', now())", origin.ID)
-	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'failed')", origin.ID)
+	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, type, phase, status, message, evidence, finished_at) VALUES ($1, 'soak', 'soak', 'after', 'passed', 'quiet', '{\"minutes\":10}', now())", origin.ID)
+	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'health', 'health', 'after', 'failed')", origin.ID)
 
 	rb := newDeployment("web")
 	rb.Kind = core.KindRollback
