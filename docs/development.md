@@ -2,7 +2,7 @@
 
 ## Toolchain
 
-Tool versions are pinned in `mise.toml` (Go, golangci-lint, just) and locked with checksums in `mise.lock`. CI uses the same files, so local and CI runs match.
+Tool versions are pinned in `mise.toml` (Go, golangci-lint, just, actionlint, git-cliff) and locked with checksums in `mise.lock`. CI uses the same files, so local and CI runs match.
 
 ```sh
 mise install
@@ -23,9 +23,13 @@ Recipes live in the `justfile`; `just` with no arguments lists them.
 | `just tidy-check` | fail if `go.mod`/`go.sum` are not tidy (`go mod tidy -diff`) |
 | `just test [args]` | `go test -race -shuffle=on -count=1 [args] ./...` |
 | `just build` | static, trimmed binary at `bin/doorstep`; set `DOORSTEP_VERSION` to stamp a release version |
+| `just image` | build the container image as `doorstep:<version>` (override with `DOORSTEP_IMAGE`), stamping version, commit and commit time; needs a container engine |
+| `just vuln` | `govulncheck` (pinned in the `justfile`) over all packages; needs network access and is not part of `check` |
+| `just lint-actions` | `actionlint` over `.github/workflows` |
+| `just changelog [args]` | `git-cliff` with `cliff.toml`; `just changelog --unreleased` previews the next release notes |
 | `just run [args]` | `go run ./cmd/doorstep serve [args]` |
 | `just clean` | remove `bin/` and `coverage.out` |
-| `just check` | `fmt-check`, `vet`, `lint`, `tidy-check` and `test`; this is what CI runs |
+| `just check` | `fmt-check`, `vet`, `lint`, `lint-actions`, `tidy-check` and `test`; this is what CI runs |
 
 Run `just check` before pushing.
 
@@ -65,13 +69,22 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`. A single job, `check`, on `ubuntu-24.04`:
+`.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request). All jobs run on `ubuntu-24.04`. The `check` job:
 
 1. checks out the code without persisting credentials;
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
 3. runs `just check` and `just build`.
 
-A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions and Go modules.
+A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Two more jobs run beside it:
+
+- `govulncheck` runs `just vuln`, using the mise-pinned Go.
+- `image` builds the `Dockerfile` for `linux/amd64` and `linux/arm64` without pushing, with the same `build-push-action` inputs as the release workflow. Cross-compilation keeps it cheap, and it catches Dockerfile and workflow breakage before the first tag.
+
+Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions, Go modules and Docker base images. Releases are described in [releasing.md](releasing.md).
+
+## Container image
+
+The `Dockerfile` cross-compiles on the build platform (`GOOS`/`GOARCH` from `TARGETOS`/`TARGETARCH`) and copies the static binary into a distroless `static` nonroot image; no emulation is needed. Both base images are pinned by index digest and kept fresh by Dependabot. The builder image's Go version must match `mise.toml`: `GOTOOLCHAIN=local` makes an older image fail loudly instead of downloading a toolchain. `.dockerignore` is an allowlist (`go.mod`, `go.sum`, `cmd`, `internal`), so edits elsewhere do not invalidate the build cache.
 
 ## Conventions
 

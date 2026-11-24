@@ -20,6 +20,16 @@ bin/doorstep serve
 curl localhost:8080/readyz
 ```
 
+## Container image
+
+Release images are published to `ghcr.io/sharpintelligence/doorstep` for `linux/amd64` and `linux/arm64`. Pull and deploy by digest, which each GitHub Release lists, rather than by tag:
+
+```sh
+docker pull ghcr.io/sharpintelligence/doorstep@sha256:<digest>
+```
+
+Images are signed and attested; see [Verifying an image](docs/releasing.md#verifying-an-image).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
@@ -27,3 +37,5 @@ curl localhost:8080/readyz
 - [Database](docs/database.md)
 - [GitHub App](docs/github-app.md)
 - [Development](docs/development.md)
+- [Releasing](docs/releasing.md)
+- [Decisions](docs/decisions/README.md)

@@ -15,6 +15,7 @@ func TestRead(t *testing.T) {
 	tests := []struct {
 		name    string
 		version string
+		linked  linked
 		bi      *debug.BuildInfo
 		ok      bool
 		want    Info
@@ -66,6 +67,52 @@ func TestRead(t *testing.T) {
 			},
 		},
 		{
+			name:    "linked commit without build info",
+			version: "dev",
+			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			want: Info{
+				Version:    "dev",
+				Commit:     "linkedsha",
+				CommitTime: "2026-11-22T09:00:00Z",
+				GoVersion:  runtime.Version(),
+			},
+		},
+		{
+			name:    "linked commit with build info lacking vcs settings",
+			version: "v1.0.0",
+			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			bi: &debug.BuildInfo{
+				GoVersion: "go1.27.4",
+				Settings:  []debug.BuildSetting{{Key: "-trimpath", Value: "true"}, {Key: "vcs.modified", Value: "false"}},
+			},
+			ok: true,
+			want: Info{
+				Version:    "v1.0.0",
+				Commit:     "linkedsha",
+				CommitTime: "2026-11-22T09:00:00Z",
+				GoVersion:  "go1.27.4",
+			},
+		},
+		{
+			name:    "vcs settings override linked values",
+			version: "v1.0.0",
+			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			bi: &debug.BuildInfo{
+				GoVersion: "go1.27.4",
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "vcssha"},
+					{Key: "vcs.time", Value: "2026-11-23T10:00:00Z"},
+				},
+			},
+			ok: true,
+			want: Info{
+				Version:    "v1.0.0",
+				Commit:     "vcssha",
+				CommitTime: "2026-11-23T10:00:00Z",
+				GoVersion:  "go1.27.4",
+			},
+		},
+		{
 			name:    "dirty vcs checkout",
 			version: "dev",
 			bi: &debug.BuildInfo{
@@ -83,7 +130,7 @@ func TestRead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := read(tt.version, func() (*debug.BuildInfo, bool) { return tt.bi, tt.ok })
+			got := read(linked{version: tt.version, commit: tt.linked.commit, commitTime: tt.linked.commitTime}, func() (*debug.BuildInfo, bool) { return tt.bi, tt.ok })
 			if got != tt.want {
 				t.Errorf("read() = %+v, want %+v", got, tt.want)
 			}

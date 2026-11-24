@@ -53,7 +53,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root | built |
 | `internal/config` | configuration model, defaults, environment overrides and validation | built |
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
-| `internal/buildinfo` | version from `-ldflags -X`, VCS revision/time/dirty flag and Go version from `runtime/debug` | built |
+| `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
 | `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
 | `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation and queue claims; see [database.md](database.md) | built |
@@ -87,7 +87,7 @@ The design is ports and adapters.
 - `store` imports only `core`.
 - `api` and `web` call `engine` for commands and `store` read models for queries. They contribute handlers; `server` owns the listener, middleware and health endpoints.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
-- No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The single exception is the link-time `buildinfo.version` variable. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
+- No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The only exceptions are the link-time `buildinfo.version`, `buildinfo.commit` and `buildinfo.commitTime` variables, which the release image build sets because it has no `.git` directory. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
 - Errors are wrapped with `%w` and inspected with `errors.Is` / `errors.As`.
 
@@ -241,6 +241,10 @@ Client.Do(ctx, method, path, in, out)   JSON in/out, non-2xx → *APIError
 
 Setup, permissions and the least-privilege model are described in [github-app.md](github-app.md).
 
+## Release and supply chain
+
+Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linux/amd64` and `linux/arm64` distroless image, pushes it to GHCR by digest, attaches SLSA build provenance and an SPDX SBOM as GitHub attestations, signs the image index keylessly with cosign, and publishes a GitHub Release with git-cliff notes. Images are tagged with the version and the full commit SHA, never `latest`. See [releasing.md](releasing.md).
+
 ## Security posture
 
 - GitHub access is through one GitHub App installed on each owner with *Only select repositories*: one-hour installation tokens, held in memory only, refreshed five minutes before expiry, and only ever sent to the configured API host (requests and redirects to any other host are refused). GitHub applies the App's permissions to every selected repository, so the repository selection is what limits reach. Commits are attributed to and verified as the App.
@@ -249,6 +253,7 @@ Setup, permissions and the least-privilege model are described in [github-app.md
 - Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications.
 - Only image digests are pinned, never mutable tags.
 - Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.
+- Release images are signed with keyless cosign and carry provenance and SBOM attestations tied to the release workflow; verification steps are in [releasing.md](releasing.md).
 - Secrets never appear inline in configuration: they come from environment variables or `*_file` paths (mounted Kubernetes Secrets).
 - The HTTP server sets read-header, read, write and idle timeouts and a header size limit; panics are recovered and logged.
 - CI pins every action by full commit SHA, runs with a read-only token and does not persist checkout credentials. Dependabot keeps pins and Go modules current.

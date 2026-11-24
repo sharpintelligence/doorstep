@@ -14,3 +14,10 @@ updates:
     groups:
       go-modules:
         update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        update-types: [minor, patch]
