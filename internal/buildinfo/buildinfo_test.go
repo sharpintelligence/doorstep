@@ -13,41 +13,40 @@ func TestRead(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		version string
-		linked  linked
-		bi      *debug.BuildInfo
-		ok      bool
-		want    Info
+		name   string
+		linked linked
+		bi     *debug.BuildInfo
+		ok     bool
+		want   Info
 	}{
 		{
-			name:    "no build info",
-			version: "dev",
-			want:    Info{Version: "dev", GoVersion: runtime.Version()},
+			name:   "no build info",
+			linked: linked{version: "dev"},
+			want:   Info{Version: "dev", GoVersion: runtime.Version()},
 		},
 		{
-			name:    "build info reported but nil",
-			version: "dev",
-			ok:      true,
-			want:    Info{Version: "dev", GoVersion: runtime.Version()},
+			name:   "build info reported but nil",
+			linked: linked{version: "dev"},
+			ok:     true,
+			want:   Info{Version: "dev", GoVersion: runtime.Version()},
 		},
 		{
-			name:    "build info without vcs settings",
-			version: "v1.2.3",
-			bi:      &debug.BuildInfo{GoVersion: "go1.27.4"},
-			ok:      true,
-			want:    Info{Version: "v1.2.3", GoVersion: "go1.27.4"},
+			name:   "build info without vcs settings",
+			linked: linked{version: "v1.2.3"},
+			bi:     &debug.BuildInfo{GoVersion: "go1.27.4"},
+			ok:     true,
+			want:   Info{Version: "v1.2.3", GoVersion: "go1.27.4"},
 		},
 		{
-			name:    "empty go version falls back to runtime",
-			version: "dev",
-			bi:      &debug.BuildInfo{},
-			ok:      true,
-			want:    Info{Version: "dev", GoVersion: runtime.Version()},
+			name:   "empty go version falls back to runtime",
+			linked: linked{version: "dev"},
+			bi:     &debug.BuildInfo{},
+			ok:     true,
+			want:   Info{Version: "dev", GoVersion: runtime.Version()},
 		},
 		{
-			name:    "clean vcs checkout",
-			version: "v0.1.0",
+			name:   "clean vcs checkout",
+			linked: linked{version: "v0.1.0"},
 			bi: &debug.BuildInfo{
 				GoVersion: "go1.27.4",
 				Settings: []debug.BuildSetting{
@@ -67,9 +66,8 @@ func TestRead(t *testing.T) {
 			},
 		},
 		{
-			name:    "linked commit without build info",
-			version: "dev",
-			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			name:   "linked commit without build info",
+			linked: linked{version: "dev", commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
 			want: Info{
 				Version:    "dev",
 				Commit:     "linkedsha",
@@ -78,9 +76,8 @@ func TestRead(t *testing.T) {
 			},
 		},
 		{
-			name:    "linked commit with build info lacking vcs settings",
-			version: "v1.0.0",
-			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			name:   "linked commit with build info lacking vcs settings",
+			linked: linked{version: "v1.0.0", commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
 			bi: &debug.BuildInfo{
 				GoVersion: "go1.27.4",
 				Settings:  []debug.BuildSetting{{Key: "-trimpath", Value: "true"}, {Key: "vcs.modified", Value: "false"}},
@@ -94,9 +91,8 @@ func TestRead(t *testing.T) {
 			},
 		},
 		{
-			name:    "vcs settings override linked values",
-			version: "v1.0.0",
-			linked:  linked{commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
+			name:   "vcs settings override linked values",
+			linked: linked{version: "v1.0.0", commit: "linkedsha", commitTime: "2026-11-22T09:00:00Z"},
 			bi: &debug.BuildInfo{
 				GoVersion: "go1.27.4",
 				Settings: []debug.BuildSetting{
@@ -113,8 +109,8 @@ func TestRead(t *testing.T) {
 			},
 		},
 		{
-			name:    "dirty vcs checkout",
-			version: "dev",
+			name:   "dirty vcs checkout",
+			linked: linked{version: "dev"},
 			bi: &debug.BuildInfo{
 				GoVersion: "go1.27.4",
 				Settings: []debug.BuildSetting{
@@ -130,7 +126,7 @@ func TestRead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := read(linked{version: tt.version, commit: tt.linked.commit, commitTime: tt.linked.commitTime}, func() (*debug.BuildInfo, bool) { return tt.bi, tt.ok })
+			got := read(tt.linked, func() (*debug.BuildInfo, bool) { return tt.bi, tt.ok })
 			if got != tt.want {
 				t.Errorf("read() = %+v, want %+v", got, tt.want)
 			}

@@ -69,7 +69,7 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request). All jobs run on `ubuntu-24.04`. The `check` job:
+`.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request); the weekly run executes only `govulncheck`. All jobs run on `ubuntu-24.04`. The `check` job:
 
 1. checks out the code without persisting credentials;
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
@@ -78,7 +78,7 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Two more jobs run beside it:
 
 - `govulncheck` runs `just vuln`, using the mise-pinned Go.
-- `image` builds the `Dockerfile` for `linux/amd64` and `linux/arm64` without pushing, with the same `build-push-action` inputs as the release workflow. Cross-compilation keeps it cheap, and it catches Dockerfile and workflow breakage before the first tag.
+- `image` builds the `Dockerfile` for `linux/amd64` and `linux/arm64` without pushing, with the same `build-push-action` inputs as the release workflow (including the commit and commit time build arguments). It then loads a `linux/amd64` build and asserts that `doorstep version` reports the version, commit SHA and commit time, so a renamed link-time variable fails CI. Cross-compilation keeps it cheap, and it catches Dockerfile and workflow breakage before the first tag.
 
 Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions, Go modules and Docker base images. Releases are described in [releasing.md](releasing.md).
 
