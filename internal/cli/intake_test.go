@@ -73,6 +73,11 @@ func githubEnv(srv *githubtest.Server, extra map[string]string) map[string]strin
 
 func postPush(t *testing.T, url, delivery, secret, body string) (int, string) {
 	t.Helper()
+	return postWebhook(t, url, "push", delivery, secret, body)
+}
+
+func postWebhook(t *testing.T, url, event, delivery, secret, body string) (int, string) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
@@ -80,7 +85,7 @@ func postPush(t *testing.T, url, delivery, secret, body string) (int, string) {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(github.EventHeader, "push")
+	req.Header.Set(github.EventHeader, event)
 	req.Header.Set(github.DeliveryHeader, delivery)
 	req.Header.Set(github.SignatureHeader, "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	resp, err := http.DefaultClient.Do(req)

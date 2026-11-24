@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -183,6 +184,7 @@ type engineServe struct {
 	store   *store.Store
 	addr    string
 	stderr  *lockedBuffer
+	viewer  string
 	cancel  context.CancelFunc
 	done    chan int
 }
@@ -194,15 +196,22 @@ func startEngineServe(t *testing.T, f *engineFixture) *engineServe {
 
 func startEngineServeWith(t *testing.T, f *engineFixture, cfg string) *engineServe {
 	t.Helper()
+	return startEngineServeEnv(t, f, cfg, nil)
+}
+
+func startEngineServeEnv(t *testing.T, f *engineFixture, cfg string, extra map[string]string) *engineServe {
+	t.Helper()
 	sink := newRecordingSink(t)
-	args, env := withDatabase(t, databaseURLEnv, []string{
-		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
-		"--config", writeConfig(t, f.config(cfg)),
-	}, f.env(map[string]string{
+	env := map[string]string{
 		config.EnvGitHubWebhookSecret: intakeTestSecret,
 		config.EnvPollInterval:        "0",
 		"TEST_HOOK_URL":               sink.server.URL,
-	}))
+	}
+	maps.Copy(env, extra)
+	args, env := withDatabase(t, databaseURLEnv, []string{
+		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
+		"--config", writeConfig(t, f.config(cfg)),
+	}, f.env(env))
 	ctx, cancel := context.WithCancel(t.Context())
 	s := &engineServe{t: t, fixture: f, sink: sink, env: env, stderr: &lockedBuffer{}, cancel: cancel, done: make(chan int, 1)}
 	go func() { s.done <- Run(ctx, args, io.Discard, s.stderr, envFrom(env)) }()
@@ -727,7 +736,10 @@ func (s *engineServe) getAuthorized(path string) (int, string) {
 	if err != nil {
 		s.t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token(core.RoleViewer))
+	if s.viewer == "" {
+		s.viewer = s.token(core.RoleViewer)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.viewer)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatalf("GET %s: %v", path, err)
