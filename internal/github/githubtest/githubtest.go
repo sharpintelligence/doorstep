@@ -51,6 +51,8 @@ type Server struct {
 	installations map[int64]*installation
 	tokens        map[string]grant
 	commits       map[string]*commitChecks
+	posted        map[string][]Status
+	statusHook    StatusHook
 	branches      map[string]string
 	tokenTTL      time.Duration
 	now           func() time.Time
@@ -59,6 +61,7 @@ type Server struct {
 	tokenCalls  atomic.Int64
 	checksCalls atomic.Int64
 	branchCalls atomic.Int64
+	statusCalls atomic.Int64
 
 	fakeRepos     map[string]*Repo
 	fakeRepoRoute sync.Once
@@ -78,6 +81,7 @@ func NewServer(tb testing.TB) *Server {
 		installations: make(map[int64]*installation),
 		tokens:        make(map[string]grant),
 		commits:       make(map[string]*commitChecks),
+		posted:        make(map[string][]Status),
 		branches:      make(map[string]string),
 		tokenTTL:      DefaultTokenTTL,
 		now:           time.Now,
@@ -86,6 +90,7 @@ func NewServer(tb testing.TB) *Server {
 	s.mux.HandleFunc("POST /app/installations/{id}/access_tokens", s.handleMint)
 	s.registerChecks()
 	s.registerBranches()
+	s.registerStatuses()
 	srv := httptest.NewServer(s)
 	tb.Cleanup(srv.Close)
 	s.URL = srv.URL

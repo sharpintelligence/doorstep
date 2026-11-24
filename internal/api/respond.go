@@ -26,6 +26,11 @@ const (
 	codeRollbackInProgress   = "rollback_in_progress"
 	codeBlocked              = "blocked"
 	codeUnsupportedMediaType = "unsupported_media_type"
+	codeGateNotExternal      = "gate_not_external"
+	codeDeploymentFinished   = "deployment_finished"
+	codeGateNotApplicable    = "gate_not_applicable"
+	codeGateDecided          = "gate_decided"
+	codeGateNotReady         = "gate_not_ready"
 	codeInternal             = "internal"
 )
 

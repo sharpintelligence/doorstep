@@ -38,8 +38,10 @@ func newTokenCommand(lookupEnv LookupEnv, currentUser func() string) *cobra.Comm
 	create := &cobra.Command{
 		Use:   "create",
 		Short: "Create an API token and print it once",
-		Long:  "Create an API token. The token is printed once on stdout and only its hash is stored; details go to stderr.",
-		Args:  cobra.NoArgs,
+		Long: "Create an API token. The token is printed once on stdout and only its hash is stored; details go to stderr. " +
+			"Give a CI job that only posts external gate results the reporter role.",
+		Example: "  doorstep token create --name ci-e2e --role reporter --expires-in 2160h",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			parsed, err := core.ParseRole(role)
 			if err != nil {

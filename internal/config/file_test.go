@@ -55,6 +55,7 @@ apps:
       branch: trunk
       required_checks: [test, lint]
       deployments: false
+      statuses: false
     image:
       repository: ghcr.io/example-user/blog
     gitops:
@@ -126,7 +127,7 @@ func TestParse(t *testing.T) {
 		},
 		Apps: []App{{
 			Name:   "blog",
-			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}, Deployments: new(false)},
+			Source: Source{Repo: "example-user/blog", Branch: "trunk", RequiredChecks: []string{"test", "lint"}, Deployments: new(false), Statuses: new(false)},
 			Image:  Image{Repository: "ghcr.io/example-user/blog"},
 			GitOps: GitOps{Repo: "example-org/homelab", Branch: "deploy", Path: "apps/blog/"},
 			Pin:    Pin{YAML: &YAMLPin{File: "values.yaml", Path: "image.digest"}},
@@ -622,6 +623,20 @@ func TestFileCatalogDefaults(t *testing.T) {
 			},
 		},
 		{
+			name:   "external gate without timeout stays without one",
+			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateExternal}} },
+			want:   func(a *App) { a.Gates.After = []Gate{{Type: GateExternal, Name: "external"}} },
+		},
+		{
+			name: "external gate timeout kept",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateExternal, Name: "approval", Timeout: durPtr(48 * time.Hour), ApplyToRollbacks: true}}
+			},
+		},
+		{
 			name:   "unknown gate type gets name only",
 			mutate: func(a *App) { a.Gates.Before = []Gate{{Type: "metric"}} },
 			want:   func(a *App) { a.Gates.Before = []Gate{{Type: "metric", Name: "metric"}} },
@@ -630,6 +645,11 @@ func TestFileCatalogDefaults(t *testing.T) {
 			name:   "deployments switch kept",
 			mutate: func(a *App) { a.Source.Deployments = new(false) },
 			want:   func(a *App) { a.Source.Deployments = new(false) },
+		},
+		{
+			name:   "statuses switch kept",
+			mutate: func(a *App) { a.Source.Statuses = new(false) },
+			want:   func(a *App) { a.Source.Statuses = new(false) },
 		},
 		{
 			name:   "notify kept",
@@ -668,6 +688,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Gates.After = []Gate{{Type: GateHealth}}
 	app.Notify = []string{"ops"}
 	app.Source.Deployments = new(true)
+	app.Source.Statuses = new(true)
 	app.ArgoCD.SyncTimeout = durPtr(time.Minute)
 	file := File{
 		Apps:          []App{app},
@@ -684,6 +705,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	catalog.Notifications[0].Name = "changed"
 	catalog.Notifications[0].Events[0] = "changed"
 	*catalog.Apps[0].Source.Deployments = false
+	*catalog.Apps[0].Source.Statuses = false
 	*catalog.Apps[0].ArgoCD.SyncTimeout = 0
 
 	original := file.Apps[0]
@@ -691,7 +713,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) ||
 		original.Gates.Before[1].Windows[0].Cron != "0 17 * * 5" || original.Gates.Before[1].Windows[0].Timezone != "" ||
 		original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
-		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments || *original.ArgoCD.SyncTimeout != Duration(time.Minute) {
+		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments || !*original.Source.Statuses || *original.ArgoCD.SyncTimeout != Duration(time.Minute) {
 		t.Errorf("Catalog() shares memory with the file: %+v", file)
 	}
 }

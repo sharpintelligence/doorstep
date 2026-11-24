@@ -77,6 +77,8 @@ func TestParseCommitEvent(t *testing.T) {
 		{name: "check run", event: EventCheckRun, body: `{"check_run":{"head_sha":"` + eventSHA + `"},` + repo + `}`, want: commitRef{Repository: "acme/web", SHA: eventSHA}},
 		{name: "check suite", event: EventCheckSuite, body: `{"check_suite":{"head_sha":"` + eventSHA + `"},` + repo + `}`, want: commitRef{Repository: "acme/web", SHA: eventSHA}},
 		{name: "status", event: EventStatus, body: `{"sha":"` + eventSHA + `",` + repo + `}`, want: commitRef{Repository: "acme/web", SHA: eventSHA}},
+		{name: "status with context", event: EventStatus, body: `{"sha":"` + eventSHA + `","context":"doorstep/web/after/health",` + repo + `}`, want: commitRef{Repository: "acme/web", SHA: eventSHA, Context: "doorstep/web/after/health"}},
+		{name: "check run ignores a context field", event: EventCheckRun, body: `{"check_run":{"head_sha":"` + eventSHA + `"},"context":"doorstep/x",` + repo + `}`, want: commitRef{Repository: "acme/web", SHA: eventSHA}},
 		{name: "check run reads only its own SHA", event: EventCheckRun, body: `{"sha":"` + eventSHA + `",` + repo + `}`, wantErr: "check_run payload"},
 		{name: "invalid check run JSON", event: EventCheckRun, body: `{`, wantErr: "decode check_run payload"},
 		{name: "invalid check suite JSON", event: EventCheckSuite, body: `{`, wantErr: "decode check_suite payload"},

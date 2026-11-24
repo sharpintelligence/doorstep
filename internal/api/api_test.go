@@ -262,6 +262,9 @@ func TestAuthorization(t *testing.T) {
 		{name: "viewer cannot unlock an app", role: core.RoleViewer, method: http.MethodDelete, path: "/api/v1/apps/web/lock", wantStatus: http.StatusForbidden},
 		{name: "viewer cannot lock globally", role: core.RoleViewer, method: http.MethodPost, path: "/api/v1/lock", body: `{"reason":"r"}`, wantStatus: http.StatusForbidden},
 		{name: "viewer cannot unlock globally", role: core.RoleViewer, method: http.MethodDelete, path: "/api/v1/lock", wantStatus: http.StatusForbidden},
+		{name: "reporter lists locks", role: core.RoleReporter, method: http.MethodGet, path: "/api/v1/locks", wantStatus: http.StatusOK},
+		{name: "reporter cannot lock an app", role: core.RoleReporter, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusForbidden},
+		{name: "reporter cannot unlock globally", role: core.RoleReporter, method: http.MethodDelete, path: "/api/v1/lock", wantStatus: http.StatusForbidden},
 		{name: "deployer locks an app", role: core.RoleDeployer, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusCreated},
 		{name: "admin locks an app", role: core.RoleAdmin, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusCreated},
 	}

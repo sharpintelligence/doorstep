@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/gates"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -49,6 +50,10 @@ type BlockService interface {
 	ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error)
 }
 
+type GateReporter interface {
+	Report(ctx context.Context, req gates.ReportRequest) (gates.ReportResult, error)
+}
+
 type KnownApp func(app string) bool
 
 type History interface {
@@ -64,6 +69,7 @@ type Options struct {
 	Locks         LockService
 	Rollbacks     RollbackService
 	Blocks        BlockService
+	GateReports   GateReporter
 	KnownApp      KnownApp
 	Authenticator Authenticator
 	Middleware    func(http.Handler) http.Handler
@@ -77,6 +83,7 @@ type api struct {
 	locks     LockService
 	rollbacks RollbackService
 	blocks    BlockService
+	reports   GateReporter
 	known     KnownApp
 	auth      Authenticator
 }
@@ -90,6 +97,7 @@ func New(opts Options) http.Handler {
 		locks:     opts.Locks,
 		rollbacks: opts.Rollbacks,
 		blocks:    opts.Blocks,
+		reports:   opts.GateReports,
 		known:     opts.KnownApp,
 		auth:      opts.Authenticator,
 	}
@@ -112,6 +120,9 @@ func New(opts Options) http.Handler {
 	}
 	if a.blocks != nil && a.known != nil && a.auth != nil {
 		a.registerBlocks(mux)
+	}
+	if a.reports != nil && a.known != nil && a.auth != nil {
+		a.registerGateReports(mux)
 	}
 	mux.HandleFunc(Prefix, func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such API endpoint")

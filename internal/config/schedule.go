@@ -112,14 +112,14 @@ func validateWindowName(name string) error {
 	return nil
 }
 
-func forbidScheduleFields(r reporter, field string, g Gate) {
+func forbidScheduleFields(r reporter, field string, g Gate, allowsRollbackOptIn bool) {
 	if g.Windows != nil {
 		r.addf(field+".windows", "not allowed for type %s", g.Type)
 	}
 	if g.Timezone != "" {
 		r.addf(field+".timezone", "not allowed for type %s", g.Type)
 	}
-	if g.ApplyToRollbacks {
+	if g.ApplyToRollbacks && !allowsRollbackOptIn {
 		r.addf(field+".apply_to_rollbacks", "not allowed for type %s", g.Type)
 	}
 }

@@ -220,6 +220,19 @@ func TestWebhookHandlesEvents(t *testing.T) {
 			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaA}},
 		},
 		{
+			name:       "doorstep's own commit status is ignored",
+			event:      "status",
+			body:       `{"sha":"` + shaA + `","state":"pending","context":"doorstep/blog/before/checks","repository":{"full_name":"example-user/blog"}}`,
+			wantStatus: "ignored",
+		},
+		{
+			name:              "a context that merely mentions doorstep is handled",
+			event:             "status",
+			body:              `{"sha":"` + shaA + `","state":"success","context":"ci/doorstep/e2e","repository":{"full_name":"example-user/blog"}}`,
+			wantStatus:        "processed",
+			wantReevaluations: []reevaluation{{repository: "example-user/blog", sha: shaA}},
+		},
+		{
 			name:              "installation evicts the installation",
 			event:             "installation",
 			body:              `{"action":"suspend","installation":{"id":42}}`,

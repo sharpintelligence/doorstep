@@ -123,7 +123,7 @@ auth:
   default_role: root
   github: {client_id: b, client_secret_env: B}
 `,
-			wantErr: []string{`auth.default_role: unknown role "root" (want viewer, deployer, admin)`},
+			wantErr: []string{`auth.default_role: unknown role "root" (want viewer, reporter, deployer, admin)`},
 		},
 		{
 			name: "oidc missing fields",

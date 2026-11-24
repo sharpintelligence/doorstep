@@ -44,19 +44,25 @@ type engineInput struct {
 type engineWiring struct {
 	engine *engine.Engine
 	runs   []func(context.Context) error
+	drains []func(context.Context) error
 }
 
 func newEngine(in engineInput) (engineWiring, error) {
+	statusMirror, err := newGateStatusMirror(in.catalog, in.config, in.githubApp, in.logger, in.recorder)
+	if err != nil {
+		return engineWiring{}, err
+	}
 	evaluator, err := newGateEvaluator(gateDeps{
-		store:     in.store,
-		githubApp: in.githubApp,
-		locks:     in.locks,
-		watcher:   in.watcher,
-		catalog:   in.catalog,
-		config:    in.config,
-		recorder:  in.recorder,
-		logger:    in.logger,
-		lookupEnv: in.lookupEnv,
+		statusMirror: statusMirror,
+		store:        in.store,
+		githubApp:    in.githubApp,
+		locks:        in.locks,
+		watcher:      in.watcher,
+		catalog:      in.catalog,
+		config:       in.config,
+		recorder:     in.recorder,
+		logger:       in.logger,
+		lookupEnv:    in.lookupEnv,
 	})
 	if err != nil {
 		return engineWiring{}, err
@@ -108,8 +114,13 @@ func newEngine(in engineInput) (engineWiring, error) {
 		Logger:      in.logger,
 	})
 	handle := queueHandler(e)
+	var drains []func(context.Context) error
+	if statusMirror != nil {
+		drains = append(drains, statusMirror.Close)
+	}
 	return engineWiring{
 		engine: e,
+		drains: drains,
 		runs:   []func(context.Context) error{func(ctx context.Context) error { return runner.Run(ctx, handle) }},
 	}, nil
 }

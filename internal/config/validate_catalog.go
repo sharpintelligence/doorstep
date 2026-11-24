@@ -6,6 +6,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
 func NotificationEvents() []string {
@@ -224,6 +226,8 @@ func validateApp(r reporter, a App, notifications map[string]bool, servers []str
 			r.addf(field, "must not be empty")
 		case checks[check]:
 			r.addf(field, "duplicate check %q", check)
+		case core.IsDoorstepStatusContext(check):
+			r.addf(field, "%q uses the %s prefix that doorstep reserves for its own commit statuses", check, core.StatusContextPrefix)
 		}
 		checks[check] = true
 	}
@@ -330,10 +334,11 @@ func validateGates(r reporter, g Gates, servers []string) {
 				}
 				continue
 			}
-			if spec.phase != phase.phase {
+			if spec.phase != "" && spec.phase != phase.phase {
 				r.addf(field+".type", "%s gates run only in gates.%s", gate.Type, spec.phase)
 			}
-			if spec.allowsTimeout && (gate.Timeout == nil || *gate.Timeout <= 0) {
+			missingTimeout := gate.Timeout == nil && spec.defaultTimeout != nil
+			if spec.allowsTimeout && (missingTimeout || (gate.Timeout != nil && *gate.Timeout <= 0)) {
 				r.addf(field+".timeout", "must be positive")
 			}
 			if !spec.allowsTimeout && gate.Timeout != nil {
@@ -351,7 +356,7 @@ func validateGates(r reporter, g Gates, servers []string) {
 			if spec.requiresWindows {
 				validateScheduleGate(r, field, gate)
 			} else {
-				forbidScheduleFields(r, field, gate)
+				forbidScheduleFields(r, field, gate, spec.allowsRollbackOptIn)
 			}
 			if spec.prometheus {
 				validatePrometheusGate(r, field, gate, servers)

@@ -321,6 +321,8 @@ func TestRollbackAndBlockAuthorization(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "viewer cannot roll back", role: core.RoleViewer, method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{}`, wantStatus: http.StatusForbidden},
+		{name: "reporter cannot roll back", role: core.RoleReporter, method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{}`, wantStatus: http.StatusForbidden},
+		{name: "reporter cannot block", role: core.RoleReporter, method: http.MethodPost, path: "/api/v1/apps/web/blocks", body: `{"digest":"` + string(badDigest) + `","reason":"r"}`, wantStatus: http.StatusForbidden},
 		{name: "deployer rolls back", role: core.RoleDeployer, method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{}`, wantStatus: http.StatusCreated},
 		{name: "admin rolls back", role: core.RoleAdmin, method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{}`, wantStatus: http.StatusCreated},
 		{name: "viewer lists blocks", role: core.RoleViewer, method: http.MethodGet, path: "/api/v1/apps/web/blocks", wantStatus: http.StatusOK},

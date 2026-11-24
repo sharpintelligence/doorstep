@@ -326,6 +326,12 @@ func TestSchemaMaintainsUpdatedAt(t *testing.T) {
 			update: "UPDATE gate_results SET status = 'passed', updated_at = '2000-01-01' WHERE deployment_id = $1",
 			read:   "SELECT updated_at > started_at AND updated_at > now() - interval '1 minute' FROM gate_results WHERE deployment_id = $1",
 		},
+		{
+			name:   "gate_reports",
+			setup:  "INSERT INTO gate_reports (deployment_id, gate, status, reported_by, created_at) VALUES ($1, 'e2e', 'pending', 'token:ci', now() - interval '1 hour')",
+			update: "UPDATE gate_reports SET status = 'passed', updated_at = '2000-01-01' WHERE deployment_id = $1",
+			read:   "SELECT updated_at > created_at AND updated_at > now() - interval '1 minute' FROM gate_reports WHERE deployment_id = $1",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

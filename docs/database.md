@@ -38,7 +38,7 @@ All ids are `bigint GENERATED ALWAYS AS IDENTITY`. Timestamps are `timestamptz`.
 
 - **Denormalised `app_id`.** `queue_entries`, `deployment_events` and `locks` carry the target's `app_id` next to `deployment_id`. `deployments` has `UNIQUE (id, app_id)`, and each of those tables references `deployments (id, app_id)` with a composite foreign key, so the copy can never disagree with the deployment it belongs to. Moving a deployment to another app is rejected while anything references it.
 - **Foreign key indexes.** Every foreign key has an index that leads with its first column (partial, `WHERE col IS NOT NULL`, for the nullable lineage columns and `locks.deployment_id`), so cascades and `SET NULL` actions never scan a whole table. A schema test enforces this for every foreign key, including those added by later migrations.
-- **`updated_at`.** A `BEFORE UPDATE` trigger (`set_updated_at()`) sets `updated_at` to `now()` on every update of `deployments`, `gate_results` and `tracked_commits`. Repository code never sets it. Tables added later that have an `updated_at` column attach the same trigger.
+- **`updated_at`.** A `BEFORE UPDATE` trigger (`set_updated_at()`) sets `updated_at` to `now()` on every update of `deployments`, `gate_results`, `gate_reports` and `tracked_commits`. Repository code never sets it. Tables added later that have an `updated_at` column attach the same trigger.
 
 ### `apps`
 
@@ -125,6 +125,23 @@ The latest result of each named gate for a deployment: `UNIQUE (deployment_id, n
 
 Migration `00006_gate_result_phase.sql` added `type` and `phase`. Both are `NOT NULL` with no default, so every writer must state them; the temporary defaults used to add the columns are dropped in the same migration.
 
+### `gate_reports`
+
+Results posted by other systems for gates of type `external` ([gates.md](gates.md#external)), one row per deployment and gate: `UNIQUE (deployment_id, gate)`. Only the API writes it; the `external` gate reads it and the evaluator turns it into the `gate_results` row, so the evaluator stays the only writer of gate results.
+
+| Column | Notes |
+| --- | --- |
+| `deployment_id` | `ON DELETE CASCADE` |
+| `gate` | configured gate name, not blank |
+| `status` | `pending`, `passed` or `failed` |
+| `message` | cleaned like gate messages |
+| `url` | absolute `http` or `https` link, at most 2048 bytes, or empty |
+| `details` | `jsonb` object of at most 32 KiB, `{}` when there is none |
+| `reported_by` | the reporting actor (`token:ci-e2e`), not blank |
+| `created_at`, `updated_at` | first report and latest change |
+
+`Store.SaveGateReport(ctx, report, audit)` validates the report, then in one transaction inserts the row (`ON CONFLICT DO NOTHING`) or locks the existing one with `SELECT ... FOR UPDATE`. A `pending` report may be replaced; a `passed` or `failed` report is final, so the same verdict again returns the stored row unchanged and a different one returns `core.ErrGateDecided`. It also returns `core.ErrGateDecided` when the deployment's `gate_results` row for that gate already has a verdict. The `gate.report` audit row is written in the same transaction, and only when the stored report actually changed. An unknown deployment is `core.ErrNotFound`. `Store.GetGateReport` reads one row, and `Store.ActiveDeploymentForCommit(ctx, target, sha)` returns the newest unfinished deployment of a target whose commit is `sha`, for the API's commit form.
+
 ### `deployment_events`
 
 The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transition`, `gate`, `lock`, `note`), optional `from_state` and `to_state`, `actor`, `message`, `data jsonb`, `occurred_at`. Indexed by `(deployment_id, id)` for a deployment's timeline and `(app_id, id DESC)` for a target's recent activity. Append-only is a property of the API (there are no update or delete methods), not of triggers, so retention pruning stays possible. Creating a deployment writes its first `transition` event (to `queued`, without `from_state`) in the same transaction; every later transition records both `from_state` and `to_state`. Lineage written outside a transition is recorded as a `note` event with the message `lineage recorded`.
@@ -175,6 +192,8 @@ A block is active while `cleared_at` is null; cleared rows stay as history. Part
 ### `api_tokens`
 
 One row per API token ([authentication.md](authentication.md#api-tokens)). `name` is unique and matches `^[a-z0-9][a-z0-9._-]{0,62}$`; `token_hash` is the 32-byte SHA-256 of the token and unique, and the token itself is never stored. `role` is a `core.Role`. `created_by` is the creating actor (`cli:root`). `expires_at` is null for tokens that never expire; `last_used_at` is updated at most once a minute; `revoked_at` marks a revoked token, whose row is kept so its name cannot be reused. Lookup is an equality match on `token_hash` that also requires `revoked_at IS NULL` and an unexpired `expires_at`.
+
+Migration `00010_gate_reports.sql` added the `reporter` role to the `role` checks of `api_tokens` and `auth_sessions` and to `audit_log.actor_role`.
 
 ### `auth_sessions`
 

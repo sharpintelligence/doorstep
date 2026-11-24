@@ -10,6 +10,7 @@ type Role string
 
 const (
 	RoleViewer   Role = "viewer"
+	RoleReporter Role = "reporter"
 	RoleDeployer Role = "deployer"
 	RoleAdmin    Role = "admin"
 )
@@ -17,7 +18,7 @@ const (
 var ErrUnknownRole = errors.New("unknown role")
 
 func Roles() []Role {
-	return []Role{RoleViewer, RoleDeployer, RoleAdmin}
+	return []Role{RoleViewer, RoleReporter, RoleDeployer, RoleAdmin}
 }
 
 func ParseRole(s string) (Role, error) {

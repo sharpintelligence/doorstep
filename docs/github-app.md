@@ -33,7 +33,7 @@ Repository permissions:
 | Contents | Read and write | GitOps repository; read on application repositories | read manifests and commit digest pins through the Contents and Git Data APIs; read the head of an app's branch and receive push events |
 | Pull requests | Read and write | GitOps repository | open, update, squash-merge and close doorstep's own pin pull requests for apps in `pull_request` mode |
 | Checks | Read | application repositories | read check runs for the CI gate |
-| Commit statuses | Read and write | application repositories | read statuses for the CI gate; write statuses that mirror doorstep's gates |
+| Commit statuses | Read and write | application repositories | read statuses for the CI gate; write a `doorstep/<app>/<phase>/<gate>` status per gate on each deployed commit ([gates.md](gates.md#github-commit-statuses)) |
 | Deployments | Read and write | application repositories | create a GitHub deployment per doorstep deployment and post its statuses (`queued`, `in_progress`, `success`, `failure`, `inactive`) |
 
 No organization or account permissions are needed.
@@ -41,6 +41,8 @@ No organization or account permissions are needed.
 Before recording a push, doorstep reads `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` to check that the pushed commit is still the branch head (Contents read).
 
 To decide whether a commit is green, doorstep reads, per tracked commit and with the installation token, `GET /repos/{owner}/{repo}/commits/{sha}/status` and the commit's check runs. When every app following the commit lists `required_checks`, it reads only those check runs, one `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name={name}&filter=latest` per name. Otherwise it reads every check run (`check-runs?filter=latest`) and `GET /repos/{owner}/{repo}/commits/{sha}/check-suites`. These need only the Checks and Commit statuses read permissions above. Results are read 100 per page; more than 1,000 results for one request (all check runs, the check runs of one name, statuses or suites) is treated as an error rather than evaluated on a partial list, so very large monorepos should list `required_checks`.
+
+To mirror gates, doorstep calls `POST /repos/{owner}/{repo}/statuses/{sha}` (Commit statuses write) on the deployment's app commit whenever a gate result changes. Without the write permission the mirror fails with `403`, doorstep logs `cannot mirror gates to github` once per repository per hour and keeps deploying; set `apps[].source.statuses: false` to turn the mirror off for an app instead.
 
 For apps in `pull_request` mode, enable **Allow squash merging** on the GitOps repository. doorstep merges its own pull requests once required status checks pass; if branch protection or a ruleset requires approving reviews, or forbids direct pushes for apps in `commit` mode, add the App to the bypass list. doorstep only ever merges a pull request that changes nothing but its own pin edit ([gitops.md](gitops.md#pull_request)).
 **Adding a permission to an existing App.** When you add *Deployments: Read and write* to an App that is already installed, GitHub asks the owner of each installation to accept the new permission (on the account's **Settings → GitHub Apps** page, or from the email GitHub sends). Until an installation accepts it, doorstep's deployment reports for that installation's repositories fail with `403`; doorstep logs `cannot report deployments to github` once per repository per hour and keeps deploying. To skip GitHub deployments for an app instead, set `apps[].source.deployments: false`.
@@ -149,6 +151,7 @@ The secret is read once at startup (one trailing newline is trimmed); an empty o
 | Event | Effect |
 | --- | --- |
 | `push` to `refs/heads/<branch>` | handed to intake with the pusher (`sender.login`, else `pusher.name`). Apps following that repository and branch track the commit if it is still the branch head; other branches match no app and cost nothing. Branch deletions, tag pushes and the all-zero SHA are ignored. |
+| `status` whose `context` starts with `doorstep/` | answered `200 {"status":"ignored"}`: these are doorstep's own gate statuses, which never count as CI ([configuration.md](configuration.md#required-checks)), so re-evaluating on them would only cost GitHub calls |
 | `check_run`, `check_suite`, `status` (any action) | re-evaluates the open tracked commits for that repository and SHA (`check_run.head_sha`, `check_suite.head_sha`, `sha`); a green commit is enqueued once. Commits doorstep does not track cost one database lookup and no GitHub call. |
 | `installation`, `installation_repositories` | drops this replica's cached installation lookup and token for that installation and for every removed repository, so the change applies at once. Other replicas recover on their own through the one-hour cache and the `404`/`403` handling described under [How tokens are handled](#how-tokens-are-handled). |
 | `ping` | answered `200`. |
@@ -219,4 +222,5 @@ GitHub keeps one webhook secret per App, so a rotation has a short window where 
 | `github api: 401 Unauthorized` with `A JSON web token could not be decoded` or `Integration not found` | The App ID does not match the private key, or the key was deleted from the App. Check both settings. |
 | `invalid github app private key` at startup | The key is not a PEM RSA key of at least 2048 bits, or an inline value lost its line breaks. Use the file form, or escape newlines as `\n`. |
 | `cannot report deployments to github` (warning) | The App lacks *Deployments: Read and write*, an installation has not accepted it yet, or the repository is not in the installation's selection. Grant or accept the permission, or set `source.deployments: false` on the app. Deploys are not affected. |
+| `cannot mirror gates to github` (warning) | The App lacks *Commit statuses: Read and write*, an installation has not accepted it yet, or the repository is not in the installation's selection. Grant or accept the permission, or set `source.statuses: false` on the app. Deploys are not affected. |
 | `request host does not match the github api url` | A request or redirect pointed somewhere other than `DOORSTEP_GITHUB_API_URL`. Check the API URL, in particular for GitHub Enterprise Server. |

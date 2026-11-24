@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/github"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -161,6 +162,10 @@ func (h *WebhookHandler) dispatch(ctx context.Context, d delivery, body []byte) 
 			return h.malformed(ctx, d, err)
 		}
 		log := d.log.With(slog.String("repository", ref.Repository), slog.String("sha", ref.SHA))
+		if core.IsDoorstepStatusContext(ref.Context) {
+			log.DebugContext(ctx, "ignoring doorstep's own commit status", slog.String("context", ref.Context))
+			return http.StatusOK, WebhookIgnored, ""
+		}
 		return h.run(ctx, log, func(ctx context.Context) ([]Result, error) {
 			return h.intake.Reevaluate(ctx, ref.Repository, ref.SHA)
 		})

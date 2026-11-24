@@ -32,7 +32,7 @@ func DefaultOIDCScopes() []string {
 }
 
 func RoleNames() []string {
-	return []string{"viewer", "deployer", "admin"}
+	return []string{"viewer", "reporter", "deployer", "admin"}
 }
 
 type Auth struct {
