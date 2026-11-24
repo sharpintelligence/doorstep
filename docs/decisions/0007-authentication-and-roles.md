@@ -48,8 +48,9 @@ Adapters may not import each other, so locks or the engine calling into `auth` t
 
 - `internal/auth` exists and imports `core`, `store` and `github` (for GitHub sign-in); the `auth -> github` edge is a documented exception to the adapter rules.
 - The API and UI must wrap every handler that needs identity with `RequireRole` or `RequireRoleOrLogin`; anything they forget is anonymous rather than broken, so their tests must check the role of every route.
-- `core.Actor.String()` (`user:alice`, `token:ci`, `cli:root`, `system`) is the value for the existing `requested_by`, `owner` and `actor` columns, so attribution needs no schema change.
-- A role change or a removal from a group takes effect at the next sign-in; the session lifetime bounds how stale a role can be. Ending sessions early means deleting rows.
+- `core.Actor.String()` (`user:oidc:<sub>`, `user:github:<id>`, `token:ci`, `cli:alice`, `system`) is the value for the existing `requested_by`, `owner` and `actor` columns, so attribution needs no schema change. A user's actor ID is `provider:subject`, never a username or login, because those can be changed or reused and lock ownership will compare these strings; the username is only the actor's display name. GitHub role bindings name users by numeric ID (`id:583231`) for the same reason.
+- A role change or a removal from a group takes effect at the next sign-in; the session lifetime bounds how stale a role can be. `doorstep session revoke` ends sessions early and records a `session.revoke` audit row.
 - GitHub team rules with GitHub App credentials need the App's *Members: read* permission; an OAuth App avoids widening the deploying App.
+- The `deploy`, `rollback` and `lock` audit actions exist only as constants until their features land; those features must record the audit row inside the action's transaction and wrap their routes in `RequireRole`.
 - Audit rows are kept forever until a retention policy is added as a deliberate migration.
 - An outage of the identity provider stops sign-in but not deploys or token access.

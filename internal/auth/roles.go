@@ -12,6 +12,9 @@ import (
 const (
 	ProviderOIDC   = "oidc"
 	ProviderGitHub = "github"
+
+	GitHubUserPrefix      = "id:"
+	maxGitHubUserIDDigits = 19
 )
 
 type Binding struct {
@@ -33,12 +36,28 @@ func (m RoleMapper) Validate() error {
 	if m.Default != "" && !m.Default.Valid() {
 		errs = append(errs, fmt.Errorf("default role: %w %q", core.ErrUnknownRole, m.Default))
 	}
-	for role := range m.Bindings {
+	for role, binding := range m.Bindings {
 		if !role.Valid() {
 			errs = append(errs, fmt.Errorf("binding: %w %q", core.ErrUnknownRole, role))
 		}
+		if m.Provider != ProviderGitHub {
+			continue
+		}
+		for _, user := range binding.Users {
+			if !IsGitHubUserEntry(user) {
+				errs = append(errs, fmt.Errorf("binding %s: user %q must be %s followed by a numeric GitHub user ID", role, user, GitHubUserPrefix))
+			}
+		}
 	}
 	return errors.Join(errs...)
+}
+
+func IsGitHubUserEntry(entry string) bool {
+	id, ok := strings.CutPrefix(entry, GitHubUserPrefix)
+	if !ok || id == "" || len(id) > maxGitHubUserIDDigits {
+		return false
+	}
+	return !strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' })
 }
 
 func (m RoleMapper) Resolve(id Identity) (core.Role, bool) {
@@ -71,7 +90,7 @@ func (m RoleMapper) matches(b Binding, id Identity) bool {
 
 func (m RoleMapper) matchesUser(entry string, id Identity) bool {
 	if m.Provider == ProviderGitHub {
-		return strings.EqualFold(entry, id.Username)
+		return entry == GitHubUserPrefix+id.Subject
 	}
 	if entry == id.Subject {
 		return true

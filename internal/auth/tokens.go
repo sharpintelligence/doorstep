@@ -28,7 +28,7 @@ type CreateTokenInput struct {
 	Name      string
 	Role      core.Role
 	ExpiresIn time.Duration
-	By        core.Actor
+	By        Requester
 }
 
 func NewTokens(repo Repository, logger *slog.Logger) *Tokens {
@@ -60,7 +60,7 @@ func (t *Tokens) Create(ctx context.Context, in CreateTokenInput) (string, store
 	if in.ExpiresIn < 0 {
 		errs = append(errs, fmt.Errorf("expiry must not be negative, got %s", in.ExpiresIn))
 	}
-	if err := in.By.Validate(); err != nil {
+	if err := in.By.Actor.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("creator: %w", err))
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -75,7 +75,7 @@ func (t *Tokens) Create(ctx context.Context, in CreateTokenInput) (string, store
 			Name:      in.Name,
 			Hash:      hash,
 			Role:      in.Role,
-			CreatedBy: in.By.String(),
+			CreatedBy: in.By.Actor.String(),
 			TTL:       in.ExpiresIn,
 		})
 		if err != nil {
@@ -85,7 +85,7 @@ func (t *Tokens) Create(ctx context.Context, in CreateTokenInput) (string, store
 		if created.ExpiresAt != nil {
 			detail["expires_at"] = created.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		return tx.RecordAudit(ctx, core.AuditEntry{Actor: in.By, Action: core.AuditTokenCreate, Detail: mustJSON(detail)})
+		return tx.RecordAudit(ctx, core.AuditEntry{Actor: in.By.Actor, Action: core.AuditTokenCreate, Detail: in.By.auditDetail(detail)})
 	})
 	if err != nil {
 		return "", store.APIToken{}, err
@@ -97,8 +97,8 @@ func (t *Tokens) List(ctx context.Context) ([]store.APIToken, error) {
 	return t.repo.ListAPITokens(ctx)
 }
 
-func (t *Tokens) Revoke(ctx context.Context, name string, by core.Actor) error {
-	if err := by.Validate(); err != nil {
+func (t *Tokens) Revoke(ctx context.Context, name string, by Requester) error {
+	if err := by.Actor.Validate(); err != nil {
 		return fmt.Errorf("revoker: %w", err)
 	}
 	return t.repo.InTx(ctx, func(tx Repository) error {
@@ -107,9 +107,9 @@ func (t *Tokens) Revoke(ctx context.Context, name string, by core.Actor) error {
 			return err
 		}
 		return tx.RecordAudit(ctx, core.AuditEntry{
-			Actor:  by,
+			Actor:  by.Actor,
 			Action: core.AuditTokenRevoke,
-			Detail: mustJSON(map[string]any{"token": revoked.Name, "role": revoked.Role}),
+			Detail: by.auditDetail(map[string]any{"token": revoked.Name, "role": revoked.Role}),
 		})
 	})
 }

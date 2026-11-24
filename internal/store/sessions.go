@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,7 +47,10 @@ type NewLogin struct {
 	PKCEVerifier string
 	ReturnTo     string
 	TTL          time.Duration
+	MaxPending   int
 }
+
+var ErrTooManyLogins = errors.New("too many sign-ins in progress")
 
 const sessionColumns = `
     id, provider, subject, username, name, email, role, created_at, expires_at`
@@ -72,7 +76,21 @@ const deleteExpiredLoginsSQL = `DELETE FROM auth_logins WHERE expires_at <= now(
 
 const insertLoginSQL = `
 INSERT INTO auth_logins (state_hash, nonce, pkce_verifier, return_to, expires_at)
-VALUES ($1, $2, $3, $4, now() + $5::bigint * interval '1 microsecond')`
+SELECT $1, $2, $3, $4, now() + $5::bigint * interval '1 microsecond'
+WHERE $6::bigint <= 0
+   OR (SELECT count(*) FROM (SELECT 1 FROM auth_logins WHERE expires_at > now() LIMIT $6::bigint) AS pending) < $6::bigint`
+
+const listSessionsSQL = `
+SELECT` + sessionColumns + `
+FROM auth_sessions
+WHERE expires_at > now()
+ORDER BY created_at, id`
+
+const deleteUserSessionsSQL = `
+DELETE FROM auth_sessions
+WHERE subject = $1 OR provider || ':' || subject = $1 OR lower(username) = lower($1)`
+
+const deleteAllSessionsSQL = `DELETE FROM auth_sessions`
 
 const consumeLoginSQL = `
 DELETE FROM auth_logins
@@ -132,10 +150,45 @@ func (s *Store) CreateLogin(ctx context.Context, n NewLogin) error {
 	if n.TTL <= 0 {
 		return errors.New("create login: ttl must be positive")
 	}
-	if _, err := s.db.Exec(ctx, insertLoginSQL, n.StateHash[:], n.Nonce, n.PKCEVerifier, n.ReturnTo, n.TTL.Microseconds()); err != nil {
+	tag, err := s.db.Exec(ctx, insertLoginSQL, n.StateHash[:], n.Nonce, n.PKCEVerifier, n.ReturnTo, n.TTL.Microseconds(), n.MaxPending)
+	if err != nil {
 		return fmt.Errorf("create login: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("create login: %w", ErrTooManyLogins)
+	}
 	return nil
+}
+
+func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
+	rows, err := s.db.Query(ctx, listSessionsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Session, error) { return scanSession(row) })
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+func (s *Store) DeleteUserSessions(ctx context.Context, user string) (int64, error) {
+	if strings.TrimSpace(user) == "" {
+		return 0, errors.New("delete user sessions: user must not be empty")
+	}
+	tag, err := s.db.Exec(ctx, deleteUserSessionsSQL, user)
+	if err != nil {
+		return 0, fmt.Errorf("delete user sessions: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) DeleteAllSessions(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx, deleteAllSessionsSQL)
+	if err != nil {
+		return 0, fmt.Errorf("delete all sessions: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *Store) ConsumeLogin(ctx context.Context, stateHash [32]byte) (Login, error) {

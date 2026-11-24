@@ -1,10 +1,14 @@
 package auth
 
 import (
+	"cmp"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -15,6 +19,8 @@ import (
 
 const (
 	loginTTL          = 10 * time.Minute
+	maxPendingLogins  = 10000
+	purgeInterval     = time.Minute
 	maxLoggedIdPError = 200
 )
 
@@ -26,6 +32,8 @@ type Handler struct {
 	redirectURL string
 	sessionTTL  time.Duration
 	logger      *slog.Logger
+	now         func() time.Time
+	nextPurge   atomic.Int64
 }
 
 func (h *Handler) Routes() map[string]http.Handler {
@@ -40,9 +48,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	w.Header().Set("Cache-Control", "no-store")
 	returnTo := SafeReturnPath(r.URL.Query().Get("return_to"))
-	if _, err := h.repo.DeleteExpiredAuthRows(ctx); err != nil {
-		h.logger.WarnContext(ctx, "purging expired sessions failed", slog.Any("error", err))
-	}
+	h.purgeExpired(ctx)
 
 	state, stateHash := newSecret()
 	nonce, _ := newSecret()
@@ -59,7 +65,14 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		PKCEVerifier: verifier,
 		ReturnTo:     returnTo,
 		TTL:          loginTTL,
+		MaxPending:   maxPendingLogins,
 	})
+	if errors.Is(err, store.ErrTooManyLogins) {
+		h.logger.WarnContext(ctx, "sign-in refused", slog.String("reason", "too many sign-ins in progress"), slog.Int("limit", maxPendingLogins))
+		w.Header().Set("Retry-After", strconv.Itoa(int(loginTTL.Seconds())))
+		http.Error(w, "Too many sign-ins are in progress. Try again later.", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		h.logger.ErrorContext(ctx, "starting sign-in failed", slog.Any("error", err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -112,7 +125,12 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sign-in failed. Start again from the sign-in page.", http.StatusUnauthorized)
 		return
 	}
-	actor := identityActor(identity)
+	actor := UserActor(h.provider.Name(), identity.Subject, identity.Username)
+	if err := actor.Validate(); err != nil {
+		h.logger.WarnContext(ctx, "sign-in failed", slog.String("provider", h.provider.Name()), slog.Any("error", err))
+		http.Error(w, "Sign-in failed. Start again from the sign-in page.", http.StatusUnauthorized)
+		return
+	}
 	role, ok := h.mapper.Resolve(identity)
 	if !ok {
 		h.logger.WarnContext(ctx, "sign-in denied", slog.String("actor", actor.String()), slog.String("subject", identity.Subject))
@@ -126,8 +144,8 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 			Hash:     hash,
 			Provider: h.provider.Name(),
 			Subject:  identity.Subject,
-			Username: actor.ID,
-			Name:     actor.Name,
+			Username: actor.Name,
+			Name:     cmp.Or(identity.Name, actor.Name),
 			Email:    identity.Email,
 			Role:     role,
 			TTL:      h.sessionTTL,
@@ -138,7 +156,12 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 			Actor:  actor,
 			Role:   role,
 			Action: core.AuditLogin,
-			Detail: mustJSON(map[string]any{"provider": h.provider.Name(), "subject": identity.Subject}),
+			Detail: mustJSON(map[string]any{
+				"provider": h.provider.Name(),
+				"subject":  identity.Subject,
+				"username": actor.Name,
+				"name":     cmp.Or(identity.Name, actor.Name),
+			}),
 		})
 	})
 	if err != nil {
@@ -174,15 +197,15 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func identityActor(id Identity) core.Actor {
-	actor := core.Actor{Kind: core.ActorUser, ID: id.Username, Name: id.Name}
-	if actor.Validate() != nil {
-		actor.ID = id.Subject
+func (h *Handler) purgeExpired(ctx context.Context) {
+	now := h.now()
+	next := h.nextPurge.Load()
+	if now.UnixNano() < next || !h.nextPurge.CompareAndSwap(next, now.Add(purgeInterval).UnixNano()) {
+		return
 	}
-	if actor.Name == "" {
-		actor.Name = actor.ID
+	if _, err := h.repo.DeleteExpiredAuthRows(ctx); err != nil {
+		h.logger.WarnContext(ctx, "purging expired sessions failed", slog.Any("error", err))
 	}
-	return actor
 }
 
 func truncate(s string) string {

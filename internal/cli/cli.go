@@ -35,6 +35,7 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newServeCommand(lookupEnv),
 		newMigrateCommand(lookupEnv),
 		newTokenCommand(lookupEnv, osUsername),
+		newSessionCommand(lookupEnv, osUsername),
 		newImageCommand(lookupEnv),
 		newConfigCommand(lookupEnv),
 		newLockCommand(lookupEnv),

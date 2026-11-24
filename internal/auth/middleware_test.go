@@ -319,7 +319,7 @@ func TestMiddleware(t *testing.T) {
 					t.Errorf("principal = %+v, want token ci with role %s", s, tt.wantRole)
 				}
 			case viaSession:
-				if !s.Authenticated || s.Method != string(MethodSession) || s.Role != string(tt.wantRole) || s.Actor != "user:alice" || s.CSRF == "" {
+				if !s.Authenticated || s.Method != string(MethodSession) || s.Role != string(tt.wantRole) || s.Actor != "user:oidc:sub" || s.CSRF == "" {
 					t.Errorf("principal = %+v, want session alice with role %s", s, tt.wantRole)
 				}
 			}

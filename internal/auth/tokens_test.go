@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
-var cliRoot = core.Actor{Kind: core.ActorCLI, ID: "root"}
+var cliRoot = Requester{Actor: core.Actor{Kind: core.ActorCLI, ID: "root"}, Origin: map[string]string{"os_user": "root"}}
 
 func TestValidateTokenName(t *testing.T) {
 	t.Parallel()
@@ -81,11 +82,11 @@ func TestTokensCreateAndAuthenticate(t *testing.T) {
 			}
 
 			audit := state.audit
-			if len(audit) != 1 || audit[0].Action != core.AuditTokenCreate || audit[0].Actor != cliRoot {
+			if len(audit) != 1 || audit[0].Action != core.AuditTokenCreate || audit[0].Actor != cliRoot.Actor {
 				t.Fatalf("audit = %+v", audit)
 			}
-			var detail map[string]string
-			if err := json.Unmarshal(audit[0].Detail, &detail); err != nil || detail["token"] != tt.name || detail["role"] != string(tt.role) {
+			var detail map[string]any
+			if err := json.Unmarshal(audit[0].Detail, &detail); err != nil || detail["token"] != tt.name || detail["role"] != string(tt.role) || !reflect.DeepEqual(detail["origin"], map[string]any{"os_user": "root"}) {
 				t.Errorf("audit detail = %s", audit[0].Detail)
 			}
 			if _, hasExpiry := detail["expires_at"]; hasExpiry != (tt.expiresIn > 0) {
@@ -222,14 +223,14 @@ func TestTokensListAndRevoke(t *testing.T) {
 	mustCreateToken(t, tokens, "a", core.RoleViewer)
 	mustCreateToken(t, tokens, "b", core.RoleAdmin)
 
-	admin := core.Actor{Kind: core.ActorUser, ID: "alice"}
+	admin := Requester{Actor: core.Actor{Kind: core.ActorUser, ID: "oidc:sub-1", Name: "alice"}}
 	if err := tokens.Revoke(t.Context(), "b", admin); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if err := tokens.Revoke(t.Context(), "b", admin); !errors.Is(err, core.ErrNotFound) {
 		t.Errorf("second Revoke error = %v, want ErrNotFound", err)
 	}
-	if err := tokens.Revoke(t.Context(), "a", core.Actor{}); err == nil {
+	if err := tokens.Revoke(t.Context(), "a", Requester{}); err == nil {
 		t.Error("Revoke without an actor succeeded")
 	}
 	list, err := tokens.List(t.Context())
@@ -238,7 +239,7 @@ func TestTokensListAndRevoke(t *testing.T) {
 	}
 	audit := repo.snapshot().audit
 	last := audit[len(audit)-1]
-	if len(audit) != 3 || last.Action != core.AuditTokenRevoke || last.Actor != admin || !strings.Contains(string(last.Detail), `"token":"b"`) {
+	if len(audit) != 3 || last.Action != core.AuditTokenRevoke || last.Actor != admin.Actor || strings.Contains(string(last.Detail), "origin") || !strings.Contains(string(last.Detail), `"token":"b"`) {
 		t.Errorf("audit = %+v", audit)
 	}
 }

@@ -13,6 +13,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/oauth2 v0.38.0
+	golang.org/x/sync v0.25.0
 	sigs.k8s.io/kustomize/api v0.21.0
 	sigs.k8s.io/kustomize/kyaml v0.21.0
 )
@@ -51,7 +52,6 @@ require (
 	github.com/xlab/treeprint v1.2.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
-	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect

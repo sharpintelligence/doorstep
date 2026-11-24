@@ -81,7 +81,7 @@ func TestSignInAgainstPostgres(t *testing.T) {
 	if rec := post("/deploy", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("deploy without csrf = %d", rec.Code)
 	}
-	if rec := post("/deploy", csrfTokenFor(session.Value)); rec.Code != http.StatusOK || rec.Body.String() != "user:alice" {
+	if rec := post("/deploy", csrfTokenFor(session.Value)); rec.Code != http.StatusOK || rec.Body.String() != "user:oidc:sub-1" {
 		t.Errorf("deploy = %d %q", rec.Code, rec.Body.String())
 	}
 	if rec := post(LogoutPath, csrfTokenFor(session.Value)); rec.Code != http.StatusSeeOther {
@@ -113,7 +113,7 @@ func TestSignInAgainstPostgres(t *testing.T) {
 	for _, e := range slices.Backward(entries) {
 		actions = append(actions, string(e.Action)+" "+e.Actor.String())
 	}
-	want := []string{"auth.login user:alice", "auth.logout user:alice", "token.create cli:root", "token.revoke cli:root"}
+	want := []string{"auth.login user:oidc:sub-1", "auth.logout user:oidc:sub-1", "token.create cli:root", "token.revoke cli:root"}
 	if !slices.Equal(actions, want) {
 		t.Errorf("audit = %v, want %v", actions, want)
 	}

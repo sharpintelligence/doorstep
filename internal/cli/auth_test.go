@@ -131,7 +131,7 @@ auth:
     client_secret_env: TEST_GITHUB_SECRET
   roles:
     admin:
-      users: [octocat]
+      users: ["id:583231"]
 `,
 			env:          map[string]string{"TEST_GITHUB_SECRET": "s3cret-github", config.EnvPublicURL: "https://doorstep.example.com"},
 			wantProvider: "github",
@@ -169,8 +169,15 @@ auth:
 			}
 
 			bad := http.Header{"Authorization": {"Bearer dsp_not-a-real-token"}}
-			if resp := noRedirectGet(t, "http://"+addr+"/healthz", bad); resp.code != http.StatusUnauthorized {
-				t.Errorf("main listener with a bad token = %d, want 401", resp.code)
+			if tt.wantLogin != "" {
+				if resp := noRedirectGet(t, "http://"+addr+"/auth/login", bad); resp.code != http.StatusUnauthorized {
+					t.Errorf("auth route with a bad token = %d, want 401", resp.code)
+				}
+			}
+			for _, path := range []string{"/healthz", "/readyz"} {
+				if resp := noRedirectGet(t, "http://"+addr+path, bad); resp.code != http.StatusOK {
+					t.Errorf("GET %s with a bad token = %d, want 200 (built-in endpoints are not authenticated)", path, resp.code)
+				}
 			}
 			if resp := noRedirectGet(t, "http://"+metricsAddr+"/metrics", bad); resp.code != http.StatusOK {
 				t.Errorf("metrics listener with a bad token = %d, want 200 (not authenticated)", resp.code)
@@ -234,8 +241,9 @@ auth:
 	if resp := noRedirectGet(t, "http://"+addr+"/auth/login", nil); resp.code != http.StatusServiceUnavailable {
 		t.Errorf("GET /auth/login with the issuer down = %d, want 503", resp.code)
 	}
-	if code, _ := get(t, "http://"+addr+"/metrics"); code != http.StatusOK {
-		t.Errorf("GET /metrics on the main listener = %d", code)
+	bad := http.Header{"Authorization": {"Bearer dsp_stale"}}
+	if resp := noRedirectGet(t, "http://"+addr+"/metrics", bad); resp.code != http.StatusOK {
+		t.Errorf("GET /metrics on the main listener with a stale token = %d, want 200", resp.code)
 	}
 	cancel()
 	if code := <-done; code != 0 {

@@ -17,6 +17,9 @@ type Repository interface {
 	CreateSession(ctx context.Context, s store.NewSession) (store.Session, error)
 	FindSessionByHash(ctx context.Context, hash [32]byte) (store.Session, error)
 	DeleteSessionByHash(ctx context.Context, hash [32]byte) (store.Session, error)
+	ListSessions(ctx context.Context) ([]store.Session, error)
+	DeleteUserSessions(ctx context.Context, user string) (int64, error)
+	DeleteAllSessions(ctx context.Context) (int64, error)
 	DeleteExpiredAuthRows(ctx context.Context) (int64, error)
 	CreateLogin(ctx context.Context, l store.NewLogin) error
 	ConsumeLogin(ctx context.Context, stateHash [32]byte) (store.Login, error)

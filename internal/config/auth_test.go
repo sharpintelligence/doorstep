@@ -64,7 +64,7 @@ auth:
     client_secret_env: GITHUB_CLIENT_SECRET
   roles:
     admin:
-      users: [octocat]
+      users: ["id:583231", "id:1"]
     deployer:
       groups: [example-org/platform-team, example-org/ops_team]
     viewer:
@@ -194,16 +194,19 @@ auth:
       users: [octocat]
     admin: {}
     deployer:
-      users: ["", " octocat", octocat, OctoCat, "not a login"]
+      users: ["", " id:1", "id:1", "ID:1", octocat, "id:", "id:12a", "id:12345678901234567890"]
       groups: [-bad, "org/", "org/team/extra", "org/te am"]
 `,
 			wantErr: []string{
 				`auth.roles.root: unknown role "root"`,
 				"auth.roles.admin: needs at least one group or user",
 				"auth.roles.deployer.users[0]: must not be empty",
-				`auth.roles.deployer.users[1]: " octocat" must not have surrounding whitespace`,
-				`auth.roles.deployer.users[3]: duplicate entry "OctoCat"`,
-				`auth.roles.deployer.users[4]: "not a login" must be a GitHub login`,
+				`auth.roles.deployer.users[1]: " id:1" must not have surrounding whitespace`,
+				`auth.roles.deployer.users[3]: duplicate entry "ID:1"`,
+				`auth.roles.deployer.users[4]: "octocat" must be id: followed by the numeric GitHub user ID`,
+				`auth.roles.deployer.users[5]: "id:" must be id:`,
+				`auth.roles.deployer.users[6]: "id:12a" must be id:`,
+				`auth.roles.deployer.users[7]: "id:12345678901234567890" must be id:`,
 				`auth.roles.deployer.groups[0]: "-bad" must be an organization login or org/team-slug`,
 				`auth.roles.deployer.groups[1]: "org/"`,
 				`auth.roles.deployer.groups[2]: "org/team/extra"`,

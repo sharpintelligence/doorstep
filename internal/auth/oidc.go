@@ -12,9 +12,13 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
-const discoveryTimeout = 10 * time.Second
+const (
+	discoveryTimeout    = 10 * time.Second
+	discoveryRetryAfter = 5 * time.Second
+)
 
 type OIDCOptions struct {
 	IssuerURL     string
@@ -31,8 +35,11 @@ type OIDCProvider struct {
 	opts       OIDCOptions
 	httpClient *http.Client
 
-	mu       sync.Mutex
-	provider *oidc.Provider
+	discovery singleflight.Group
+	mu        sync.Mutex
+	provider  *oidc.Provider
+	failure   error
+	failedAt  time.Time
 }
 
 func NewOIDCProvider(opts OIDCOptions) (*OIDCProvider, error) {
@@ -68,18 +75,50 @@ func (p *OIDCProvider) Probe(ctx context.Context) error {
 }
 
 func (p *OIDCProvider) discover(ctx context.Context) (*oidc.Provider, error) {
+	if provider, ok, err := p.cachedDiscovery(); ok {
+		return provider, err
+	}
+	result := p.discovery.DoChan("discover", func() (any, error) {
+		if provider, ok, err := p.cachedDiscovery(); ok {
+			return provider, err
+		}
+		return p.fetchDiscovery(context.WithoutCancel(ctx))
+	})
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("oidc discovery for %s: %w", p.opts.IssuerURL, ctx.Err())
+	case r := <-result:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(*oidc.Provider), nil
+	}
+}
+
+func (p *OIDCProvider) cachedDiscovery() (*oidc.Provider, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.provider != nil {
-		return p.provider, nil
+	switch {
+	case p.provider != nil:
+		return p.provider, true, nil
+	case p.failure != nil && p.opts.Now().Sub(p.failedAt) < discoveryRetryAfter:
+		return nil, true, p.failure
 	}
+	return nil, false, nil
+}
+
+func (p *OIDCProvider) fetchDiscovery(ctx context.Context) (*oidc.Provider, error) {
 	ctx, cancel := context.WithTimeout(oidc.ClientContext(ctx, p.httpClient), discoveryTimeout)
 	defer cancel()
 	provider, err := oidc.NewProvider(ctx, p.opts.IssuerURL)
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("oidc discovery for %s: %w", p.opts.IssuerURL, err)
+		p.failure = fmt.Errorf("oidc discovery for %s: %w", p.opts.IssuerURL, err)
+		p.failedAt = p.opts.Now()
+		return nil, p.failure
 	}
-	p.provider = provider
+	p.provider, p.failure = provider, nil
 	return provider, nil
 }
 

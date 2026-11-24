@@ -24,6 +24,7 @@ type Options struct {
 	Provider   IdentityProvider
 	Mapper     RoleMapper
 	Logger     *slog.Logger
+	Now        func() time.Time
 }
 
 type Service struct {
@@ -93,6 +94,10 @@ func New(opts Options) (*Service, error) {
 		redirectURL: origin.String() + CallbackPath,
 		sessionTTL:  opts.SessionTTL,
 		logger:      logger,
+		now:         opts.Now,
+	}
+	if s.handler.now == nil {
+		s.handler.now = time.Now
 	}
 	return s, nil
 }

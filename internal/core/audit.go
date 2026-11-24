@@ -21,6 +21,7 @@ const (
 	AuditTokenRevoke     AuditAction = "token.revoke"
 	AuditLogin           AuditAction = "auth.login"
 	AuditLogout          AuditAction = "auth.logout"
+	AuditSessionRevoke   AuditAction = "session.revoke"
 )
 
 func AuditActions() []AuditAction {
@@ -34,6 +35,7 @@ func AuditActions() []AuditAction {
 		AuditTokenRevoke,
 		AuditLogin,
 		AuditLogout,
+		AuditSessionRevoke,
 	}
 }
 

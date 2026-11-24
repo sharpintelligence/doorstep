@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,12 +169,12 @@ func TestCallbackSignsIn(t *testing.T) {
 	if len(st.logins) != 0 {
 		t.Error("login row not consumed")
 	}
-	if len(st.audit) != 1 || st.audit[0].Action != core.AuditLogin || st.audit[0].Actor.String() != "user:alice" || st.audit[0].Role != core.RoleDeployer {
+	if len(st.audit) != 1 || st.audit[0].Action != core.AuditLogin || st.audit[0].Actor.String() != "user:oidc:sub-1" || st.audit[0].Role != core.RoleDeployer {
 		t.Errorf("audit = %+v", st.audit)
 	}
 
 	echo := f.do(request{session: session.Value}.build(t))
-	if got := decodeSeen(t, echo); !got.Authenticated || got.Actor != "user:alice" || got.Role != "deployer" {
+	if got := decodeSeen(t, echo); !got.Authenticated || got.Actor != "user:oidc:sub-1" || got.Role != "deployer" {
 		t.Errorf("signed-in request = %+v", got)
 	}
 }
@@ -341,8 +343,102 @@ func TestCallbackFallsBackToSubjectForUnusableUsername(t *testing.T) {
 	if rec, _ := f.signIn(""); rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback = %d %q", rec.Code, rec.Body.String())
 	}
-	if got := f.e.repo.snapshot().audit[0].Actor; got != (core.Actor{Kind: core.ActorUser, ID: "sub-3", Name: "sub-3"}) {
+	if got := f.e.repo.snapshot().audit[0].Actor; got != (core.Actor{Kind: core.ActorUser, ID: "oidc:sub-3", Name: "sub-3"}) {
 		t.Errorf("actor = %+v", got)
+	}
+}
+
+func TestCallbackKeysActorOnSubject(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{identity: Identity{Subject: "sub-a", Username: "alice"}}
+	f := newFlow(t, testPublicURL, provider, RoleMapper{Provider: ProviderOIDC, Default: core.RoleViewer})
+	if rec, _ := f.signIn(""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("first callback = %d", rec.Code)
+	}
+	provider.identity = Identity{Subject: "sub-b", Username: "alice"}
+	if rec, _ := f.signIn(""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("second callback = %d", rec.Code)
+	}
+	audit := f.e.repo.snapshot().audit
+	if len(audit) != 2 || audit[0].Actor.ID == audit[1].Actor.ID || audit[0].Actor.Name != "alice" || audit[1].Actor.Name != "alice" {
+		t.Errorf("two subjects sharing a username got actors %+v and %+v", audit[0].Actor, audit[1].Actor)
+	}
+}
+
+func TestCallbackRejectsUnusableSubject(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{identity: Identity{Subject: "bad\nsub", Username: "alice"}}
+	f := newFlow(t, testPublicURL, provider, RoleMapper{Provider: ProviderOIDC, Default: core.RoleViewer})
+	rec, session := f.signIn("")
+	if rec.Code != http.StatusUnauthorized || session != nil {
+		t.Errorf("callback = %d, session %v", rec.Code, session)
+	}
+	if st := f.e.repo.snapshot(); len(st.sessions) != 0 || len(st.audit) != 0 {
+		t.Errorf("rejected sign-in left sessions %v audit %v", st.sessions, st.audit)
+	}
+}
+
+func TestLoginCapsPendingSignIns(t *testing.T) {
+	t.Parallel()
+
+	f := defaultFlow(t)
+	_ = f.e.repo.do(func(s *fakeState) error {
+		for i := range maxPendingLogins {
+			s.logins[hashSecret(strconv.Itoa(i))] = fakeLogin{expiresAt: time.Now().Add(time.Minute)}
+		}
+		return nil
+	})
+	rec := f.do(httptest.NewRequestWithContext(t.Context(), http.MethodGet, LoginPath, http.NoBody))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" || cookieFrom(t, rec, f.names.login) != nil {
+		t.Fatalf("login over the cap = %d headers %v", rec.Code, rec.Header())
+	}
+
+	f.e.repo.expireLogins()
+	if rec := f.do(httptest.NewRequestWithContext(t.Context(), http.MethodGet, LoginPath, http.NoBody)); rec.Code != http.StatusFound {
+		t.Errorf("login after pending sign-ins expired = %d", rec.Code)
+	}
+}
+
+func TestLoginPurgesAtMostOncePerInterval(t *testing.T) {
+	t.Parallel()
+
+	var now atomic.Int64
+	now.Store(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())
+	repo := newFakeRepo()
+	svc, err := New(Options{
+		Repository: repo,
+		PublicURL:  testPublicURL,
+		SessionTTL: time.Hour,
+		Provider:   &fakeProvider{},
+		Mapper:     RoleMapper{Provider: ProviderOIDC, Default: core.RoleViewer},
+		Now:        func() time.Time { return time.Unix(0, now.Load()) },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	login := svc.Handler().Routes()["GET "+LoginPath]
+
+	steps := []struct {
+		advance    time.Duration
+		wantPurged int
+	}{
+		{wantPurged: 1},
+		{advance: time.Second, wantPurged: 1},
+		{advance: purgeInterval - 2*time.Second, wantPurged: 1},
+		{advance: time.Second, wantPurged: 2},
+		{wantPurged: 2},
+	}
+	for i, step := range steps {
+		now.Add(int64(step.advance))
+		rec := serve(t, login, httptest.NewRequestWithContext(t.Context(), http.MethodGet, LoginPath, http.NoBody))
+		if rec.Code != http.StatusFound {
+			t.Fatalf("step %d: login = %d", i, rec.Code)
+		}
+		if got := repo.snapshot().purged; got != step.wantPurged {
+			t.Errorf("step %d: purged %d times, want %d", i, got, step.wantPurged)
+		}
 	}
 }
 
@@ -391,7 +487,7 @@ func TestLogout(t *testing.T) {
 	if got := f.e.repo.actions(); !slices.Equal(got, []core.AuditAction{core.AuditLogin, core.AuditLogout}) {
 		t.Errorf("audit actions = %v", got)
 	}
-	if last := st.audit[len(st.audit)-1]; last.Actor.String() != "user:alice" || last.Role != core.RoleDeployer {
+	if last := st.audit[len(st.audit)-1]; last.Actor.String() != "user:oidc:sub-1" || last.Role != core.RoleDeployer {
 		t.Errorf("logout audit = %+v", last)
 	}
 

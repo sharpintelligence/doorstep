@@ -8,7 +8,7 @@ By default `/metrics` is served on a dedicated listener, `--metrics-listen-addr`
 
 The main listener is the one that receives public GitHub webhooks. Metrics reveal application names and build information and the endpoint is unauthenticated, so authentication is left to network placement: keep the metrics port off the public ingress.
 
-To serve `/metrics` on the main listener instead, opt in explicitly with an empty address (`--metrics-listen-addr=""` or `DOORSTEP_METRICS_LISTEN_ADDR=""`). Do that only when the main listener is not reachable from the internet. The JSON API ([api.md](api.md)) is served only on the main listener, behind authentication.
+To serve `/metrics` on the main listener instead, opt in explicitly with an empty address (`--metrics-listen-addr=""` or `DOORSTEP_METRICS_LISTEN_ADDR=""`). Do that only when the main listener is not reachable from the internet. The JSON API ([api.md](api.md)) is served only on the main listener, behind authentication. `/metrics`, `/healthz` and `/readyz` on the main listener are not behind authentication, so a scraper or probe that sends an `Authorization` header still gets an answer.
 
 Prometheus `scrape_config`:
 

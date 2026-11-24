@@ -196,3 +196,80 @@ func TestCreateLoginRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateLoginCapsPendingLogins(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	capped := func(state string) store.NewLogin {
+		l := newLogin(state)
+		l.MaxPending = 2
+		return l
+	}
+	for _, state := range []string{"a", "b"} {
+		if err := st.CreateLogin(t.Context(), capped(state)); err != nil {
+			t.Fatalf("CreateLogin(%s): %v", state, err)
+		}
+	}
+	if err := st.CreateLogin(t.Context(), capped("c")); !errors.Is(err, store.ErrTooManyLogins) {
+		t.Errorf("CreateLogin over the cap = %v, want ErrTooManyLogins", err)
+	}
+	if err := st.CreateLogin(t.Context(), newLogin("uncapped")); err != nil {
+		t.Errorf("CreateLogin without a cap: %v", err)
+	}
+	mustExec(t, st, "UPDATE auth_logins SET expires_at = now() - interval '1 second' WHERE state_hash IN (sha256('a'::bytea), sha256('uncapped'::bytea))")
+	if err := st.CreateLogin(t.Context(), capped("d")); err != nil {
+		t.Errorf("CreateLogin after expiry freed a slot: %v", err)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM auth_logins WHERE expires_at > now()"); n != 2 {
+		t.Errorf("%d pending logins, want 2", n)
+	}
+}
+
+func TestListAndDeleteSessions(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	seed := []store.NewSession{
+		{Hash: hashOf("a1"), Provider: "oidc", Subject: "sub-a", Username: "Alice", Role: core.RoleAdmin, TTL: time.Hour},
+		{Hash: hashOf("a2"), Provider: "oidc", Subject: "sub-a", Username: "alice", Role: core.RoleAdmin, TTL: time.Hour},
+		{Hash: hashOf("b"), Provider: "oidc", Subject: "sub-b", Username: "bob", Role: core.RoleViewer, TTL: time.Hour},
+		{Hash: hashOf("g"), Provider: "github", Subject: "583231", Username: "octocat", Role: core.RoleViewer, TTL: time.Hour},
+		{Hash: hashOf("old"), Provider: "github", Subject: "1", Username: "old", Role: core.RoleViewer, TTL: time.Hour},
+	}
+	for _, s := range seed {
+		if _, err := st.CreateSession(t.Context(), s); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+	mustExec(t, st, "UPDATE auth_sessions SET expires_at = now() - interval '1 second' WHERE token_hash = sha256($1::bytea)", "old")
+
+	list, err := st.ListSessions(t.Context())
+	if err != nil || len(list) != 4 || list[0].Subject != "sub-a" || list[3].Subject != "583231" {
+		t.Fatalf("ListSessions = %+v, %v", list, err)
+	}
+
+	tests := []struct {
+		user string
+		want int64
+	}{
+		{user: "ALICE", want: 2},
+		{user: "github:583231", want: 1},
+		{user: "sub-b", want: 1},
+		{user: "nobody", want: 0},
+	}
+	for _, tt := range tests {
+		if n, err := st.DeleteUserSessions(t.Context(), tt.user); err != nil || n != tt.want {
+			t.Errorf("DeleteUserSessions(%q) = %d, %v, want %d", tt.user, n, err, tt.want)
+		}
+	}
+	if _, err := st.DeleteUserSessions(t.Context(), " "); err == nil {
+		t.Error("DeleteUserSessions accepted a blank user")
+	}
+	if n, err := st.DeleteAllSessions(t.Context()); err != nil || n != 1 {
+		t.Errorf("DeleteAllSessions = %d, %v, want the expired row", n, err)
+	}
+	if n := queryInt(t, st, "SELECT count(*) FROM auth_sessions"); n != 0 {
+		t.Errorf("%d sessions left", n)
+	}
+}

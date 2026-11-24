@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -405,6 +407,8 @@ func TestOIDCDiscoveryIsLazyCachedAndRetried(t *testing.T) {
 	f := newFakeIssuer(t)
 	f.set(func(f *fakeIssuer) { f.discoveryDown = true })
 	p := f.provider(t)
+	var skew atomic.Int64
+	p.opts.Now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 	if f.discoveryCalls.Load() != 0 {
 		t.Fatal("NewOIDCProvider contacted the issuer")
 	}
@@ -414,7 +418,14 @@ func TestOIDCDiscoveryIsLazyCachedAndRetried(t *testing.T) {
 	if _, err := p.AuthCodeURL(t.Context(), "s", "n", oauth2.GenerateVerifier(), testRedirect); err == nil {
 		t.Fatal("AuthCodeURL succeeded while discovery is down")
 	}
+	if f.discoveryCalls.Load() != 1 {
+		t.Errorf("discovery ran %d times within the retry delay, want 1", f.discoveryCalls.Load())
+	}
 	f.set(func(f *fakeIssuer) { f.discoveryDown = false })
+	if err := p.Probe(t.Context()); err == nil {
+		t.Fatal("Probe retried discovery before the retry delay")
+	}
+	skew.Store(int64(discoveryRetryAfter))
 	if err := p.Probe(t.Context()); err != nil {
 		t.Fatalf("Probe after recovery: %v", err)
 	}
@@ -424,6 +435,55 @@ func TestOIDCDiscoveryIsLazyCachedAndRetried(t *testing.T) {
 	}
 	if f.discoveryCalls.Load() != calls {
 		t.Errorf("discovery ran again after success: %d calls, want %d", f.discoveryCalls.Load(), calls)
+	}
+}
+
+func TestOIDCDiscoveryIsSharedAndCancellable(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		<-release
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	p, err := NewOIDCProvider(OIDCOptions{
+		IssuerURL: srv.URL, ClientID: testClientID, ClientSecret: func() (string, error) { return "", nil },
+		GroupsClaim: "groups", UsernameClaim: "preferred_username",
+	})
+	if err != nil {
+		t.Fatalf("NewOIDCProvider: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	errs := make(chan error, 3)
+	go func() { errs <- p.Probe(t.Context()) }()
+	for calls.Load() == 0 {
+		runtime.Gosched()
+	}
+	go func() { errs <- p.Probe(cancelled) }()
+	cancel()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled waiter = %v, want context.Canceled", err)
+	}
+	go func() { errs <- p.Probe(t.Context()) }()
+	close(release)
+	for range 2 {
+		if err := <-errs; err == nil || !strings.Contains(err.Error(), "oidc discovery") {
+			t.Errorf("Probe = %v, want a discovery error", err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Errorf("issuer contacted %d times, want 1", calls.Load())
 	}
 }
 
@@ -478,7 +538,7 @@ func TestOIDCSignInEndToEnd(t *testing.T) {
 	}
 	session := cookieFrom(t, rec, fl.names.session)
 	got := decodeSeen(t, fl.do(request{session: session.Value, path: "/admin"}.build(t)))
-	if !got.Authenticated || got.Actor != "user:alice" || got.Role != "admin" {
+	if !got.Authenticated || got.Actor != "user:oidc:sub-1" || got.Role != "admin" {
 		t.Errorf("signed in as %+v", got)
 	}
 }

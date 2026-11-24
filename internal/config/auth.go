@@ -22,7 +22,9 @@ const (
 	DefaultGroupsClaim   = "groups"
 	DefaultUsernameClaim = "preferred_username"
 
-	maxGitHubTeamSlug = 100
+	maxGitHubTeamSlug     = 100
+	maxGitHubUserIDDigits = 19
+	githubUserPrefix      = "id:"
 )
 
 func DefaultOIDCScopes() []string {
@@ -198,8 +200,12 @@ func (a Auth) groupError(entry string) error {
 }
 
 func (a Auth) userError(entry string) error {
-	if a.GitHub != nil && !isGitHubOwner(entry) {
-		return fmt.Errorf("%q must be a GitHub login", entry)
+	if a.GitHub == nil {
+		return nil
+	}
+	id, ok := strings.CutPrefix(entry, githubUserPrefix)
+	if !ok || id == "" || len(id) > maxGitHubUserIDDigits || strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' }) {
+		return fmt.Errorf("%q must be %s followed by the numeric GitHub user ID, such as id:583231; logins can be renamed and reclaimed, so they are not accepted", entry, githubUserPrefix)
 	}
 	return nil
 }

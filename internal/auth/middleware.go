@@ -84,7 +84,7 @@ func (a *Authenticator) serveSession(w http.ResponseWriter, r *http.Request, nex
 		return
 	}
 	p := Principal{
-		Actor:  core.Actor{Kind: core.ActorUser, ID: session.Username, Name: session.Name},
+		Actor:  UserActor(session.Provider, session.Subject, session.Username),
 		Role:   session.Role,
 		Method: MethodSession,
 	}

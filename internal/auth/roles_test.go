@@ -64,7 +64,7 @@ func TestRoleMapperResolveGitHub(t *testing.T) {
 	m := RoleMapper{
 		Provider: ProviderGitHub,
 		Bindings: map[core.Role]Binding{
-			core.RoleAdmin:    {Users: []string{"OctoCat"}},
+			core.RoleAdmin:    {Users: []string{"id:583231"}},
 			core.RoleDeployer: {Groups: []string{"example-org/platform"}},
 			core.RoleViewer:   {Groups: []string{"example-org"}},
 		},
@@ -75,8 +75,10 @@ func TestRoleMapperResolveGitHub(t *testing.T) {
 		want     core.Role
 		wantOK   bool
 	}{
-		{name: "login case insensitive", identity: Identity{Subject: "1", Username: "octocat"}, want: core.RoleAdmin, wantOK: true},
-		{name: "subject is not a login", identity: Identity{Subject: "octocat", Username: "someone"}},
+		{name: "numeric id", identity: Identity{Subject: "583231", Username: "octocat"}, want: core.RoleAdmin, wantOK: true},
+		{name: "renamed login keeps access", identity: Identity{Subject: "583231", Username: "octocat-renamed"}, want: core.RoleAdmin, wantOK: true},
+		{name: "reclaimed login gets nothing", identity: Identity{Subject: "999", Username: "octocat"}},
+		{name: "bare id is not an entry", identity: Identity{Subject: "id:583231", Username: "x"}},
 		{name: "team", identity: Identity{Username: "dev", Groups: []string{"Example-Org/Platform"}}, want: core.RoleDeployer, wantOK: true},
 		{name: "org", identity: Identity{Username: "dev", Groups: []string{"EXAMPLE-ORG"}}, want: core.RoleViewer, wantOK: true},
 		{name: "other team in org", identity: Identity{Username: "dev", Groups: []string{"example-org/other"}}},
@@ -102,7 +104,7 @@ func TestRoleMapperGitHubLookups(t *testing.T) {
 		wantOrgs  bool
 		wantTeams bool
 	}{
-		{name: "users only", bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"octocat"}}}},
+		{name: "users only", bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"id:1"}}}},
 		{name: "orgs", bindings: map[core.Role]Binding{core.RoleViewer: {Groups: []string{"acme"}}}, wantOrgs: true},
 		{name: "teams", bindings: map[core.Role]Binding{core.RoleViewer: {Groups: []string{"acme/ops"}}}, wantTeams: true},
 		{name: "both", bindings: map[core.Role]Binding{core.RoleViewer: {Groups: []string{"acme"}}, core.RoleAdmin: {Groups: []string{"acme/ops"}}}, wantOrgs: true, wantTeams: true},
@@ -130,6 +132,12 @@ func TestRoleMapperValidate(t *testing.T) {
 		{name: "unknown provider", mapper: RoleMapper{Provider: "saml"}},
 		{name: "unknown default", mapper: RoleMapper{Provider: ProviderOIDC, Default: "root"}},
 		{name: "unknown binding", mapper: RoleMapper{Provider: ProviderOIDC, Bindings: map[core.Role]Binding{"root": {}}}},
+		{name: "github user ids", mapper: RoleMapper{Provider: ProviderGitHub, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"id:583231", "id:1"}}}}, ok: true},
+		{name: "github login", mapper: RoleMapper{Provider: ProviderGitHub, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"octocat"}}}}},
+		{name: "github id not numeric", mapper: RoleMapper{Provider: ProviderGitHub, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"id:12a"}}}}},
+		{name: "github empty id", mapper: RoleMapper{Provider: ProviderGitHub, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"id:"}}}}},
+		{name: "github id too long", mapper: RoleMapper{Provider: ProviderGitHub, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"id:12345678901234567890"}}}}},
+		{name: "oidc users are free form", mapper: RoleMapper{Provider: ProviderOIDC, Bindings: map[core.Role]Binding{core.RoleAdmin: {Users: []string{"octocat"}}}}, ok: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

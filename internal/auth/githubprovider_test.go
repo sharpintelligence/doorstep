@@ -230,7 +230,7 @@ func TestGitHubSignInEndToEnd(t *testing.T) {
 		t.Fatalf("callback = %d %q", rec.Code, rec.Body.String())
 	}
 	got := decodeSeen(t, fl.do(request{session: cookieFrom(t, rec, fl.names.session).Value, path: "/deployer"}.build(t)))
-	if !got.Authenticated || got.Actor != "user:OctoCat" || got.Role != "deployer" {
+	if !got.Authenticated || got.Actor != "user:github:583231" || got.Role != "deployer" {
 		t.Errorf("signed in as %+v", got)
 	}
 	if f.orgCalls.Load() != 0 || f.teamCalls.Load() != 1 {

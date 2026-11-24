@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -215,6 +216,40 @@ func (r *fakeRepo) DeleteSessionByHash(_ context.Context, hash [32]byte) (store.
 	return deleted, err
 }
 
+func (r *fakeRepo) ListSessions(context.Context) ([]store.Session, error) {
+	var out []store.Session
+	err := r.do(func(s *fakeState) error {
+		for _, session := range s.sessions {
+			if session.ExpiresAt.After(time.Now()) {
+				out = append(out, session.Session)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (r *fakeRepo) DeleteUserSessions(_ context.Context, user string) (int64, error) {
+	return r.deleteSessions(func(s store.Session) bool {
+		return s.Subject == user || s.Provider+":"+s.Subject == user || strings.EqualFold(s.Username, user)
+	})
+}
+
+func (r *fakeRepo) DeleteAllSessions(context.Context) (int64, error) {
+	return r.deleteSessions(func(store.Session) bool { return true })
+}
+
+func (r *fakeRepo) deleteSessions(match func(store.Session) bool) (int64, error) {
+	var n int64
+	err := r.do(func(s *fakeState) error {
+		before := len(s.sessions)
+		s.sessions = slices.DeleteFunc(s.sessions, func(f fakeSession) bool { return match(f.Session) })
+		n = int64(before - len(s.sessions))
+		return nil
+	})
+	return n, err
+}
+
 func (r *fakeRepo) expireSessions() {
 	_ = r.do(func(s *fakeState) error {
 		for i := range s.sessions {
@@ -235,6 +270,15 @@ func (r *fakeRepo) DeleteExpiredAuthRows(context.Context) (int64, error) {
 
 func (r *fakeRepo) CreateLogin(_ context.Context, n store.NewLogin) error {
 	return r.do(func(s *fakeState) error {
+		pending := 0
+		for _, l := range s.logins {
+			if l.expiresAt.After(time.Now()) {
+				pending++
+			}
+		}
+		if n.MaxPending > 0 && pending >= n.MaxPending {
+			return store.ErrTooManyLogins
+		}
 		s.logins[n.StateHash] = fakeLogin{
 			Login:     store.Login{Nonce: n.Nonce, PKCEVerifier: n.PKCEVerifier, ReturnTo: n.ReturnTo},
 			expiresAt: time.Now().Add(n.TTL),

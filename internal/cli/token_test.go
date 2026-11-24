@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -173,5 +175,73 @@ func TestCLIActor(t *testing.T) {
 		if got := cliActor(tt.username).String(); got != tt.want {
 			t.Errorf("cliActor(%q) = %q, want %q", tt.username, got, tt.want)
 		}
+	}
+}
+
+func TestCLIRequester(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		flag       string
+		env        map[string]string
+		osUser     string
+		wantActor  string
+		wantOrigin map[string]string
+		wantErr    string
+	}{
+		{name: "os user", osUser: "nonroot", wantActor: "cli:nonroot", wantOrigin: map[string]string{"os_user": "nonroot"}},
+		{name: "env", env: map[string]string{envActor: "alice"}, osUser: "nonroot", wantActor: "cli:alice", wantOrigin: map[string]string{"os_user": "nonroot"}},
+		{name: "flag over env", flag: "bob", env: map[string]string{envActor: "alice"}, osUser: "root", wantActor: "cli:bob", wantOrigin: map[string]string{"os_user": "root"}},
+		{name: "unknown os user", flag: "bob", wantActor: "cli:bob"},
+		{name: "nothing known", wantActor: "cli:unknown"},
+		{name: "invalid flag", flag: " bob", wantErr: "--actor"},
+		{name: "invalid env", env: map[string]string{envActor: "bad\nname"}, wantErr: envActor},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := cliRequester(tt.flag, envFrom(tt.env), tt.osUser)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got.Actor.String() != tt.wantActor || !maps.Equal(got.Origin, tt.wantOrigin) {
+				t.Errorf("cliRequester = %+v, %v, want %s %v", got, err, tt.wantActor, tt.wantOrigin)
+			}
+		})
+	}
+}
+
+func TestRunTokenRecordsActor(t *testing.T) {
+	t.Parallel()
+
+	r, st := migratedDatabase(t)
+	r.env[envActor] = "alice"
+	r.mustRun("token", "create", "--name", "ci", "--role", "viewer")
+	r.mustRun("token", "revoke", "ci", "--actor", "bob")
+	if code, _, stderr := r.run("token", "revoke", "ci", "--actor", " padded"); code != 1 || !strings.Contains(stderr, "--actor") {
+		t.Errorf("invalid --actor = %d %q", code, stderr)
+	}
+
+	entries, err := st.ListAudit(t.Context(), store.AuditFilter{})
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	var got []string
+	for _, e := range slices.Backward(entries) {
+		var detail struct {
+			Origin map[string]string `json:"origin"`
+		}
+		if err := json.Unmarshal(e.Detail, &detail); err != nil {
+			t.Fatalf("detail %s: %v", e.Detail, err)
+		}
+		got = append(got, string(e.Action)+" "+e.Actor.String()+" "+detail.Origin["os_user"])
+	}
+	want := []string{"token.create cli:alice " + osUsername(), "token.revoke cli:bob " + osUsername()}
+	if !slices.Equal(got, want) {
+		t.Errorf("audit = %q, want %q", got, want)
 	}
 }

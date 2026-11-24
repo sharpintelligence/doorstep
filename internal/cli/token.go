@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/user"
+	"log/slog"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -13,60 +13,24 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sharpintelligence/doorstep/internal/auth"
-	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
-	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
-var errSchemaBehind = errors.New("database schema is not up to date; run doorstep migrate first")
-
-func osUsername() string {
-	u, err := user.Current()
-	if err != nil {
-		return ""
-	}
-	return u.Username
-}
-
-func cliActor(username string) core.Actor {
-	actor := core.Actor{Kind: core.ActorCLI, ID: username, Name: username}
-	if username == "" || actor.Validate() != nil {
-		return core.Actor{Kind: core.ActorCLI, ID: "unknown", Name: "unknown"}
-	}
-	return actor
-}
-
 func newTokenCommand(lookupEnv LookupEnv, currentUser func() string) *cobra.Command {
-	var overrides config.Config
-	var configFlag string
+	admin := &adminCommand{lookupEnv: lookupEnv, currentUser: currentUser}
 	cmd := &cobra.Command{
 		Use:   "token",
 		Short: "Create, list and revoke API tokens",
 		Long:  "Create, list and revoke API tokens for the HTTP API. These commands talk to the database directly and record who ran them in the audit log.",
 		Args:  cobra.NoArgs,
 	}
-	bindDatabaseCommandFlags(cmd.PersistentFlags(), &configFlag, &overrides)
+	admin.bindFlags(cmd.PersistentFlags())
 
 	withTokens := func(cmd *cobra.Command, fn func(ctx context.Context, tokens *auth.Tokens) error) error {
-		cfg, err := resolveDatabaseCommandConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
-		if err != nil {
-			return err
-		}
-		logger, err := logging.New(cmd.ErrOrStderr(), cfg.Log.Level, cfg.Log.Format)
-		if err != nil {
-			return err
-		}
-		ctx := cmd.Context()
-		st, err := openStore(ctx, cfg.Database)
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		if err := requireCurrentSchema(ctx, st); err != nil {
-			return err
-		}
-		return fn(ctx, auth.NewTokens(auth.NewRepository(st), logger))
+		return admin.withRepository(cmd, func(ctx context.Context, repo auth.Repository, logger *slog.Logger) error {
+			return fn(ctx, auth.NewTokens(repo, logger))
+		})
 	}
 
 	var name, role string
@@ -87,8 +51,12 @@ func newTokenCommand(lookupEnv LookupEnv, currentUser func() string) *cobra.Comm
 			if expiresIn < 0 {
 				return fmt.Errorf("--expires-in: must not be negative, got %s", expiresIn)
 			}
+			by, err := admin.requester()
+			if err != nil {
+				return err
+			}
 			return withTokens(cmd, func(ctx context.Context, tokens *auth.Tokens) error {
-				raw, created, err := tokens.Create(ctx, auth.CreateTokenInput{Name: name, Role: parsed, ExpiresIn: expiresIn, By: cliActor(currentUser())})
+				raw, created, err := tokens.Create(ctx, auth.CreateTokenInput{Name: name, Role: parsed, ExpiresIn: expiresIn, By: by})
 				if err != nil {
 					return err
 				}
@@ -127,8 +95,12 @@ func newTokenCommand(lookupEnv LookupEnv, currentUser func() string) *cobra.Comm
 		Short: "Revoke an API token immediately",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			by, err := admin.requester()
+			if err != nil {
+				return err
+			}
 			return withTokens(cmd, func(ctx context.Context, tokens *auth.Tokens) error {
-				if err := tokens.Revoke(ctx, args[0], cliActor(currentUser())); err != nil {
+				if err := tokens.Revoke(ctx, args[0], by); err != nil {
 					if errors.Is(err, core.ErrNotFound) {
 						return fmt.Errorf("no active token named %q", args[0])
 					}
@@ -142,19 +114,6 @@ func newTokenCommand(lookupEnv LookupEnv, currentUser func() string) *cobra.Comm
 
 	cmd.AddCommand(create, list, revoke)
 	return cmd
-}
-
-func requireCurrentSchema(ctx context.Context, st *store.Store) error {
-	states, err := st.MigrationStatus(ctx)
-	if err != nil {
-		return err
-	}
-	for _, m := range states {
-		if !m.Applied {
-			return errSchemaBehind
-		}
-	}
-	return nil
 }
 
 func printTokens(out io.Writer, tokens []store.APIToken) error {

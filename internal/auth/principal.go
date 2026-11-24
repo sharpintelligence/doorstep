@@ -2,9 +2,19 @@ package auth
 
 import (
 	"context"
+	"strings"
+	"unicode"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
+
+func UserActor(provider, subject, username string) core.Actor {
+	name := username
+	if strings.TrimSpace(name) != name || name == "" || strings.ContainsFunc(name, unicode.IsControl) {
+		name = subject
+	}
+	return core.Actor{Kind: core.ActorUser, ID: provider + ":" + subject, Name: name}
+}
 
 type Method string
 

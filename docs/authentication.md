@@ -38,7 +38,11 @@ doorstep token revoke ci-blog
 - `list` prints every token with its role, creation, expiry and last use times and its state (`active`, `expired` or `revoked`). `last used` is updated at most once a minute.
 - `revoke` takes effect on the next request.
 
-The commands accept the same `--config`, `--database-url-file`, `--log-level` and `--log-format` flags and environment variables as [`doorstep migrate`](configuration.md#doorstep-migrate). They do not apply migrations, and fail with `database schema is not up to date; run doorstep migrate first` when the schema is behind. Each `create` and `revoke` writes an audit row whose actor is `cli:<operating system user>`.
+The commands accept the same `--config`, `--database-url-file`, `--log-level` and `--log-format` flags and environment variables as [`doorstep migrate`](configuration.md#doorstep-migrate). They do not apply migrations, and fail with `database schema is not up to date; run doorstep migrate first` when the schema is behind. Each `create` and `revoke` writes an audit row. Inside a container the operating system user is a fixed account such as `nonroot`, which says nothing about who acted, so name yourself with `--actor NAME` or `DOORSTEP_ACTOR=NAME` (the flag wins): the actor is then `cli:NAME`, and the operating system user is kept as `origin.os_user` in the row's details. Without either, the actor is `cli:<operating system user>`.
+
+```sh
+kubectl exec deploy/doorstep -- doorstep token revoke ci-blog --actor alice
+```
 
 A token is `dsp_` followed by 43 base64url characters (32 random bytes). The fixed prefix lets secret scanners recognise leaked tokens. Only the SHA-256 hash of the token is stored; a database dump does not reveal usable tokens.
 
@@ -75,9 +79,9 @@ auth:
 Register doorstep at the identity provider as a confidential client (it has a client secret) using the authorization code flow, with redirect URI `https://deploy.example.com/auth/callback`. doorstep uses PKCE (S256), `state` and `nonce` on every sign-in.
 
 - Requested scopes default to `openid profile email groups`. Set `auth.oidc.scopes` when the provider names its groups scope differently, and keep `openid`.
-- Groups are read from the `groups` claim (`auth.oidc.groups_claim`), which may be a list of strings or a single string. The display name of the user comes from `name`, and their actor ID from `preferred_username` (`auth.oidc.username_claim`), falling back to the subject.
+- Groups are read from the `groups` claim (`auth.oidc.groups_claim`), which may be a list of strings or a single string. The user's actor ID is `oidc:<sub>`, so audit rows and future lock owners stay tied to one account even when two accounts share a username or a username changes. `preferred_username` (`auth.oidc.username_claim`), falling back to the subject, is only the label shown next to it in logs, `doorstep session list` and the audit row's actor name; the display name comes from `name`.
 - Claims come from the verified ID token (signature, issuer, audience = client ID, expiry and nonce), plus any claims the ID token lacks from the UserInfo endpoint after checking that its `sub` matches. Providers that only return groups from UserInfo, as Authelia does by default, therefore work.
-- The issuer's discovery document is fetched on first use and cached; a failed fetch is retried on the next sign-in. `serve` checks it once at startup and logs `identity provider unreachable` as a warning if it fails, but still starts: an outage of the identity provider only stops sign-in, never deploys or token access.
+- The issuer's discovery document is fetched on first use and cached. Concurrent sign-ins share one fetch, each waiting only as long as its own request lasts, and a failed fetch is remembered for 5 seconds, so while the issuer is down sign-ins fail fast instead of queueing behind 10-second timeouts. `serve` checks it once at startup and logs `identity provider unreachable` as a warning if it fails, but still starts: an outage of the identity provider only stops sign-in, never deploys or token access.
 - Signing out ends the doorstep session only; it does not sign out of the identity provider.
 
 Provider notes:
@@ -98,7 +102,7 @@ auth:
     client_secret_env: DOORSTEP_GITHUB_CLIENT_SECRET
   roles:
     admin:
-      users: [example-user]
+      users: ["id:583231"]
     deployer:
       groups: [example-org/platform]
     viewer:
@@ -112,7 +116,7 @@ The client can be either of:
 
 During sign-in doorstep uses the user's token once, in memory, to read `GET /user`, and only when some rule needs them, `GET /user/memberships/orgs?state=active` (for organization rules) and `GET /user/teams` (for team rules), each capped at 10 pages of 100. The token is then discarded and never stored. Requests go only to the host of `github.api_url`; for GitHub Enterprise Server (`https://<host>/api/v3`) the OAuth endpoints are `https://<host>/login/oauth/authorize` and `https://<host>/login/oauth/access_token`.
 
-The actor ID of a GitHub user is their login; the stable numeric user ID is kept as the session's subject.
+GitHub users are identified by their numeric user ID, never their login: a login can be renamed, and the freed login can then be registered by someone else. `users` entries are therefore `id:` followed by the ID (`id:583231`), and logins are rejected by `doorstep config validate`. Look an ID up with `gh api users/<login> --jq .id` or `https://api.github.com/users/<login>`. The actor ID of a GitHub user is `github:<id>`, with the login shown as the actor's name.
 
 ### Role mapping
 
@@ -121,18 +125,35 @@ The actor ID of a GitHub user is their login; the stable numeric user ID is kept
 | Provider | `groups` entries match | `users` entries match |
 | --- | --- | --- |
 | `oidc` | values of the groups claim, exactly (case-sensitive) | the `sub` claim exactly, or the `email` claim case-insensitively when `email_verified` is true |
-| `github` | `org` (active organization membership) or `org/team-slug`, case-insensitively | the login, case-insensitively |
+| `github` | `org` (active organization membership) or `org/team-slug`, case-insensitively | `id:<numeric user ID>`, matched against the ID GitHub returns for the signed-in user |
 
-The role is decided at sign-in and stored in the session. Changing group membership or `auth.roles` takes effect when the user next signs in, so `auth.session_ttl` bounds how long a removed user keeps access. To cut access immediately, delete the user's rows from `auth_sessions`, or all rows to sign everyone out.
+The role is decided at sign-in and stored in the session. Changing group membership or `auth.roles` takes effect when the user next signs in, so `auth.session_ttl` bounds how long a removed user keeps access. To cut access immediately, revoke the user's sessions; see [Ending sessions](#ending-sessions).
 
 ## Sessions and cookies
 
 - A successful sign-in creates a row in `auth_sessions` holding the SHA-256 hash of a random 32-byte session token, the identity (provider, subject, username, name, email) and the role. The cookie holds the token itself. Nothing in the database can be turned back into a valid cookie.
 - Sessions last `auth.session_ttl` (default `12h`, between `5m` and `720h`) from sign-in. They are not extended by activity, and there are no refresh tokens. No ID token or provider access token is stored.
-- `POST /auth/logout` deletes the session row and the cookie. Expired sessions and abandoned sign-ins are deleted whenever a new sign-in starts.
+- `POST /auth/logout` deletes the session row and the cookie. Expired sessions and abandoned sign-ins are deleted when a new sign-in starts, at most once a minute per replica.
+- At most 10,000 sign-ins may be in progress (started in the last 10 minutes and not completed). Beyond that `GET /auth/login` answers `503` with `Retry-After` and logs `sign-in refused`, so anonymous clients cannot grow `auth_logins` without bound.
 - Sessions live in Postgres, so any replica can serve any request and there is no signing key to manage.
 
 With an `https` public URL the cookies are `__Host-doorstep-session` and `__Host-doorstep-login`, `Secure`, `HttpOnly`, `SameSite=Lax` and `Path=/`. The `__Host-` prefix stops sibling subdomains from setting them. With a loopback `http` public URL they are named `doorstep-session` and `doorstep-login` without `Secure`. `SameSite=Lax` (not `Strict`) is needed because the identity provider redirects back to doorstep with a cross-site navigation.
+
+### Ending sessions
+
+```sh
+doorstep session list
+doorstep session revoke --user alice
+doorstep session revoke --user github:583231
+doorstep session revoke --all
+```
+
+- `list` prints every active session with its actor ID, username, role, creation and expiry time.
+- `revoke --user` ends every session whose username matches case-insensitively, whose subject matches, or whose actor ID (`provider:subject`) matches. Prefer the actor ID, which cannot be shared or renamed. `revoke --all` signs everyone out.
+- Revoked sessions stop working on the next request. The user can sign in again and gets the role the current configuration grants; to keep someone out, also remove them from `auth.roles` or their groups at the provider.
+- Each `revoke` writes a `session.revoke` audit row with the selector and the number of sessions ended, even when none matched.
+
+The commands take the same database and `--actor` flags as `doorstep token`.
 
 ### The sign-in flow
 
@@ -165,11 +186,11 @@ For htmx, set the header once, for example `<body hx-headers='{"X-CSRF-Token": "
 
 ## Using authentication in handlers
 
-`serve` wraps the whole public listener (not the metrics listener) in `Authenticator.Middleware`, which resolves the caller and stores a `Principal` in the request context:
+`serve` wraps every route mounted on the public listener in `Authenticator.Middleware`, which resolves the caller and stores a `Principal` in the request context. The built-in `/healthz` and `/readyz`, and `/metrics` when it shares the main listener, are not wrapped, so a probe or scraper that sends a stale `Authorization` header still gets an answer. The metrics listener is never authenticated.
 
 1. `Authorization: Bearer <token>`: a valid token yields a principal with `Method` `token`. An invalid, expired or revoked token is answered with `401` straight away; it never falls back to the cookie.
 2. Otherwise the session cookie: a valid session yields a principal with `Method` `session`, subject to the CSRF checks above. An unknown or expired session cookie is cleared and the request continues anonymously.
-3. Otherwise the request continues anonymously, so `/healthz`, `/readyz` and the signature-verified GitHub webhook need no special case.
+3. Otherwise the request continues anonymously, so the signature-verified GitHub webhook needs no special case.
 
 Handlers that need identity opt in by wrapping themselves:
 
@@ -183,7 +204,7 @@ routes["GET /"] = viewer(http.HandlerFunc(web.index))
 
 - `RequireRole(role)` answers an anonymous request with `401 {"error":"unauthenticated"}` and `WWW-Authenticate: Bearer realm="doorstep"`, and a principal whose role is too low with `403 {"error":"forbidden"}`. Bodies never say why authentication failed.
 - `RequireRoleOrLogin(role)` redirects anonymous `GET` and `HEAD` requests to `/auth/login?return_to=<path>` when a sign-in provider is configured, and otherwise behaves like `RequireRole`. Use it for UI pages.
-- `auth.PrincipalFrom(ctx)` returns the principal. `Principal.Actor.String()` is the canonical actor string, such as `user:alice`, `token:ci-blog`, `cli:root` or `system`, to store in `deployments.requested_by`, `locks.owner` and `deployment_events.actor`.
+- `auth.PrincipalFrom(ctx)` returns the principal. `Principal.Actor.String()` is the canonical actor string, such as `user:oidc:3f2a...`, `user:github:583231`, `token:ci-blog`, `cli:alice` or `system`, to store in `deployments.requested_by`, `locks.owner` and `deployment_events.actor`.
 
 Failed authentications and denied authorizations are logged at warn with the method, path and actor, never with token material.
 
@@ -195,8 +216,11 @@ The `audit_log` table records who asked doorstep to do something. It complements
 | --- | --- |
 | `auth.login`, `auth.logout` | the sign-in handler |
 | `token.create`, `token.revoke` | `doorstep token`, and later the token API |
+| `session.revoke` | `doorstep session revoke` |
 | `deploy.request`, `deploy.cancel`, `rollback.request` | the API and UI, when they land |
 | `lock.acquire`, `lock.release` | the locks feature, when it lands |
+
+The `deploy`, `rollback` and `lock` actions are reserved constants only: nothing records them yet, because their endpoints do not exist. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
 
 Each row holds the time, the actor (kind, ID and display name), the actor's role when known, the action, the target app and environment and the deployment ID when they apply, and a JSON object with details. Actions are dot-separated lowercase words; new features add constants to `core` without a schema change.
 

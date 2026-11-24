@@ -174,19 +174,19 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	build := buildinfo.Read()
 	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
 	metricsRoutes := map[string]http.Handler{"GET /metrics": m.Handler()}
-	mainRoutes := map[string]http.Handler{api.Prefix: apiHandler}
+	appRoutes := map[string]http.Handler{api.Prefix: apiHandler}
 	if h := authService.Handler(); h != nil {
-		maps.Copy(mainRoutes, h.Routes())
+		maps.Copy(appRoutes, h.Routes())
 	}
+	mainRoutes := wrapRoutes(appRoutes, authenticator.Middleware)
 	checks := map[string]server.Check{"postgres": st.Ping}
-	newServer := func(routes map[string]http.Handler, middleware ...func(http.Handler) http.Handler) *server.Server {
+	newServer := func(routes map[string]http.Handler) *server.Server {
 		return server.New(server.Options{
 			Checks:          checks,
 			Logger:          logger,
 			ShutdownDelay:   cfg.Server.ShutdownDelay,
 			ShutdownTimeout: cfg.Server.ShutdownTimeout,
 			Routes:          routes,
-			Middleware:      middleware,
 		})
 	}
 
@@ -214,7 +214,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		metricsServer := newServer(metricsRoutes)
 		runs = append(runs, func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) })
 	}
-	mainServer := newServer(mainRoutes, authenticator.Middleware)
+	mainServer := newServer(mainRoutes)
 	runs = append(runs, func(ctx context.Context) error { return mainServer.Run(ctx, ln) })
 
 	if err := runServers(ctx, runs...); err != nil {
@@ -254,6 +254,14 @@ func knownApp(catalog config.Catalog) api.KnownApp {
 		_, ok := catalog.App(app)
 		return ok
 	}
+}
+
+func wrapRoutes(routes map[string]http.Handler, middleware func(http.Handler) http.Handler) map[string]http.Handler {
+	wrapped := make(map[string]http.Handler, len(routes))
+	for pattern, handler := range routes {
+		wrapped[pattern] = middleware(handler)
+	}
+	return wrapped
 }
 
 func runServers(ctx context.Context, runs ...func(context.Context) error) error {

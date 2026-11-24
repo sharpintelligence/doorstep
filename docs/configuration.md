@@ -273,13 +273,13 @@ Sign-in with one identity provider and how its users map to roles. Without `oidc
 | `session_ttl` | `12h` | Absolute lifetime of a session from sign-in, between `5m` and `720h`. Sessions are not extended by activity. Roles are decided at sign-in, so this also bounds how long a role change takes to apply. |
 | `default_role` | none | Role granted to a user who matches no entry in `roles`: `viewer`, `deployer` or `admin`. Empty refuses sign-in to such users. |
 | `roles.<role>.groups` | none | Groups that grant `<role>` (`viewer`, `deployer` or `admin`). OIDC: values of the groups claim, compared exactly. GitHub: an organization login (`example-org`) or `org/team-slug` (`example-org/platform`), compared case-insensitively. |
-| `roles.<role>.users` | none | Users that grant `<role>`. OIDC: the `sub` claim, or an email address that the provider marks verified. GitHub: logins. |
+| `roles.<role>.users` | none | Users that grant `<role>`. OIDC: the `sub` claim, or an email address that the provider marks verified. GitHub: `id:` followed by the numeric user ID (`id:583231`); logins are rejected because a renamed login can be registered by someone else. |
 | `oidc.issuer_url` | required | Issuer URL; its `/.well-known/openid-configuration` must be reachable. `https`, or `http` only on a loopback host, without user information, query or fragment. |
 | `oidc.client_id` | required | Client ID registered at the provider; no whitespace. |
 | `oidc.client_secret_env` / `oidc.client_secret_file` | exactly one | Environment variable or absolute file path holding the client secret; see [Secrets](#secrets). |
 | `oidc.scopes` | `[openid, profile, email, groups]` | Scopes requested; must include `openid`, without duplicates. |
 | `oidc.groups_claim` | `groups` | Claim holding the user's groups, read from the ID token or else from UserInfo. |
-| `oidc.username_claim` | `preferred_username` | Claim used as the user's ID in logs and the audit trail, falling back to `sub`. It is not used for role mapping. |
+| `oidc.username_claim` | `preferred_username` | Claim shown as the user's name in logs, `doorstep session list` and the audit trail, falling back to `sub`. It is a label only: the actor ID is always `oidc:<sub>`, and role mapping never uses it. |
 | `github.client_id` | required | Client ID of a GitHub OAuth App, or of the GitHub App's own client credentials. |
 | `github.client_secret_env` / `github.client_secret_file` | exactly one | Environment variable or absolute file path holding the client secret. |
 
@@ -556,7 +556,17 @@ doorstep token list
 doorstep token revoke NAME
 ```
 
-Creates, lists and revokes API tokens by talking to the database directly. `create` prints the token once on stdout, and its details on stderr. The commands take the same flags, environment variables and configuration file settings as [`doorstep migrate`](#doorstep-migrate), and fail without changing anything when the database schema is behind; run `doorstep migrate` first. See [authentication.md](authentication.md#api-tokens).
+Creates, lists and revokes API tokens by talking to the database directly. `create` prints the token once on stdout, and its details on stderr. The commands take the same flags, environment variables and configuration file settings as [`doorstep migrate`](#doorstep-migrate), and fail without changing anything when the database schema is behind; run `doorstep migrate` first. `--actor NAME` (or `DOORSTEP_ACTOR`) names the person running the command; it is recorded as `cli:NAME` in the audit log, with the operating system user kept in the row's details. Without it the actor is `cli:<operating system user>`. See [authentication.md](authentication.md#api-tokens).
+
+## `doorstep session`
+
+```sh
+doorstep session list
+doorstep session revoke --user USER
+doorstep session revoke --all
+```
+
+Lists active sign-in sessions and ends them immediately by talking to the database directly. `--user` matches a session's username case-insensitively, its subject, or its actor ID such as `github:583231`. Each `revoke` writes a `session.revoke` audit row. The commands take the same flags as `doorstep token`, including `--actor`. See [authentication.md](authentication.md#ending-sessions).
 
 ## `doorstep config validate`
 
