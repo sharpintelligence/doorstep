@@ -13,6 +13,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/logging"
+	"github.com/sharpintelligence/doorstep/internal/registry"
 	"github.com/sharpintelligence/doorstep/internal/server"
 )
 
@@ -42,6 +43,7 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 		"time allowed for in-flight requests on shutdown (env "+config.EnvShutdownTimeout+")")
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
+	addRegistryCredentialsFlag(flags, &overrides.Registry.CredentialsFile)
 	return cmd
 }
 
@@ -49,6 +51,9 @@ func resolveServeConfig(changed func(name string) bool, overrides config.Config,
 	cfg, err := resolveConfig(changed, overrides, lookupEnv)
 	if err != nil {
 		return config.Config{}, err
+	}
+	if changed(flagRegistryAuthFile) {
+		cfg.Registry.CredentialsFile = overrides.Registry.CredentialsFile
 	}
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, fmt.Errorf("invalid configuration: %w", err)
@@ -66,6 +71,14 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 		return err
 	}
 	logGitHubApp(ctx, logger, cfg.GitHub, githubApp)
+
+	if cfg.Registry.CredentialsFile != "" {
+		creds, err := registry.LoadDockerConfigFile(cfg.Registry.CredentialsFile)
+		if err != nil {
+			return fmt.Errorf("registry credentials: %w", err)
+		}
+		logger.InfoContext(ctx, "registry credentials loaded", slog.Int("entries", creds.Len()))
+	}
 
 	st, err := openStore(ctx, cfg.Database)
 	if err != nil {

@@ -19,6 +19,8 @@ const (
 	EnvLogFormat       = "DOORSTEP_LOG_FORMAT"
 	EnvDatabaseURL     = "DOORSTEP_DATABASE_URL"
 	EnvDatabaseURLFile = "DOORSTEP_DATABASE_URL_FILE"
+
+	EnvRegistryCredentialsFile = "DOORSTEP_REGISTRY_CREDENTIALS_FILE"
 )
 
 var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
@@ -28,6 +30,7 @@ type Config struct {
 	Log      Log
 	Database Database
 	GitHub   GitHub
+	Registry Registry
 }
 
 type Server struct {
@@ -44,6 +47,10 @@ type Log struct {
 type Database struct {
 	URL     string
 	URLFile string
+}
+
+type Registry struct {
+	CredentialsFile string
 }
 
 func Default() Config {
@@ -84,6 +91,9 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 		cfg.Database.URLFile = v
 	}
 	cfg.GitHub = githubFromEnv(cfg.GitHub, lookup)
+	if v, ok := lookup(EnvRegistryCredentialsFile); ok {
+		cfg.Registry.CredentialsFile = v
+	}
 	return cfg, errors.Join(errs...)
 }
 
