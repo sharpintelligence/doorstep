@@ -114,6 +114,14 @@ doorstep learns about new commits from GitHub webhooks when a webhook secret is 
 
 `serve` logs which paths are active: `github webhooks enabled`, `github webhooks disabled, polling only`, `github polling disabled, webhooks only`, or a warning when both are off. The first cycle after an app is added or after downtime tracks the current branch head and deploys it once green; there is no baseline that skips it.
 
+## Engine
+
+Each replica runs one [deployment engine](engine.md#running) worker pool.
+
+| Environment variable | File key | Default | Description |
+| --- | --- | --- | --- |
+| `DOORSTEP_ENGINE_CONCURRENCY` | `engine.concurrency` | `4` | How many deployments, each of a different app, one replica works on at the same time. Between `1` and `256`. A deployment holds its slot while it pins and while Argo CD syncs (up to the app's `argocd.sync_timeout`), so set it at least to the number of apps you expect to deploy at once, divided by the number of replicas. |
+
 ## `doorstep image resolve`
 
 ```sh
@@ -294,6 +302,7 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `kubernetes.kubeconfig` | `--kubeconfig` (`serve`, `argocd status`) | `DOORSTEP_KUBECONFIG` |
 | `kubernetes.context` | `--kube-context` (`serve`, `argocd status`) | `DOORSTEP_KUBE_CONTEXT` |
 | `intake.poll_interval` | none | `DOORSTEP_POLL_INTERVAL` |
+| `engine.concurrency` | none | `DOORSTEP_ENGINE_CONCURRENCY` |
 
 A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL, the GitHub App private key and the webhook secret can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
 
@@ -532,6 +541,8 @@ locks:
   reminder_interval: 12h
 intake:
   poll_interval: 2m
+engine:
+  concurrency: 8
 
 notifications:
   - name: ops

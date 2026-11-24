@@ -25,6 +25,7 @@ type Failure struct {
 	Reason     string
 	Sync       *core.SyncFailure
 	Gates      *core.GateOutcome
+	KeepPin    bool
 }
 
 type FailurePolicy interface {
@@ -81,7 +82,7 @@ func (e *Engine) fail(ctx context.Context, d core.Deployment, f Failure) (core.D
 		slog.String("failure_class", string(f.Class)),
 		slog.String("reason", f.Reason),
 	)
-	if f.Stage == core.StatePinning {
+	if f.Stage == core.StatePinning && !f.KeepPin {
 		e.abandon(ctx, failed)
 	}
 	outcome := OutcomeFailed

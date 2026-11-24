@@ -60,6 +60,7 @@ type Request struct {
 	RollbackOf *core.DeploymentID
 	Blocks     []core.Digest
 	Unblocks   []core.Digest
+	Repin      bool
 }
 
 type Result struct {

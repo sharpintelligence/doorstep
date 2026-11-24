@@ -194,14 +194,14 @@ func (s *fakeStore) SetLineage(_ context.Context, id core.DeploymentID, l core.L
 	return d, nil
 }
 
-func (s *fakeStore) StateEnteredAt(_ context.Context, id core.DeploymentID, state core.State) (time.Time, error) {
+func (s *fakeStore) TimeInState(_ context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	at, ok := s.entered[enteredKey{id, state}]
 	if !ok {
-		return time.Time{}, core.ErrNotFound
+		return 0, core.ErrNotFound
 	}
-	return at, nil
+	return s.clock.Now().Sub(at), nil
 }
 
 func applyLineage(d *core.Deployment, l core.Lineage) {
@@ -252,9 +252,6 @@ type fakePins struct {
 	pins     []engine.PinRequest
 	abandons []engine.PinRequest
 	pinFn    func(ctx context.Context, n int, req engine.PinRequest) (engine.PinResult, error)
-	current  []core.Digest
-	currErr  error
-	pinned   core.Digest
 }
 
 func (p *fakePins) Pin(ctx context.Context, req engine.PinRequest) (engine.PinResult, error) {
@@ -266,24 +263,7 @@ func (p *fakePins) Pin(ctx context.Context, req engine.PinRequest) (engine.PinRe
 	if fn != nil {
 		return fn(ctx, n, req)
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.pinned = req.Digest
-	return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: pinSHA}, Previous: digestOld, Changed: true}, nil
-}
-
-func (p *fakePins) Current(context.Context, core.Target) (core.Digest, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.currErr != nil {
-		return "", p.currErr
-	}
-	if len(p.current) > 0 {
-		next := p.current[0]
-		p.current = p.current[1:]
-		return next, nil
-	}
-	return p.pinned, nil
+	return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: pinSHA}, Previous: digestOld, Changed: !req.Repin}, nil
 }
 
 func (p *fakePins) Abandon(_ context.Context, req engine.PinRequest) error {
@@ -314,6 +294,8 @@ type fakeSync struct {
 	mu      sync.Mutex
 	waits   []waitCall
 	waitFn  func(ctx context.Context, revision string) (core.SyncStatus, error)
+	checkFn func(revision string) (core.SyncStatus, error)
+	checked []string
 	health  []core.Health
 	healthE error
 	checks  int
@@ -331,7 +313,22 @@ func (s *fakeSync) WaitSynced(ctx context.Context, _ core.Target, revision strin
 	if fn != nil {
 		return fn(ctx, revision)
 	}
-	return core.SyncStatus{State: core.SyncSynced, Revision: argoSHA, Reached: true, Health: core.Health{Status: core.HealthHealthy}}, nil
+	return syncedStatus(), nil
+}
+
+func (s *fakeSync) Check(_ context.Context, _ core.Target, revision string) (core.SyncStatus, error) {
+	s.mu.Lock()
+	s.checked = append(s.checked, revision)
+	fn := s.checkFn
+	s.mu.Unlock()
+	if fn != nil {
+		return fn(revision)
+	}
+	return syncedStatus(), nil
+}
+
+func syncedStatus() core.SyncStatus {
+	return core.SyncStatus{State: core.SyncSynced, Revision: argoSHA, Reached: true, Health: core.Health{Status: core.HealthHealthy}}
 }
 
 func (s *fakeSync) Health(context.Context, core.Target) (core.Health, error) {
@@ -358,10 +355,38 @@ func (s *fakeSync) waitCalls() []waitCall {
 }
 
 type fakeGates struct {
-	mu       sync.Mutex
-	phases   []core.GatePhase
-	outcomes map[core.GatePhase][]core.GateOutcome
-	err      error
+	mu          sync.Mutex
+	phases      []core.GatePhase
+	outcomes    map[core.GatePhase][]core.GateOutcome
+	err         error
+	reevaluated []core.Deployment
+	rerun       *core.GateOutcome
+	reErr       error
+}
+
+func (g *fakeGates) Reevaluate(_ context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reevaluated = append(g.reevaluated, d)
+	if g.reErr != nil {
+		return core.GateOutcome{}, g.reErr
+	}
+	outcome := core.GateOutcome{Status: core.GatePassed}
+	if g.rerun != nil {
+		outcome = *g.rerun
+	}
+	outcome.Phase = phase
+	if g.outcomes == nil {
+		g.outcomes = map[core.GatePhase][]core.GateOutcome{}
+	}
+	g.outcomes[phase] = []core.GateOutcome{outcome}
+	return outcome, nil
+}
+
+func (g *fakeGates) reevaluations() []core.Deployment {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]core.Deployment(nil), g.reevaluated...)
 }
 
 func (g *fakeGates) Evaluate(_ context.Context, _ core.Deployment, phase core.GatePhase) (core.GateOutcome, error) {

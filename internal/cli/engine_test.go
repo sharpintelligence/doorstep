@@ -96,10 +96,8 @@ func TestDigestResolver(t *testing.T) {
 type fakeGitOps struct {
 	mu       sync.Mutex
 	result   gitops.Result
-	pinned   gitops.Pinned
 	err      error
 	requests []gitops.Request
-	targets  []gitops.Target
 	abandons []gitops.Request
 }
 
@@ -108,13 +106,6 @@ func (f *fakeGitOps) Pin(_ context.Context, req gitops.Request) (gitops.Result, 
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
 	return f.result, f.err
-}
-
-func (f *fakeGitOps) Current(_ context.Context, t gitops.Target) (gitops.Pinned, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.targets = append(f.targets, t)
-	return f.pinned, f.err
 }
 
 func (f *fakeGitOps) Abandon(_ context.Context, req gitops.Request) error {
@@ -130,7 +121,7 @@ func TestPinWriter(t *testing.T) {
 	target := gitops.Target{App: "blog", Owner: "example-user", Repo: "homelab", Branch: "main", Dir: "apps/blog", ImageRepository: "ghcr.io/example-user/blog", Kustomize: &gitops.KustomizeImage{Name: "ghcr.io/example-user/blog"}, Mode: gitops.ModeCommit}
 	rollbackOf := core.DeploymentID(3)
 	d := core.Deployment{ID: 7, Target: core.AppTarget("blog"), Kind: core.KindRollback, RollbackOfID: &rollbackOf, Commit: core.Commit{Repository: "example-user/blog", SHA: adapterSHA}}
-	req := engine.PinRequest{Deployment: d, Digest: adapterDigest, Blocks: []core.Digest{"sha256:" + core.Digest(strings.Repeat("2", 64))}, Unblocks: []core.Digest{"sha256:" + core.Digest(strings.Repeat("3", 64))}}
+	req := engine.PinRequest{Deployment: d, Digest: adapterDigest, Blocks: []core.Digest{"sha256:" + core.Digest(strings.Repeat("2", 64))}, Unblocks: []core.Digest{"sha256:" + core.Digest(strings.Repeat("3", 64))}, Repin: true}
 	wantRequest := gitops.Request{
 		Target:     target,
 		Digest:     adapterDigest,
@@ -140,11 +131,11 @@ func TestPinWriter(t *testing.T) {
 		RollbackOf: &rollbackOf,
 		Blocks:     req.Blocks,
 		Unblocks:   req.Unblocks,
+		Repin:      true,
 	}
 	commit := core.Commit{Repository: "example-user/homelab", SHA: strings.Repeat("c", 40)}
 	fake := &fakeGitOps{
 		result: gitops.Result{Commit: commit, Previous: "sha256:" + core.Digest(strings.Repeat("4", 64)), Changed: true},
-		pinned: gitops.Pinned{Digest: adapterDigest},
 	}
 	p := pinWriter{writer: fake, targets: map[core.Target]gitops.Target{core.AppTarget("blog"): target}}
 
@@ -158,12 +149,6 @@ func TestPinWriter(t *testing.T) {
 	if !reflect.DeepEqual(fake.requests, []gitops.Request{wantRequest}) {
 		t.Errorf("gitops requests = %+v, want %+v", fake.requests, wantRequest)
 	}
-	if got, err := p.Current(t.Context(), core.AppTarget("blog")); err != nil || got != adapterDigest {
-		t.Errorf("Current() = %q, %v", got, err)
-	}
-	if !reflect.DeepEqual(fake.targets, []gitops.Target{target}) {
-		t.Errorf("Current targets = %+v", fake.targets)
-	}
 	if err := p.Abandon(t.Context(), req); err != nil {
 		t.Errorf("Abandon: %v", err)
 	}
@@ -176,9 +161,6 @@ func TestPinWriter(t *testing.T) {
 	if _, err := p.Pin(t.Context(), unknown); !errors.Is(err, engine.ErrPermanent) {
 		t.Errorf("Pin(unknown app) error = %v, want ErrPermanent", err)
 	}
-	if _, err := p.Current(t.Context(), core.AppTarget("other")); !errors.Is(err, engine.ErrPermanent) {
-		t.Errorf("Current(unknown app) error = %v, want ErrPermanent", err)
-	}
 	if err := p.Abandon(t.Context(), unknown); !errors.Is(err, engine.ErrPermanent) {
 		t.Errorf("Abandon(unknown app) error = %v, want ErrPermanent", err)
 	}
@@ -186,9 +168,6 @@ func TestPinWriter(t *testing.T) {
 	fake.err = gitops.ErrBranchProtected
 	if _, err := p.Pin(t.Context(), req); !errors.Is(err, engine.ErrPermanent) || !errors.Is(err, gitops.ErrBranchProtected) {
 		t.Errorf("Pin() error = %v, want ErrPermanent wrapping ErrBranchProtected", err)
-	}
-	if _, err := p.Current(t.Context(), core.AppTarget("blog")); !errors.Is(err, engine.ErrPermanent) {
-		t.Errorf("Current() error = %v, want ErrPermanent", err)
 	}
 }
 
@@ -203,8 +182,6 @@ func TestClassifyPinError(t *testing.T) {
 		gitops.ErrBranchProtected,
 		gitops.ErrPinOverwritten,
 		gitops.ErrPullRequestClosed,
-		gitops.ErrPullRequestTampered,
-		gitops.ErrMergeTimeout,
 		github.ErrFileTooLarge,
 		github.ErrNotAFile,
 	}
@@ -217,11 +194,19 @@ func TestClassifyPinError(t *testing.T) {
 			}
 		})
 	}
-	transient := []error{gitops.ErrConflict, github.ErrRefNotFound, &github.APIError{StatusCode: 502}, context.DeadlineExceeded}
+	t.Run("tampered pull request", func(t *testing.T) {
+		t.Parallel()
+		err := classifyPinError(fmt.Errorf("pin: %w", gitops.ErrPullRequestTampered))
+		if !errors.Is(err, engine.ErrNeedsAttention) || errors.Is(err, engine.ErrPermanent) || !errors.Is(err, gitops.ErrPullRequestTampered) {
+			t.Errorf("classifyPinError() = %v, want ErrNeedsAttention wrapping ErrPullRequestTampered", err)
+		}
+	})
+	transient := []error{gitops.ErrConflict, gitops.ErrMergeTimeout, github.ErrRefNotFound, &github.APIError{StatusCode: 502}, context.DeadlineExceeded}
 	for _, cause := range transient {
 		t.Run("transient "+cause.Error(), func(t *testing.T) {
 			t.Parallel()
-			if err := classifyPinError(cause); errors.Is(err, engine.ErrPermanent) || !errors.Is(err, cause) {
+			err := classifyPinError(cause)
+			if errors.Is(err, engine.ErrPermanent) || errors.Is(err, engine.ErrNeedsAttention) || !errors.Is(err, cause) {
 				t.Errorf("classifyPinError(%v) = %v, want it unchanged", cause, err)
 			}
 		})

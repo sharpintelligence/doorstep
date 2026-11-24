@@ -100,7 +100,13 @@ func newEngine(in engineInput) (engineWiring, error) {
 	if err != nil {
 		return engineWiring{}, err
 	}
-	runner := queue.NewRunner(queue.RunnerOptions{Source: in.queue, Listen: in.queue.Listen, WorkerID: workerID, Logger: in.logger})
+	runner := queue.NewRunner(queue.RunnerOptions{
+		Source:      in.queue,
+		Listen:      in.queue.Listen,
+		WorkerID:    workerID,
+		Concurrency: in.config.Engine.Concurrency,
+		Logger:      in.logger,
+	})
 	handle := queueHandler(e)
 	return engineWiring{
 		engine: e,
@@ -140,8 +146,8 @@ func (s engineStore) SetLineage(ctx context.Context, id core.DeploymentID, l cor
 	return s.store.SetLineage(ctx, id, l, actor)
 }
 
-func (s engineStore) StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error) {
-	return s.store.StateEnteredAt(ctx, id, state)
+func (s engineStore) TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {
+	return s.store.TimeInState(ctx, id, state)
 }
 
 type commitResolver interface {
@@ -177,7 +183,6 @@ func (r digestResolver) Resolve(ctx context.Context, ref core.ImageRef) (core.Di
 
 type gitopsWriter interface {
 	Pin(ctx context.Context, req gitops.Request) (gitops.Result, error)
-	Current(ctx context.Context, t gitops.Target) (gitops.Pinned, error)
 	Abandon(ctx context.Context, req gitops.Request) error
 }
 
@@ -196,18 +201,6 @@ func (p pinWriter) Pin(ctx context.Context, req engine.PinRequest) (engine.PinRe
 		return engine.PinResult{}, classifyPinError(err)
 	}
 	return engine.PinResult{Commit: res.Commit, Previous: res.Previous, Changed: res.Changed}, nil
-}
-
-func (p pinWriter) Current(ctx context.Context, t core.Target) (core.Digest, error) {
-	target, ok := p.targets[t]
-	if !ok {
-		return "", fmt.Errorf("%w: no GitOps target is configured for %s", engine.ErrPermanent, t)
-	}
-	pinned, err := p.writer.Current(ctx, target)
-	if err != nil {
-		return "", classifyPinError(err)
-	}
-	return pinned.Digest, nil
 }
 
 func (p pinWriter) Abandon(ctx context.Context, req engine.PinRequest) error {
@@ -233,12 +226,16 @@ func (p pinWriter) request(req engine.PinRequest) (gitops.Request, error) {
 		RollbackOf: d.RollbackOfID,
 		Blocks:     req.Blocks,
 		Unblocks:   req.Unblocks,
+		Repin:      req.Repin,
 	}, nil
 }
 
 func classifyPinError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, gitops.ErrPullRequestTampered) {
+		return fmt.Errorf("%w: %w", engine.ErrNeedsAttention, err)
 	}
 	permanent := []error{
 		gitops.ErrInvalidRequest,
@@ -248,8 +245,6 @@ func classifyPinError(err error) error {
 		gitops.ErrBranchProtected,
 		gitops.ErrPinOverwritten,
 		gitops.ErrPullRequestClosed,
-		gitops.ErrPullRequestTampered,
-		gitops.ErrMergeTimeout,
 		github.ErrFileTooLarge,
 		github.ErrNotAFile,
 	}

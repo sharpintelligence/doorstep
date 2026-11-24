@@ -56,7 +56,7 @@ Results left behind by a gate that has since been removed from the configuration
 - a gate with a verdict (`passed`, `failed`, `skipped`) keeps it and is not run again, so a passed CI gate cannot flap;
 - a `pending` gate is run again and its row updated.
 
-`Reevaluate` runs every gate of the phase regardless of its recorded result. It is the explicit retry path for the engine and operators. A gate that goes from a verdict back to `pending` restarts its clock: `StartedAt` is reset and `FinishedAt` cleared.
+`Reevaluate` runs every gate of the phase regardless of its recorded result. It is the explicit retry path for the engine and operators: the engine calls it for the `after` phase when a rollback had to pin its digest again, so `health` judges the new pin commit instead of keeping the pass it recorded for the replaced one ([engine.md](engine.md#rollbacks)). A gate that goes from a verdict back to `pending` restarts its clock: `StartedAt` is reset and `FinishedAt` cleared.
 
 Each gate receives the deployment, the phase and its previously recorded result (`Request.Previous`), so a gate that needs state across polls and restarts (a soak start time, a launched Job name) keeps it in its evidence rather than in its own table.
 

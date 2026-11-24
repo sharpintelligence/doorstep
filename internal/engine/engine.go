@@ -17,6 +17,7 @@ const (
 	DefaultResolveRetryInterval = 15 * time.Second
 	DefaultResolveTimeout       = 15 * time.Minute
 	DefaultPinTimeout           = 45 * time.Minute
+	DefaultVerifyTimeout        = time.Hour
 	DefaultSyncGrace            = 10 * time.Second
 	DefaultCleanupTimeout       = 15 * time.Second
 )
@@ -40,6 +41,7 @@ type Options struct {
 	ResolveRetryInterval time.Duration
 	ResolveTimeout       time.Duration
 	PinTimeout           time.Duration
+	VerifyTimeout        time.Duration
 	SyncGrace            time.Duration
 	CleanupTimeout       time.Duration
 }
@@ -63,6 +65,7 @@ type Engine struct {
 	resolveRetry   time.Duration
 	resolveTimeout time.Duration
 	pinTimeout     time.Duration
+	verifyTimeout  time.Duration
 	syncGrace      time.Duration
 	cleanupTimeout time.Duration
 }
@@ -109,6 +112,7 @@ func New(opts Options) (*Engine, error) {
 		resolveRetry:   orDefault(opts.ResolveRetryInterval, DefaultResolveRetryInterval),
 		resolveTimeout: orDefault(opts.ResolveTimeout, DefaultResolveTimeout),
 		pinTimeout:     orDefault(opts.PinTimeout, DefaultPinTimeout),
+		verifyTimeout:  orDefault(opts.VerifyTimeout, DefaultVerifyTimeout),
 		syncGrace:      orDefault(opts.SyncGrace, DefaultSyncGrace),
 		cleanupTimeout: orDefault(opts.CleanupTimeout, DefaultCleanupTimeout),
 	}
@@ -222,11 +226,7 @@ func (e *Engine) transition(ctx context.Context, d core.Deployment, to core.Stat
 }
 
 func (e *Engine) elapsed(ctx context.Context, d core.Deployment) (time.Duration, error) {
-	entered, err := e.store.StateEnteredAt(ctx, d.ID, d.State)
-	if err != nil {
-		return 0, err
-	}
-	return e.now().Sub(entered), nil
+	return e.store.TimeInState(ctx, d.ID, d.State)
 }
 
 func (e *Engine) logFor(d core.Deployment) *slog.Logger {

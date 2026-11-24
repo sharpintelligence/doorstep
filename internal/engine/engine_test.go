@@ -106,8 +106,12 @@ func TestHandleRollbackSucceeds(t *testing.T) {
 	if h.resolver.calls() != 0 || h.blocks.checks() != 0 {
 		t.Errorf("rollback resolved %d times and checked blocks %d times, want neither", h.resolver.calls(), h.blocks.checks())
 	}
-	if pins := h.pins.pinRequests(); len(pins) != 1 || pins[0].Digest != digestOld {
-		t.Errorf("pin requests = %+v, want the preset digest", pins)
+	pins := h.pins.pinRequests()
+	if len(pins) != 2 || pins[0].Digest != digestOld || pins[0].Repin || pins[1].Digest != digestOld || !pins[1].Repin {
+		t.Errorf("pin requests = %+v, want the preset digest pinned and then confirmed", pins)
+	}
+	if len(h.gates.reevaluations()) != 0 {
+		t.Errorf("after gates re-evaluated although the pin was not replaced")
 	}
 	notes := h.notifier.all()
 	last := notes[len(notes)-1]
@@ -307,6 +311,20 @@ func TestHandleOutcomes(t *testing.T) {
 			wantReason:  []string{"pin " + string(digestNew), "branch protected"},
 			wantAbandon: true,
 			wantNotes:   []core.NotificationKind{core.NotificationDeployFailed},
+		},
+		{
+			name:  "pin needs a person",
+			start: core.StatePinning,
+			setup: func(h *harness) {
+				h.pins.pinFn = func(context.Context, int, engine.PinRequest) (engine.PinResult, error) {
+					return engine.PinResult{}, fmt.Errorf("pull request from a fork: %w", engine.ErrNeedsAttention)
+				}
+			},
+			wantStates: []core.State{core.StateFailed},
+			wantStage:  core.StatePinning,
+			wantClass:  core.FailureConfiguration,
+			wantReason: []string{"pin " + string(digestNew), "pull request from a fork"},
+			wantNotes:  []core.NotificationKind{core.NotificationDeployFailed},
 		},
 		{
 			name:  "pin transient",
@@ -572,15 +590,81 @@ func TestHandleSyncResumesWithRemainingTime(t *testing.T) {
 	}
 }
 
-func TestHandleSyncOwnDeadlineFails(t *testing.T) {
+func TestHandleSyncOwnDeadlineChecksOnceMore(t *testing.T) {
+	t.Parallel()
+
+	outOfSync := core.SyncStatus{Failure: &core.SyncFailure{Reason: core.SyncReasonOutOfSync, Class: core.FailureUnknown, Message: "still out of sync"}}
+	tests := []struct {
+		name       string
+		check      func(string) (core.SyncStatus, error)
+		wantState  core.State
+		wantReason string
+	}{
+		{
+			name:      "ready at the last read",
+			check:     func(string) (core.SyncStatus, error) { return syncedStatus(), nil },
+			wantState: core.StateSucceeded,
+		},
+		{
+			name: "the last read explains the failure",
+			check: func(string) (core.SyncStatus, error) {
+				return core.SyncStatus{Failure: &core.SyncFailure{Reason: core.SyncReasonDegraded, Class: core.FailureVersion, Message: "crashloop"}}, nil
+			},
+			wantState:  core.StateFailed,
+			wantReason: "within 10m0s (degraded): crashloop",
+		},
+		{
+			name:       "the last read fails",
+			check:      func(string) (core.SyncStatus, error) { return core.SyncStatus{}, errors.New("connection refused") },
+			wantState:  core.StateFailed,
+			wantReason: "within 10m0s (out_of_sync): still out of sync",
+		},
+		{
+			name: "the Application is gone",
+			check: func(string) (core.SyncStatus, error) {
+				return core.SyncStatus{}, fmt.Errorf("argocd: %w", core.ErrSyncTargetNotFound)
+			},
+			wantState:  core.StateFailed,
+			wantReason: "Argo CD Application not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			h.options.SyncGrace = 20 * time.Millisecond
+			h.sync.waitFn = func(ctx context.Context, _ string) (core.SyncStatus, error) {
+				<-ctx.Done()
+				return outOfSync, ctx.Err()
+			}
+			h.sync.checkFn = tt.check
+			d := h.store.add(in(core.StateSyncing, deploy()))
+			h.clock.Advance(time.Hour)
+
+			if _, err := h.run(t, t.Context(), d.ID); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			got := h.store.deployment(d.ID)
+			if got.State != tt.wantState || !strings.Contains(got.FailureReason, tt.wantReason) {
+				t.Fatalf("deployment = %s %q, want %s %q", got.State, got.FailureReason, tt.wantState, tt.wantReason)
+			}
+			if !slices.Equal(h.sync.checked, []string{pinSHA}) {
+				t.Errorf("Check calls = %v, want one for the pin commit", h.sync.checked)
+			}
+		})
+	}
+}
+
+func TestHandleSyncUnobservedDeadlineReportsTheReadError(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness()
 	h.options.SyncGrace = 20 * time.Millisecond
 	h.sync.waitFn = func(ctx context.Context, _ string) (core.SyncStatus, error) {
 		<-ctx.Done()
-		return core.SyncStatus{Failure: &core.SyncFailure{Reason: core.SyncReasonOutOfSync, Class: core.FailureUnknown, Message: "still out of sync"}}, ctx.Err()
+		return core.SyncStatus{}, ctx.Err()
 	}
+	h.sync.checkFn = func(string) (core.SyncStatus, error) { return core.SyncStatus{}, errors.New("connection refused") }
 	d := h.store.add(in(core.StateSyncing, deploy()))
 	h.clock.Advance(time.Hour)
 
@@ -588,8 +672,11 @@ func TestHandleSyncOwnDeadlineFails(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	got := h.store.deployment(d.ID)
-	if got.State != core.StateFailed || !strings.Contains(got.FailureReason, "within 10m0s (out_of_sync): still out of sync") {
+	if got.State != core.StateFailed || !strings.Contains(got.FailureReason, "(unavailable): connection refused") {
 		t.Fatalf("deployment = %s %q", got.State, got.FailureReason)
+	}
+	if f := h.policy.decided(); len(f) != 1 || f[0].Class != core.SyncReasonUnavailable.Class(true) {
+		t.Errorf("failures = %+v, want the unavailable class", f)
 	}
 }
 
@@ -625,6 +712,50 @@ func TestHandleShutdownIsNotAFailure(t *testing.T) {
 			}
 			if len(h.policy.decided()) != 0 || len(h.notifier.kinds()) != 0 || len(h.pins.abandoned()) != 0 {
 				t.Errorf("shutdown failed, notified or abandoned: %+v %v %+v", h.policy.decided(), h.notifier.kinds(), h.pins.abandoned())
+			}
+		})
+	}
+}
+
+func TestHandlePinIsBoundedByThePinDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		elapsed   time.Duration
+		want      time.Duration
+		wantState core.State
+		wantErr   bool
+	}{
+		{name: "fresh", elapsed: 0, want: engine.DefaultPinTimeout, wantState: core.StatePinning, wantErr: true},
+		{name: "resumed", elapsed: 40 * time.Minute, want: 5 * time.Minute, wantState: core.StatePinning, wantErr: true},
+		{name: "expired gets the grace period", elapsed: engine.DefaultPinTimeout, want: engine.DefaultSyncGrace, wantState: core.StateFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			var got time.Duration
+			h.pins.pinFn = func(ctx context.Context, _ int, _ engine.PinRequest) (engine.PinResult, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return engine.PinResult{}, errors.New("no deadline")
+				}
+				got = time.Until(deadline)
+				return engine.PinResult{}, errors.New("merge pending")
+			}
+			d := h.store.add(in(core.StatePinning, deploy()))
+			h.clock.Advance(tt.elapsed)
+
+			_, err := h.run(t, t.Context(), d.ID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Handle error = %v, want error %t", err, tt.wantErr)
+			}
+			if diff := tt.want - got; diff < 0 || diff > 5*time.Second {
+				t.Errorf("Pin got %s, want about %s", got, tt.want)
+			}
+			if state := h.store.deployment(d.ID).State; state != tt.wantState {
+				t.Errorf("state = %s, want %s", state, tt.wantState)
 			}
 		})
 	}
@@ -851,47 +982,131 @@ func TestHandleInterruptedWhilePinning(t *testing.T) {
 	}
 }
 
-func TestHandleRollbackRepinsAfterLatePin(t *testing.T) {
-	t.Parallel()
-
-	h := newHarness()
+func verifyingRollback(h *harness) core.Deployment {
 	bad := h.store.add(in(core.StateCancelled, deploy()))
 	rb := deploy()
 	rb.Kind = core.KindRollback
 	rb.Digest = digestOld
 	rb.RollbackOfID = &bad.ID
-	d := h.store.add(in(core.StateVerifying, rb))
-	h.pins.current = []core.Digest{digestNew}
-	h.pins.pinFn = func(_ context.Context, _ int, req engine.PinRequest) (engine.PinResult, error) {
-		h.pins.mu.Lock()
-		h.pins.pinned = req.Digest
-		h.pins.mu.Unlock()
-		return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: repinSHA}, Previous: digestNew, Changed: true}, nil
-	}
+	return h.store.add(in(core.StateVerifying, rb))
+}
 
-	result, err := h.run(t, t.Context(), d.ID)
-	if err != nil || result.RequeueAfter != engine.DefaultVerifyPollInterval {
-		t.Fatalf("first Handle = %+v, %v, want a requeue after the re-pin", result, err)
+func repin(_ context.Context, _ int, req engine.PinRequest) (engine.PinResult, error) {
+	if !req.Repin {
+		return engine.PinResult{}, errors.New("verify must allow a re-pin")
+	}
+	return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: repinSHA}, Previous: digestNew, Changed: true}, nil
+}
+
+func TestHandleRollbackRepinsAfterLatePin(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	d := verifyingRollback(h)
+	h.pins.pinFn = repin
+
+	if _, err := h.run(t, t.Context(), d.ID); err != nil {
+		t.Fatalf("Handle: %v", err)
 	}
 	got := h.store.deployment(d.ID)
-	if got.State != core.StateVerifying || got.PinCommitSHA != repinSHA || got.ArgoCDRevision != argoSHA {
+	if got.State != core.StateSucceeded || got.PinCommitSHA != repinSHA || got.ArgoCDRevision != argoSHA {
 		t.Fatalf("after re-pin: %s pin %s revision %s", got.State, got.PinCommitSHA, got.ArgoCDRevision)
 	}
 	if waits := h.sync.waitCalls(); len(waits) != 1 || waits[0].revision != repinSHA {
 		t.Errorf("WaitSynced calls = %+v, want one for the re-pin", waits)
 	}
-
-	if _, err := h.run(t, t.Context(), d.ID); err != nil {
-		t.Fatalf("second Handle: %v", err)
+	if re := h.gates.reevaluations(); len(re) != 1 || re[0].PinCommitSHA != repinSHA {
+		t.Errorf("Reevaluate calls = %+v, want one for the new pin commit", re)
 	}
-	if got := h.store.deployment(d.ID); got.State != core.StateSucceeded {
-		t.Fatalf("state = %s, want succeeded", got.State)
+	if got := h.gates.evaluated(); !slices.Equal(got, []core.GatePhase{core.GatePhaseAfter, core.GatePhaseAfter}) {
+		t.Errorf("Evaluate phases = %v, want after gates before and after the re-pin", got)
 	}
-	if len(h.pins.pinRequests()) != 1 {
-		t.Errorf("pins = %d, want exactly one re-pin", len(h.pins.pinRequests()))
+	if got := len(h.pins.pinRequests()); got != 2 {
+		t.Errorf("pins = %d, want the re-pin and its confirmation", got)
 	}
 	if got := h.notifier.kinds(); !slices.Equal(got, []core.NotificationKind{core.NotificationDeployRolledBack}) {
 		t.Errorf("notifications = %v", got)
+	}
+}
+
+func TestHandleRollbackRepinRunsStickyGatesAgain(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		rerun      core.GateOutcome
+		wantState  core.State
+		wantResult engine.Result
+		wantReason string
+	}{
+		{name: "new pin healthy", rerun: core.GateOutcome{Status: core.GatePassed}, wantState: core.StateSucceeded},
+		{name: "new pin still settling", rerun: pending(), wantState: core.StateVerifying, wantResult: engine.Result{RequeueAfter: engine.DefaultVerifyPollInterval}},
+		{name: "new pin degraded", rerun: failedGate("health", "degraded"), wantState: core.StateFailed, wantReason: "after gates failed: health: degraded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			d := verifyingRollback(h)
+			h.gates.rerun = &tt.rerun
+			h.pins.pinFn = repin
+
+			result, err := h.run(t, t.Context(), d.ID)
+			if err != nil || result != tt.wantResult {
+				t.Fatalf("Handle = %+v, %v, want %+v", result, err, tt.wantResult)
+			}
+			got := h.store.deployment(d.ID)
+			if got.State != tt.wantState || !strings.Contains(got.FailureReason, tt.wantReason) {
+				t.Fatalf("deployment = %s %q, want %s %q", got.State, got.FailureReason, tt.wantState, tt.wantReason)
+			}
+			if len(h.gates.reevaluations()) != 1 {
+				t.Errorf("Reevaluate calls = %d, want 1", len(h.gates.reevaluations()))
+			}
+		})
+	}
+}
+
+func TestHandleRollbackConfirmsUnrecordedRepin(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	d := verifyingRollback(h)
+	h.pins.pinFn = func(context.Context, int, engine.PinRequest) (engine.PinResult, error) {
+		return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: repinSHA}, Previous: digestOld}, nil
+	}
+
+	if _, err := h.run(t, t.Context(), d.ID); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := h.store.deployment(d.ID); got.State != core.StateSucceeded || got.PinCommitSHA != repinSHA {
+		t.Fatalf("deployment = %s pin %s, want succeeded with the re-pin recorded", got.State, got.PinCommitSHA)
+	}
+	if len(h.sync.waitCalls()) != 1 || len(h.gates.reevaluations()) != 1 {
+		t.Errorf("a re-pin written by an interrupted claim was not confirmed: waits %+v, reevaluations %d", h.sync.waitCalls(), len(h.gates.reevaluations()))
+	}
+}
+
+func TestHandleRollbackWithoutPinCommitSucceeds(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	rb := verifyingRollback(h)
+	h.store.mu.Lock()
+	rb.PinCommitSHA = ""
+	h.store.deployments[rb.ID] = rb
+	h.store.mu.Unlock()
+	h.pins.pinFn = func(context.Context, int, engine.PinRequest) (engine.PinResult, error) {
+		return engine.PinResult{Previous: digestOld}, nil
+	}
+
+	if _, err := h.run(t, t.Context(), rb.ID); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := h.store.deployment(rb.ID); got.State != core.StateSucceeded {
+		t.Fatalf("state = %s, want succeeded", got.State)
+	}
+	if len(h.sync.waitCalls()) != 0 || len(h.gates.reevaluations()) != 0 {
+		t.Errorf("waited or re-evaluated without a new pin commit")
 	}
 }
 
@@ -901,35 +1116,34 @@ func TestHandleRollbackRepinFailures(t *testing.T) {
 	tests := []struct {
 		name       string
 		pinErr     error
-		currentErr error
 		waitErr    error
+		reErr      error
+		elapsed    time.Duration
 		wantState  core.State
 		wantErr    bool
 		wantReason string
+		wantClass  core.FailureClass
 	}{
-		{name: "pin overwritten", pinErr: fmt.Errorf("pin landed but was replaced: %w", engine.ErrPermanent), wantState: core.StateFailed, wantReason: "again: pin landed but was replaced"},
+		{name: "pin refused", pinErr: fmt.Errorf("no such file: %w", engine.ErrPermanent), wantState: core.StateFailed, wantReason: "confirm the rollback pin " + string(digestOld) + ": no such file", wantClass: core.FailureConfiguration},
 		{name: "pin unavailable", pinErr: errors.New("github down"), wantState: core.StateVerifying, wantErr: true},
-		{name: "current unreadable", currentErr: errors.New("github down"), wantState: core.StateVerifying, wantErr: true},
-		{name: "current refused", currentErr: fmt.Errorf("no such file: %w", engine.ErrPermanent), wantState: core.StateFailed, wantReason: "read the current pin"},
-		{name: "re-pin never syncs", waitErr: fmt.Errorf("%w", core.ErrSyncTimeout), wantState: core.StateFailed, wantReason: "did not sync"},
+		{name: "pin unavailable past the deadline", pinErr: errors.New("github down"), elapsed: engine.DefaultVerifyTimeout, wantState: core.StateFailed, wantReason: "gave up after 1h0m0s: github down", wantClass: core.FailureTransient},
+		{name: "re-pin past the deadline", elapsed: engine.DefaultVerifyTimeout, wantState: core.StateFailed, wantReason: "was not confirmed within 1h0m0s", wantClass: core.FailureTransient},
+		{name: "re-pin never syncs", waitErr: fmt.Errorf("%w", core.ErrSyncTimeout), wantState: core.StateFailed, wantReason: "did not sync", wantClass: core.FailureUnknown},
+		{name: "re-pin sync unreadable", waitErr: errors.New("watch closed"), wantState: core.StateVerifying, wantErr: true},
+		{name: "re-evaluation fails", reErr: errors.New("database down"), wantState: core.StateVerifying, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness()
-			bad := h.store.add(in(core.StateCancelled, deploy()))
-			rb := deploy()
-			rb.Kind = core.KindRollback
-			rb.Digest = digestOld
-			rb.RollbackOfID = &bad.ID
-			d := h.store.add(in(core.StateVerifying, rb))
-			h.pins.current = []core.Digest{digestNew}
-			h.pins.currErr = tt.currentErr
-			h.pins.pinFn = func(context.Context, int, engine.PinRequest) (engine.PinResult, error) {
+			d := verifyingRollback(h)
+			h.clock.Advance(tt.elapsed)
+			h.gates.reErr = tt.reErr
+			h.pins.pinFn = func(ctx context.Context, n int, req engine.PinRequest) (engine.PinResult, error) {
 				if tt.pinErr != nil {
 					return engine.PinResult{}, tt.pinErr
 				}
-				return engine.PinResult{Commit: core.Commit{Repository: gitopsRepo, SHA: repinSHA}, Changed: true}, nil
+				return repin(ctx, n, req)
 			}
 			if tt.waitErr != nil {
 				h.sync.waitFn = func(context.Context, string) (core.SyncStatus, error) { return core.SyncStatus{}, tt.waitErr }
@@ -943,14 +1157,75 @@ func TestHandleRollbackRepinFailures(t *testing.T) {
 			if got.State != tt.wantState || !strings.Contains(got.FailureReason, tt.wantReason) {
 				t.Fatalf("deployment = %s %q, want %s %q", got.State, got.FailureReason, tt.wantState, tt.wantReason)
 			}
-			if tt.wantState == core.StateFailed {
-				if got := h.metrics.outcomes(); !slices.Equal(got, []engine.Outcome{engine.OutcomeRollbackFailed}) {
-					t.Errorf("outcomes = %v, want rollback_failed", got)
-				}
-				notes := h.notifier.all()
-				if len(notes) != 1 || notes[0].Kind != core.NotificationDeployFailed || notes[0].RollbackOf == nil {
-					t.Errorf("notifications = %+v, want deploy.failed naming the rolled back deployment", notes)
-				}
+			if got.PinCommitSHA != pinSHA {
+				t.Errorf("pin commit = %s, want the unconfirmed re-pin left unrecorded", got.PinCommitSHA)
+			}
+			if tt.wantState != core.StateFailed {
+				return
+			}
+			if f := h.policy.decided(); len(f) != 1 || f[0].Class != tt.wantClass || f[0].Stage != core.StateVerifying {
+				t.Errorf("failures = %+v, want one %s failure while verifying", f, tt.wantClass)
+			}
+			if got := h.metrics.outcomes(); !slices.Equal(got, []engine.Outcome{engine.OutcomeRollbackFailed}) {
+				t.Errorf("outcomes = %v, want rollback_failed", got)
+			}
+			notes := h.notifier.all()
+			if len(notes) != 1 || notes[0].Kind != core.NotificationDeployFailed || notes[0].RollbackOf == nil {
+				t.Errorf("notifications = %+v, want deploy.failed naming the rolled back deployment", notes)
+			}
+		})
+	}
+}
+
+func TestHandleRollbackConfirmationPinIsBounded(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	d := verifyingRollback(h)
+	h.clock.Advance(engine.DefaultVerifyTimeout - 2*time.Minute)
+	var got time.Duration
+	h.pins.pinFn = func(ctx context.Context, n int, req engine.PinRequest) (engine.PinResult, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			got = time.Until(deadline)
+		}
+		return repin(ctx, n, req)
+	}
+
+	if _, err := h.run(t, t.Context(), d.ID); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if diff := 2*time.Minute - got; diff < 0 || diff > 5*time.Second {
+		t.Errorf("Pin got %s, want about the 2m0s left of the verify deadline", got)
+	}
+}
+
+func TestHandleRollbackRepinWaitIsBounded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{name: "sync timeout", elapsed: 0, want: syncTimeout},
+		{name: "near the verify deadline", elapsed: engine.DefaultVerifyTimeout - 3*time.Minute, want: 3 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			d := verifyingRollback(h)
+			h.clock.Advance(tt.elapsed)
+			h.pins.pinFn = repin
+			if _, err := h.run(t, t.Context(), d.ID); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			waits := h.sync.waitCalls()
+			if len(waits) != 1 {
+				t.Fatalf("WaitSynced calls = %d", len(waits))
+			}
+			if diff := tt.want - waits[0].timeout; diff < 0 || diff > 5*time.Second {
+				t.Errorf("WaitSynced got %s to wait, want about %s", waits[0].timeout, tt.want)
 			}
 		})
 	}

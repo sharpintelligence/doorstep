@@ -27,12 +27,15 @@ const (
 
 	EnvLockReminderInterval = "DOORSTEP_LOCK_REMINDER_INTERVAL"
 	EnvPollInterval         = "DOORSTEP_POLL_INTERVAL"
+	EnvEngineConcurrency    = "DOORSTEP_ENGINE_CONCURRENCY"
 
 	EnvKubeconfig  = "DOORSTEP_KUBECONFIG"
 	EnvKubeContext = "DOORSTEP_KUBE_CONTEXT"
 
-	MinLockReminderInterval = time.Minute
-	MinPollInterval         = 10 * time.Second
+	MinLockReminderInterval  = time.Minute
+	MinPollInterval          = 10 * time.Second
+	DefaultEngineConcurrency = 4
+	MaxEngineConcurrency     = 256
 )
 
 var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
@@ -46,6 +49,7 @@ type Config struct {
 	Locks      Locks
 	Kubernetes Kubernetes
 	Intake     Intake
+	Engine     Engine
 }
 
 type Server struct {
@@ -90,6 +94,10 @@ type Intake struct {
 	PollInterval time.Duration
 }
 
+type Engine struct {
+	Concurrency int
+}
+
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -105,6 +113,7 @@ func Default() Config {
 		GitHub: defaultGitHub(),
 		Locks:  Locks{ReminderInterval: 24 * time.Hour},
 		Intake: Intake{PollInterval: time.Minute},
+		Engine: Engine{Concurrency: DefaultEngineConcurrency},
 	}
 }
 
@@ -125,6 +134,7 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 		lookupDuration(lookup, EnvShutdownTimeout, &cfg.Server.ShutdownTimeout),
 		lookupDuration(lookup, EnvLockReminderInterval, &cfg.Locks.ReminderInterval),
 		lookupDuration(lookup, EnvPollInterval, &cfg.Intake.PollInterval),
+		lookupInt(lookup, EnvEngineConcurrency, &cfg.Engine.Concurrency),
 	)
 	if v, ok := lookup(EnvLogLevel); ok {
 		cfg.Log.Level = v
@@ -163,6 +173,19 @@ func lookupDuration(lookup func(string) (string, bool), key string, dst *time.Du
 	return nil
 }
 
+func lookupInt(lookup func(string) (string, bool), key string, dst *int) error {
+	v, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a whole number", key, v)
+	}
+	*dst = n
+	return nil
+}
+
 func (c Config) Validate() error {
 	var errs []error
 	errs = append(errs, c.ValidateSettings())
@@ -195,7 +218,7 @@ func (c Config) ValidateSettings() error {
 			errs = append(errs, fmt.Errorf("public url: %w", err))
 		}
 	}
-	errs = append(errs, c.Log.Validate(), c.Locks.Validate(), c.Kubernetes.Validate(), c.Intake.Validate())
+	errs = append(errs, c.Log.Validate(), c.Locks.Validate(), c.Kubernetes.Validate(), c.Intake.Validate(), c.Engine.Validate())
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }
@@ -227,6 +250,13 @@ func (i Intake) Validate() error {
 		return fmt.Errorf("poll interval: must not be negative, got %s", i.PollInterval)
 	case i.PollInterval > 0 && i.PollInterval < MinPollInterval:
 		return fmt.Errorf("poll interval: must be 0 (disabled) or at least %s, got %s", MinPollInterval, i.PollInterval)
+	}
+	return nil
+}
+
+func (e Engine) Validate() error {
+	if e.Concurrency < 1 || e.Concurrency > MaxEngineConcurrency {
+		return fmt.Errorf("engine concurrency: must be between 1 and %d, got %d", MaxEngineConcurrency, e.Concurrency)
 	}
 	return nil
 }

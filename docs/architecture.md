@@ -108,7 +108,7 @@ type DeploymentStore interface {
 	Get(ctx context.Context, id core.DeploymentID) (core.Deployment, error)
 	Transition(ctx context.Context, t engine.Transition) (core.Deployment, error)
 	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
-	StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error)
+	TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error)
 }
 
 type DigestResolver interface {
@@ -117,17 +117,18 @@ type DigestResolver interface {
 
 type PinWriter interface {
 	Pin(ctx context.Context, req engine.PinRequest) (engine.PinResult, error)
-	Current(ctx context.Context, t core.Target) (core.Digest, error)
 	Abandon(ctx context.Context, req engine.PinRequest) error
 }
 
 type SyncWatcher interface {
 	WaitSynced(ctx context.Context, t core.Target, revision string) (core.SyncStatus, error)
+	Check(ctx context.Context, t core.Target, revision string) (core.SyncStatus, error)
 	Health(ctx context.Context, t core.Target) (core.Health, error)
 }
 
 type GateEvaluator interface {
 	Evaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
+	Reevaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
 }
 
 type BlockList interface {
@@ -154,7 +155,7 @@ type FailurePolicy interface {
 
 There is no queue port: `queue.Runner` claims, heartbeats and releases, and a terminal transition deletes the queue entry in the same transaction, so the engine never calls the queue. There is no locker port either: the claim skips frozen deploys and the opt-in `lock` gate reads freezes. `LastSuccessfulDeployment` and an enqueue port are left to automatic rollback (doorstep-ehl.6.5), which also adds the failure policy action that fails a deploy, enqueues its rollback and creates the block in one transaction.
 
-`BlockList` is `*rollback.Service` ([rollback.md](rollback.md), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)). The engine calls `Blocked` with the resolved digest of a deploy and fails it when blocked, passes `PendingTrailers` with every pin and calls `MarkMirrored` after a pin that wrote a commit, pins a rollback's preset digest without resolving, and confirms `PinWriter.Current` before a rollback succeeds, pinning again if a cancelled deploy's late pin replaced it ([rollback.md](rollback.md#the-late-pin-race)).
+`BlockList` is `*rollback.Service` ([rollback.md](rollback.md), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)). The engine calls `Blocked` with the resolved digest of a deploy and fails it when blocked, passes `PendingTrailers` with every pin and calls `MarkMirrored` after a pin that wrote a commit, pins a rollback's preset digest without resolving, and calls `Pin` again with `Repin` before a rollback succeeds, which confirms the pin or writes it again if a cancelled deploy's late pin replaced it ([rollback.md](rollback.md#the-late-pin-race)).
 
 `Notifier` has no error result on purpose: `notify.Dispatcher` validates and queues the notification without network I/O and returns, so a notification can never block or fail a deploy (see [Notifications](#notifications)).
 
@@ -281,6 +282,7 @@ result, err := writer.Pin(ctx, gitops.Request{Target: target, Digest: digest, De
 - Editing finds the target scalar with the yaml v3 `Node` API and splices bytes in the original text; it never re-encodes the document, so comments, blank lines, quoting, indentation and CRLF line endings survive and the diff is one line. The edited file is parsed again and must hold the desired value with the same node count (two more when a kustomize `digest` key is inserted). Block and multi-line scalars, anchors, aliases, merge keys, explicit tags, null values and flow mappings that need an insert fail with `ErrUnsupportedYAML` instead of guessing.
 - Commit mode: `GET` the file from the Contents API, edit, `PUT` it with the blob `sha` and `branch`. Only a concurrent edit of the same file conflicts (`409` or `422` whose message is about the blob sha); doorstep re-reads, re-edits and retries up to `Options.MaxAttempts` (5) with jittered exponential backoff from 200 ms capped at 10 s, then returns `ErrConflict` wrapping GitHub's error. Branch protection and ruleset refusals (`GH006`, `GH013`, "rule violations", "through a pull request") return `ErrBranchProtected` at once; other refusals are returned unretried. GitHub signs the commit as the App.
 - Pull request mode: the head branch is `doorstep/<app>-<deployment id>`, created from the base, or force-reset to the base when it exists without an open pull request. The edited file is written to it, the pull request is found by head and base or opened (adopting one a concurrent run opened first), and doorstep polls every `Options.PollInterval` (10 s) for up to `Options.MergeTimeout` (30 min). It calls update-branch when GitHub reports `behind` (ignoring "head moved" and "nothing to update" refusals, restarting on a merge conflict, failing on anything else), closes and reopens from the current base when it reports `dirty` (at most three times), and otherwise tries a squash merge pinned to the head SHA it validated, treating `405` and `409` as "not yet". A timeout returns `ErrMergeTimeout` and leaves the pull request open for the next call. A pull request merged by someone else counts only if the base then holds the desired value; otherwise `Pin` returns `ErrPinOverwritten`.
+- `Request.Repin` skips the overwrite check for a deliberate second pin by the same deployment: commit mode writes the value again even though this deployment's earlier pin commit is in the history, and pull request mode ignores the deployment's merged pull request and opens a new one from the same head branch. The engine sets it only when a rollback confirms its pin ([rollback.md](rollback.md#the-late-pin-race)); a replayed `Pin` never does.
 - Before every merge attempt the pull request must come from the GitOps repository itself (not a fork) and change exactly one file, or doorstep refuses with `ErrPullRequestTampered`. If that file differs from doorstep's own edit of the current base, doorstep writes its edit again before merging, so the merged content is always doorstep's.
 - `Current` returns the pinned digest at the branch head (empty, not an error, when the value is not a digest yet). `Abandon` closes the deployment's pull request and deletes its branch.
 - The commit subject is `deploy(<app>): pin <image>@sha256:<12 hex>` or `rollback(...)`, and the last paragraph carries `Doorstep-*` trailers (app, deployment, kind, app commit, image, digest, previous digest, rollback target, blocks, unblocks, URL), so the git log alone is enough to find previous digests and blocks. `Request.Blocks` and `Request.Unblocks` carry the app's pending block trailers, which ride on its next pin commit ([ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)).
@@ -298,7 +300,7 @@ result, err := writer.Pin(ctx, gitops.Request{Target: target, Digest: digest, De
 | `github.ErrRefNotFound` | the GitOps branch is missing or the repository is not visible to the installation | fix the configuration |
 | `ErrPullRequestClosed` | someone closed doorstep's pull request without merging | treat as cancelled |
 | `ErrPullRequestTampered` | the pull request comes from a fork or changes other files | investigate; doorstep does not merge it |
-| `ErrMergeTimeout` | not mergeable within `MergeTimeout` | call `Pin` again to keep waiting, or `Abandon` |
+| `ErrMergeTimeout` | not mergeable within `MergeTimeout` | call `Pin` again to keep waiting, or `Abandon`; the engine retries it until its 45 minute pin deadline |
 | `github.ErrFileTooLarge`, `github.ErrNotAFile` | the pin file is over 1 MiB, or a directory, symlink or submodule | fix the GitOps repository |
 | `*github.APIError` | any other GitHub refusal, such as `403` or `404` | inspect `StatusCode` |
 ## Notifications

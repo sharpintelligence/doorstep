@@ -599,6 +599,7 @@ func TestResolveServeConfig(t *testing.T) {
 		Registry:   config.Registry{CredentialsFile: "/flag/config.json"},
 		Locks:      config.Default().Locks,
 		Intake:     config.Default().Intake,
+		Engine:     config.Default().Engine,
 		Kubernetes: config.Kubernetes{Kubeconfig: "/flag/kubeconfig", Context: "flag-context"},
 	}
 	const fileSettings = `
@@ -626,6 +627,8 @@ kubernetes:
   context: file-context
 intake:
   poll_interval: 30s
+engine:
+  concurrency: 6
 `
 	fileConfig := config.Config{
 		Server:     config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
@@ -635,6 +638,7 @@ intake:
 		Registry:   config.Registry{CredentialsFile: "/file/config.json"},
 		Locks:      config.Locks{ReminderInterval: 6 * time.Hour},
 		Intake:     config.Intake{PollInterval: 30 * time.Second},
+		Engine:     config.Engine{Concurrency: 6},
 		Kubernetes: config.Kubernetes{Kubeconfig: "/file/kubeconfig", Context: "file-context"},
 	}
 	oneAppCatalog := config.File{
@@ -769,13 +773,14 @@ intake:
 		{
 			name: "environment over file",
 			file: fileSettings,
-			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s", config.EnvLockReminderInterval: "0s", config.EnvPollInterval: "0s"},
+			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s", config.EnvLockReminderInterval: "0s", config.EnvPollInterval: "0s", config.EnvEngineConcurrency: "12"},
 			want: func(c *config.Config) {
 				*c = fileConfig
 				c.Server.ListenAddr = ":9000"
 				c.Server.ShutdownDelay = 2 * time.Second
 				c.Locks.ReminderInterval = 0
 				c.Intake.PollInterval = 0
+				c.Engine.Concurrency = 12
 			},
 		},
 		{

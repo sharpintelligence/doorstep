@@ -62,8 +62,8 @@ WHERE deployment_id = $1
 ORDER BY id DESC
 LIMIT $2`
 
-const selectStateEnteredAtSQL = `
-SELECT occurred_at
+const selectTimeInStateSQL = `
+SELECT (EXTRACT(EPOCH FROM now() - occurred_at) * 1000000)::bigint
 FROM deployment_events
 WHERE deployment_id = $1 AND type = 'transition' AND to_state = $2
 ORDER BY id DESC
@@ -267,14 +267,14 @@ func (s *Store) CurrentDeployment(ctx context.Context, t core.Target) (core.Depl
 	return d, nil
 }
 
-func (s *Store) StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error) {
-	var at time.Time
-	err := s.db.QueryRow(ctx, selectStateEnteredAtSQL, id, state).Scan(&at)
+func (s *Store) TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {
+	var micros int64
+	err := s.db.QueryRow(ctx, selectTimeInStateSQL, id, state).Scan(&micros)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, fmt.Errorf("deployment %d never entered %s: %w", id, state, core.ErrNotFound)
+		return 0, fmt.Errorf("deployment %d never entered %s: %w", id, state, core.ErrNotFound)
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("read when deployment %d entered %s: %w", id, state, err)
+		return 0, fmt.Errorf("read how long deployment %d has been %s: %w", id, state, err)
 	}
-	return at, nil
+	return time.Duration(micros) * time.Microsecond, nil
 }

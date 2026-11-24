@@ -34,6 +34,7 @@ type PinRequest struct {
 	Digest     core.Digest
 	Blocks     []core.Digest
 	Unblocks   []core.Digest
+	Repin      bool
 }
 
 type PinResult struct {
@@ -46,7 +47,7 @@ type DeploymentStore interface {
 	Get(ctx context.Context, id core.DeploymentID) (core.Deployment, error)
 	Transition(ctx context.Context, t Transition) (core.Deployment, error)
 	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
-	StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error)
+	TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error)
 }
 
 type DigestResolver interface {
@@ -55,17 +56,18 @@ type DigestResolver interface {
 
 type PinWriter interface {
 	Pin(ctx context.Context, req PinRequest) (PinResult, error)
-	Current(ctx context.Context, t core.Target) (core.Digest, error)
 	Abandon(ctx context.Context, req PinRequest) error
 }
 
 type SyncWatcher interface {
 	WaitSynced(ctx context.Context, t core.Target, revision string) (core.SyncStatus, error)
+	Check(ctx context.Context, t core.Target, revision string) (core.SyncStatus, error)
 	Health(ctx context.Context, t core.Target) (core.Health, error)
 }
 
 type GateEvaluator interface {
 	Evaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
+	Reevaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
 }
 
 type BlockList interface {

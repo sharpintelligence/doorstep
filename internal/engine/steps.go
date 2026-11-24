@@ -97,12 +97,15 @@ func (e *Engine) pin(ctx context.Context, d core.Deployment) (core.Deployment, R
 	if d.Digest == "" {
 		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "no digest to pin"})
 	}
-	res, err := e.writePin(ctx, d)
+	elapsed, err := e.elapsed(ctx, d)
 	if err != nil {
-		if errors.Is(err, ErrPermanent) {
-			return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "pin " + string(d.Digest) + ": " + err.Error()})
-		}
-		return e.retry(ctx, d, e.pinTimeout, err, "pin "+string(d.Digest))
+		return d, Result{}, err
+	}
+	pinCtx, cancel := context.WithTimeoutCause(ctx, max(e.pinTimeout-elapsed, e.syncGrace), errPinDeadline)
+	res, err := e.writePin(pinCtx, d, false)
+	cancel()
+	if err != nil {
+		return e.pinFailed(ctx, d, err, "pin "+string(d.Digest), e.pinTimeout)
 	}
 	message := "pinned in " + res.Commit.Repository + "@" + res.Commit.SHA
 	if res.Commit.SHA == "" {
@@ -119,12 +122,20 @@ func (e *Engine) pin(ctx context.Context, d core.Deployment) (core.Deployment, R
 	return syncing, Result{}, nil
 }
 
-func (e *Engine) writePin(ctx context.Context, d core.Deployment) (PinResult, error) {
+func (e *Engine) pinFailed(ctx context.Context, d core.Deployment, err error, action string, limit time.Duration) (core.Deployment, Result, error) {
+	attention := errors.Is(err, ErrNeedsAttention)
+	if attention || errors.Is(err, ErrPermanent) {
+		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: action + ": " + err.Error(), KeepPin: attention})
+	}
+	return e.retry(ctx, d, limit, err, action)
+}
+
+func (e *Engine) writePin(ctx context.Context, d core.Deployment, repin bool) (PinResult, error) {
 	trailers, err := e.blocks.PendingTrailers(ctx, d.Target)
 	if err != nil {
 		return PinResult{}, fmt.Errorf("read pending block trailers: %w", err)
 	}
-	res, err := e.pins.Pin(ctx, PinRequest{Deployment: d, Digest: d.Digest, Blocks: trailers.Blocks, Unblocks: trailers.Unblocks})
+	res, err := e.pins.Pin(ctx, PinRequest{Deployment: d, Digest: d.Digest, Blocks: trailers.Blocks, Unblocks: trailers.Unblocks, Repin: repin})
 	if err != nil {
 		return PinResult{}, err
 	}
@@ -148,10 +159,7 @@ func (e *Engine) syncStep(ctx context.Context, d core.Deployment) (core.Deployme
 	if d.PinCommitSHA == "" {
 		return e.awaitHealthy(ctx, d, elapsed, timeout)
 	}
-	waitCtx, cancel := context.WithTimeoutCause(ctx, max(timeout-elapsed, e.syncGrace), errSyncDeadline)
-	status, err := e.sync.WaitSynced(waitCtx, d.Target, d.PinCommitSHA)
-	ownDeadline := errors.Is(context.Cause(waitCtx), errSyncDeadline)
-	cancel()
+	status, err := e.awaitSync(ctx, d, d.PinCommitSHA, max(timeout-elapsed, e.syncGrace))
 	switch {
 	case err == nil:
 		verifying, err := e.transition(ctx, d, core.StateVerifying, "synced and healthy", core.Lineage{ArgoCDRevision: status.Revision})
@@ -161,11 +169,42 @@ func (e *Engine) syncStep(ctx context.Context, d core.Deployment) (core.Deployme
 		return verifying, Result{}, nil
 	case ctx.Err() != nil:
 		return d, Result{}, ctx.Err()
-	case ownDeadline || isSyncFailure(err):
+	case isSyncFailure(err):
 		return e.failSync(ctx, d, status, err, timeout)
 	default:
 		return d, Result{}, fmt.Errorf("wait for sync: %w", err)
 	}
+}
+
+func (e *Engine) awaitSync(ctx context.Context, d core.Deployment, revision string, wait time.Duration) (core.SyncStatus, error) {
+	waitCtx, cancel := context.WithTimeoutCause(ctx, wait, errSyncDeadline)
+	status, err := e.sync.WaitSynced(waitCtx, d.Target, revision)
+	ownDeadline := errors.Is(context.Cause(waitCtx), errSyncDeadline)
+	cancel()
+	if err == nil || ctx.Err() != nil || !ownDeadline {
+		return status, err
+	}
+	return e.finalCheck(ctx, d, revision, status)
+}
+
+func (e *Engine) finalCheck(ctx context.Context, d core.Deployment, revision string, last core.SyncStatus) (core.SyncStatus, error) {
+	checkCtx, cancel := context.WithTimeout(ctx, e.cleanupTimeout)
+	defer cancel()
+	status, err := e.sync.Check(checkCtx, d.Target, revision)
+	switch {
+	case ctx.Err() != nil:
+		return last, ctx.Err()
+	case err == nil && status.Ready():
+		return status, nil
+	case err == nil:
+		return status, fmt.Errorf("%w: %w", core.ErrSyncTimeout, errSyncDeadline)
+	case errors.Is(err, core.ErrSyncTargetNotFound), errors.Is(err, core.ErrSyncForbidden):
+		return status, err
+	}
+	if last.Failure == nil {
+		last.Failure = &core.SyncFailure{Reason: core.SyncReasonUnavailable, Class: core.SyncReasonUnavailable.Class(true), Message: err.Error()}
+	}
+	return last, fmt.Errorf("%w: %w: %w", core.ErrSyncTimeout, errSyncDeadline, err)
 }
 
 func (e *Engine) awaitHealthy(ctx context.Context, d core.Deployment, elapsed, timeout time.Duration) (core.Deployment, Result, error) {
@@ -272,54 +311,64 @@ func (e *Engine) verify(ctx context.Context, d core.Deployment) (core.Deployment
 		return d, Result{}, fmt.Errorf("after gates returned unknown status %q", outcome.Status)
 	}
 	if d.Kind == core.KindRollback {
-		current, err := e.pins.Current(ctx, d.Target)
-		switch {
-		case errors.Is(err, ErrPermanent):
-			return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "read the current pin: " + err.Error()})
-		case err != nil:
-			return d, Result{}, fmt.Errorf("read the current pin: %w", err)
-		case current != d.Digest:
-			return e.repin(ctx, d, current)
-		}
+		return e.confirmRollbackPin(ctx, d)
 	}
 	return e.succeed(ctx, d)
 }
 
-func (e *Engine) repin(ctx context.Context, d core.Deployment, current core.Digest) (core.Deployment, Result, error) {
-	e.logFor(d).WarnContext(ctx, "rollback pin was replaced; pinning again",
-		slog.String("current", string(current)),
-		slog.String("digest", string(d.Digest)),
-	)
-	res, err := e.writePin(ctx, d)
-	switch {
-	case errors.Is(err, ErrPermanent):
-		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "pin " + string(d.Digest) + " again: " + err.Error()})
-	case err != nil:
-		return d, Result{}, fmt.Errorf("pin %s again: %w", d.Digest, err)
-	case res.Commit.SHA == "":
-		return d, Result{RequeueAfter: e.verifyPoll}, nil
-	}
-	d, err = e.store.SetLineage(ctx, d.ID, core.Lineage{PinCommitSHA: res.Commit.SHA, GitOpsRepository: res.Commit.Repository}, Actor)
+func (e *Engine) confirmRollbackPin(ctx context.Context, d core.Deployment) (core.Deployment, Result, error) {
+	elapsed, err := e.elapsed(ctx, d)
 	if err != nil {
 		return d, Result{}, err
 	}
-	status, err := e.sync.WaitSynced(ctx, d.Target, res.Commit.SHA)
+	pinCtx, cancel := context.WithTimeoutCause(ctx, max(e.verifyTimeout-elapsed, e.syncGrace), errPinDeadline)
+	res, err := e.writePin(pinCtx, d, true)
+	cancel()
+	if err != nil {
+		return e.pinFailed(ctx, d, err, "confirm the rollback pin "+string(d.Digest), e.verifyTimeout)
+	}
+	if res.Commit.SHA == "" || res.Commit.SHA == d.PinCommitSHA {
+		return e.succeed(ctx, d)
+	}
+	if elapsed >= e.verifyTimeout {
+		return e.fail(ctx, d, Failure{
+			Class:  core.FailureTransient,
+			Reason: fmt.Sprintf("the rollback pin was replaced and pin commit %s was not confirmed within %s", res.Commit.SHA, e.verifyTimeout),
+		})
+	}
+	e.logFor(d).WarnContext(ctx, "rollback pin was replaced; waiting for the new pin commit",
+		slog.String("commit", res.Commit.SHA),
+		slog.Bool("written", res.Changed),
+	)
+	timeout, ok := e.syncTimeout(d.Target)
+	if !ok {
+		return e.fail(ctx, d, Failure{Class: core.FailureConfiguration, Reason: "app " + d.Target.App + " is not configured"})
+	}
+	status, err := e.awaitSync(ctx, d, res.Commit.SHA, max(min(timeout, e.verifyTimeout-elapsed), e.syncGrace))
 	switch {
 	case err == nil:
 	case ctx.Err() != nil:
 		return d, Result{}, ctx.Err()
 	case isSyncFailure(err):
-		timeout, _ := e.syncTimeout(d.Target)
 		return e.failSync(ctx, d, status, err, timeout)
 	default:
-		return d, Result{}, fmt.Errorf("wait for sync of the new pin: %w", err)
+		return e.retry(ctx, d, e.verifyTimeout, err, "wait for sync of pin commit "+res.Commit.SHA)
 	}
-	if status.Revision != "" {
-		if d, err = e.store.SetLineage(ctx, d.ID, core.Lineage{ArgoCDRevision: status.Revision}, Actor); err != nil {
-			return d, Result{}, err
-		}
+	repinned := d
+	repinned.PinCommitSHA = res.Commit.SHA
+	repinned.GitOpsRepository = res.Commit.Repository
+	if _, err := e.gates.Reevaluate(ctx, repinned, core.GatePhaseAfter); err != nil {
+		return e.retry(ctx, d, e.verifyTimeout, err, "evaluate the after gates again")
 	}
-	return d, Result{RequeueAfter: e.verifyPoll}, nil
+	updated, err := e.store.SetLineage(ctx, d.ID, core.Lineage{
+		PinCommitSHA:     res.Commit.SHA,
+		GitOpsRepository: res.Commit.Repository,
+		ArgoCDRevision:   status.Revision,
+	}, Actor)
+	if err != nil {
+		return d, Result{}, err
+	}
+	return updated, Result{}, nil
 }
 
 func (e *Engine) succeed(ctx context.Context, d core.Deployment) (core.Deployment, Result, error) {
