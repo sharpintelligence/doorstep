@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	ownerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?$`)
 	repoPattern  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
@@ -36,13 +36,25 @@ func installationKey(owner, repo string) string {
 
 func (a *App) installationID(ctx context.Context, owner, repo string) (int64, error) {
 	key := installationKey(owner, repo)
+	if id, ok := a.cachedInstallation(key); ok {
+		return id, nil
+	}
+	return a.lookupFlights.do(ctx, key, func(ctx context.Context) (int64, error) {
+		if id, ok := a.cachedInstallation(key); ok {
+			return id, nil
+		}
+		return a.lookupInstallation(ctx, key, owner, repo)
+	})
+}
+
+func (a *App) cachedInstallation(key string) (int64, bool) {
 	a.mu.Lock()
 	entry, ok := a.installations[key]
 	a.mu.Unlock()
-	if ok && a.now().Sub(entry.fetchedAt) < installationCacheTTL {
-		return entry.id, nil
-	}
+	return entry.id, ok && a.now().Sub(entry.fetchedAt) < installationCacheTTL
+}
 
+func (a *App) lookupInstallation(ctx context.Context, key, owner, repo string) (int64, error) {
 	var installation struct {
 		ID          int64   `json:"id"`
 		SuspendedAt *string `json:"suspended_at"`
@@ -62,9 +74,15 @@ func (a *App) installationID(ctx context.Context, owner, repo string) (int64, er
 		return 0, fmt.Errorf("%s/%s: installation %d: %w", owner, repo, installation.ID, ErrInstallationSuspended)
 	}
 
+	now := a.now()
 	a.mu.Lock()
-	a.installations[key] = installationEntry{id: installation.ID, fetchedAt: a.now()}
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	for cached, entry := range a.installations {
+		if now.Sub(entry.fetchedAt) >= installationCacheTTL {
+			delete(a.installations, cached)
+		}
+	}
+	a.installations[key] = installationEntry{id: installation.ID, fetchedAt: now}
 	return installation.ID, nil
 }
 

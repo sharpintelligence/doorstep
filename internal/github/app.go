@@ -38,13 +38,17 @@ type App struct {
 	key        *rsa.PrivateKey
 	baseURL    *url.URL
 	httpClient *http.Client
+	appClient  *http.Client
 	userAgent  string
 	logger     *slog.Logger
 	now        func() time.Time
 
+	lookupFlights flightGroup[string, int64]
+	tokenFlights  flightGroup[int64, string]
+
 	mu            sync.Mutex
 	installations map[string]installationEntry
-	tokens        map[int64]*tokenEntry
+	tokens        map[int64]tokenEntry
 }
 
 func New(opts Options) (*App, error) {
@@ -76,12 +80,15 @@ func New(opts Options) (*App, error) {
 		userAgent:     opts.UserAgent,
 		logger:        opts.Logger,
 		now:           opts.Now,
+		lookupFlights: flightGroup[string, int64]{timeout: defaultTimeout},
+		tokenFlights:  flightGroup[int64, string]{timeout: defaultTimeout},
 		installations: make(map[string]installationEntry),
-		tokens:        make(map[int64]*tokenEntry),
+		tokens:        make(map[int64]tokenEntry),
 	}
 	if app.httpClient == nil {
 		app.httpClient = &http.Client{Timeout: defaultTimeout}
 	}
+	app.appClient = app.pinnedClient(&pinnedTransport{origin: baseURL, base: app.baseTransport()})
 	if app.userAgent == "" {
 		app.userAgent = defaultUserAgent
 	}
@@ -102,18 +109,25 @@ func (a *App) RepoClient(ctx context.Context, owner, repo string) (*Client, erro
 	if err != nil {
 		return nil, err
 	}
-	base := a.httpClient.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
 	return &Client{
 		baseURL: a.baseURL,
-		http: &http.Client{
-			Transport:     &installationTransport{app: a, installationID: id, base: base},
-			CheckRedirect: a.httpClient.CheckRedirect,
-			Timeout:       a.httpClient.Timeout,
-		},
+		http:    a.pinnedClient(&installationTransport{app: a, installationID: id, base: a.baseTransport()}),
 	}, nil
+}
+
+func (a *App) baseTransport() http.RoundTripper {
+	if a.httpClient.Transport != nil {
+		return a.httpClient.Transport
+	}
+	return http.DefaultTransport
+}
+
+func (a *App) pinnedClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: a.httpClient.CheckRedirect,
+		Timeout:       a.httpClient.Timeout,
+	}
 }
 
 func (a *App) appRequest(ctx context.Context, method, path string, out any) error {
@@ -126,7 +140,7 @@ func (a *App) appRequest(ctx context.Context, method, path string, out any) erro
 		return err
 	}
 	a.setHeaders(req, token)
-	return send(a.httpClient, req, out)
+	return send(a.appClient, req, out)
 }
 
 func (a *App) setHeaders(req *http.Request, bearer string) {

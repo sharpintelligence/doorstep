@@ -33,7 +33,6 @@ Repository permissions:
 | Pull requests | Read and write | GitOps repository | open and update pull requests when pins go through review |
 | Checks | Read | application repositories | read check runs for the CI gate |
 | Commit statuses | Read and write | application repositories | read statuses for the CI gate; write statuses that mirror doorstep's gates |
-| Deployments | Read and write | application repositories | record GitHub deployments and deployment statuses |
 
 No organization or account permissions are needed.
 
@@ -128,10 +127,10 @@ Set `DOORSTEP_GITHUB_API_URL` to the REST API root, for example `https://ghe.exa
 ## How tokens are handled
 
 - For each installation lookup and token mint, doorstep signs a fresh JWT with the private key (RS256, issued 60 seconds in the past to absorb clock drift, valid for 9 minutes). JWTs are used for nothing else.
-- The repository-to-installation lookup is cached for one hour per repository. A repository that is not covered, or whose installation is suspended, is never cached.
-- Installation tokens are valid for one hour. doorstep keeps one per installation, in memory only, and mints a new one five minutes before expiry. Concurrent requests share a single mint. A `401` from GitHub drops the cached token so the next request mints a fresh one.
+- The repository-to-installation lookup is cached for one hour per repository. A repository that is not covered, or whose installation is suspended, is never cached. When minting a token finds the installation uninstalled (`404`) or suspended (`403`), every cached lookup pointing at it is dropped and the request fails with `github app is not installed for the repository` or `github app installation is suspended`.
+- Installation tokens are valid for one hour. doorstep keeps one per installation, in memory only, and mints a new one five minutes before expiry. Concurrent requests share a single lookup per repository and a single mint per installation, including its failure, so an outage costs one call rather than one per waiting request. A shared call is bounded to 30 seconds. A `401` from GitHub drops the cached token so the next request mints a fresh one.
 - Tokens are minted with the installation's full permission set and repository selection.
-- Tokens and keys are never logged or written to disk, and are only sent to the configured API host: a request to any other host, including a redirect, is refused before credentials are attached.
+- Tokens, JWTs and keys are never logged or written to disk, and are only sent to the configured API host: a request to any other scheme or host, including a redirect, is refused before it is sent.
 
 ## Rotating the private key
 

@@ -8,6 +8,11 @@ import (
 	"strconv"
 )
 
+const (
+	maxErrorBodyBytes    = 64 << 10
+	maxErrorMessageBytes = 512
+)
+
 var (
 	ErrNotInstalled          = errors.New("github app is not installed for the repository")
 	ErrInstallationSuspended = errors.New("github app installation is suspended")
@@ -44,10 +49,24 @@ func newAPIError(resp *http.Response, body io.Reader) *APIError {
 	var payload struct {
 		Message string `json:"message"`
 	}
-	if err := json.NewDecoder(body).Decode(&payload); err == nil {
-		apiErr.Message = payload.Message
+	if err := json.NewDecoder(io.LimitReader(body, maxErrorBodyBytes)).Decode(&payload); err == nil {
+		apiErr.Message = truncate(payload.Message, maxErrorMessageBytes)
 	}
 	return apiErr
+}
+
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > limit {
+			break
+		}
+		cut = i
+	}
+	return s[:cut] + "…"
 }
 
 func hasStatus(err error, status int) bool {

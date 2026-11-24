@@ -190,16 +190,18 @@ func TestInstallationTokenMintFailures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		status  int
-		body    string
-		wantErr string
-		wantAPI int
+		name          string
+		status        int
+		body          string
+		wantErr       string
+		wantAPI       int
+		wantSuspended bool
 	}{
 		{name: "missing expires_at", status: http.StatusCreated, body: `{"token":"ghs_x"}`, wantErr: "no expires_at"},
 		{name: "missing token", status: http.StatusCreated, body: `{"expires_at":"2099-01-01T00:00:00Z"}`, wantErr: "no token"},
 		{name: "malformed json", status: http.StatusCreated, body: `{`, wantErr: "decode"},
-		{name: "forbidden", status: http.StatusForbidden, body: `{"message":"This installation has been suspended"}`, wantErr: "suspended", wantAPI: http.StatusForbidden},
+		{name: "suspended", status: http.StatusForbidden, body: `{"message":"This installation has been suspended"}`, wantErr: "suspended", wantAPI: http.StatusForbidden, wantSuspended: true},
+		{name: "forbidden for another reason", status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`, wantErr: "403", wantAPI: http.StatusForbidden},
 		{name: "server error", status: http.StatusBadGateway, body: `oops`, wantErr: "502", wantAPI: http.StatusBadGateway},
 	}
 
@@ -224,13 +226,49 @@ func TestInstallationTokenMintFailures(t *testing.T) {
 			if tt.wantAPI != 0 && (!errors.As(err, &apiErr) || apiErr.StatusCode != tt.wantAPI) {
 				t.Errorf("error %v is not an APIError with status %d", err, tt.wantAPI)
 			}
+			if got := errors.Is(err, ErrInstallationSuspended); got != tt.wantSuspended {
+				t.Errorf("errors.Is(%v, ErrInstallationSuspended) = %t, want %t", err, got, tt.wantSuspended)
+			}
 			app.mu.Lock()
-			cached := app.tokens[7].value
+			_, cached := app.tokens[7]
 			app.mu.Unlock()
-			if cached != "" {
-				t.Errorf("failed mint cached token %q", cached)
+			if cached {
+				t.Error("failed mint cached a token")
 			}
 		})
+	}
+}
+
+func TestInstallationSuspendedAfterLookup(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	f.srv.Install("acme", "app", 7)
+	f.srv.Install("acme", "gitops", 7)
+	f.srv.Install("alice", "dotfiles", 8)
+	f.srv.Handle("GET /repos/{owner}/{repo}/ping", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	client := f.repoClient(t, "acme", "app")
+	f.repoClient(t, "acme", "gitops")
+	f.repoClient(t, "alice", "dotfiles")
+
+	f.srv.Suspend(7)
+	err := client.Do(t.Context(), http.MethodGet, "/repos/acme/app/ping", nil, nil)
+	if !errors.Is(err, ErrInstallationSuspended) {
+		t.Fatalf("Do error = %v, want ErrInstallationSuspended", err)
+	}
+	f.app.mu.Lock()
+	remaining := len(f.app.installations)
+	f.app.mu.Unlock()
+	if remaining != 1 {
+		t.Errorf("cached lookups = %d, want 1", remaining)
+	}
+	if _, err := f.app.RepoClient(t.Context(), "acme", "app"); !errors.Is(err, ErrInstallationSuspended) {
+		t.Errorf("RepoClient after suspension = %v, want ErrInstallationSuspended", err)
+	}
+	if got := f.srv.LookupCalls(); got != 4 {
+		t.Errorf("lookup calls = %d, want 4", got)
 	}
 }
 

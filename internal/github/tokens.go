@@ -2,50 +2,44 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type tokenEntry struct {
-	sem       chan struct{}
 	value     string
 	expiresAt time.Time
 }
 
 func (a *App) installationToken(ctx context.Context, id int64) (string, error) {
-	a.mu.Lock()
-	entry, ok := a.tokens[id]
-	if !ok {
-		entry = &tokenEntry{sem: make(chan struct{}, 1)}
-		a.tokens[id] = entry
-	}
-	a.mu.Unlock()
-
-	select {
-	case entry.sem <- struct{}{}:
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-	defer func() { <-entry.sem }()
-
-	a.mu.Lock()
-	value, expiresAt := entry.value, entry.expiresAt
-	a.mu.Unlock()
-	if value != "" && a.now().Before(expiresAt.Add(-tokenRefreshMargin)) {
+	if value, ok := a.cachedToken(id); ok {
 		return value, nil
 	}
+	return a.tokenFlights.do(ctx, id, func(ctx context.Context) (string, error) {
+		if value, ok := a.cachedToken(id); ok {
+			return value, nil
+		}
+		value, expiresAt, err := a.mintToken(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		a.mu.Lock()
+		a.tokens[id] = tokenEntry{value: value, expiresAt: expiresAt}
+		a.mu.Unlock()
+		return value, nil
+	})
+}
 
-	value, expiresAt, err := a.mintToken(ctx, id)
-	if err != nil {
-		return "", err
-	}
+func (a *App) cachedToken(id int64) (string, bool) {
 	a.mu.Lock()
-	entry.value, entry.expiresAt = value, expiresAt
+	entry, ok := a.tokens[id]
 	a.mu.Unlock()
-	return value, nil
+	return entry.value, ok && a.now().Before(entry.expiresAt.Add(-tokenRefreshMargin))
 }
 
 func (a *App) mintToken(ctx context.Context, id int64) (string, time.Time, error) {
@@ -59,6 +53,9 @@ func (a *App) mintToken(ctx context.Context, id int64) (string, time.Time, error
 	case hasStatus(err, http.StatusNotFound):
 		a.forgetInstallation(id)
 		return "", time.Time{}, fmt.Errorf("installation %d: %w", id, ErrNotInstalled)
+	case isSuspended(err):
+		a.forgetInstallation(id)
+		return "", time.Time{}, fmt.Errorf("installation %d: %w: %w", id, ErrInstallationSuspended, err)
 	case err != nil:
 		return "", time.Time{}, fmt.Errorf("mint token for installation %d: %w", id, err)
 	case minted.Token == "":
@@ -73,10 +70,17 @@ func (a *App) mintToken(ctx context.Context, id int64) (string, time.Time, error
 	return minted.Token, minted.ExpiresAt, nil
 }
 
+func isSuspended(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) &&
+		apiErr.StatusCode == http.StatusForbidden &&
+		strings.Contains(strings.ToLower(apiErr.Message), "suspended")
+}
+
 func (a *App) invalidateToken(id int64, value string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if entry, ok := a.tokens[id]; ok && entry.value == value {
-		entry.value, entry.expiresAt = "", time.Time{}
+		delete(a.tokens, id)
 	}
 }

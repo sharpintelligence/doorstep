@@ -142,7 +142,8 @@ func TestRepoClientRejectsInvalidNames(t *testing.T) {
 		{name: "space in repo", owner: "acme", repo: "my app"},
 		{name: "encoded slash", owner: "acme", repo: "a%2Fb"},
 		{name: "query in repo", owner: "acme", repo: "app?x=1"},
-		{name: "underscore in owner", owner: "ac_me", repo: "app"},
+		{name: "leading underscore", owner: "_acme", repo: "app"},
+		{name: "trailing underscore", owner: "acme_", repo: "app"},
 		{name: "unicode", owner: "acmé", repo: "app"},
 	}
 
@@ -170,6 +171,7 @@ func TestValidateRepositoryAccepts(t *testing.T) {
 		{owner: "Acme1", repo: "my_app.v2-final"},
 		{owner: "alice", repo: ".github"},
 		{owner: "x", repo: "..."},
+		{owner: "octo-cat_acme", repo: "app"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.owner+"/"+tt.repo, func(t *testing.T) {

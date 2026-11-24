@@ -3,7 +3,20 @@ package github
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 )
+
+type pinnedTransport struct {
+	origin *url.URL
+	base   http.RoundTripper
+}
+
+func (t *pinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := checkOrigin(req, t.origin); err != nil {
+		return nil, err
+	}
+	return t.base.RoundTrip(req)
+}
 
 type installationTransport struct {
 	app            *App
@@ -12,9 +25,8 @@ type installationTransport struct {
 }
 
 func (t *installationTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !sameOrigin(req.URL, t.app.baseURL) {
-		closeRequestBody(req)
-		return nil, fmt.Errorf("%w: %s://%s", ErrForeignHost, req.URL.Scheme, req.URL.Host)
+	if err := checkOrigin(req, t.app.baseURL); err != nil {
+		return nil, err
 	}
 	token, err := t.app.installationToken(req.Context(), t.installationID)
 	if err != nil {
@@ -31,6 +43,14 @@ func (t *installationTransport) RoundTrip(req *http.Request) (*http.Response, er
 		t.app.invalidateToken(t.installationID, token)
 	}
 	return resp, nil
+}
+
+func checkOrigin(req *http.Request, origin *url.URL) error {
+	if sameOrigin(req.URL, origin) {
+		return nil
+	}
+	closeRequestBody(req)
+	return fmt.Errorf("%w: %s://%s", ErrForeignHost, req.URL.Scheme, req.URL.Host)
 }
 
 func closeRequestBody(req *http.Request) {

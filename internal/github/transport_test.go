@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +138,66 @@ func TestTransportRefusesForeignHosts(t *testing.T) {
 			}
 			if !errors.Is(err, ErrForeignHost) {
 				t.Errorf("Do error = %v, want ErrForeignHost", err)
+			}
+		})
+	}
+	t.Cleanup(func() {
+		if got := foreignCalls.Load(); got != 0 {
+			t.Errorf("foreign host received %d requests", got)
+		}
+	})
+}
+
+func TestAppRequestsRefuseForeignRedirects(t *testing.T) {
+	t.Parallel()
+
+	var foreignCalls atomic.Int64
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(foreign.Close)
+
+	tests := []struct {
+		name  string
+		route string
+		call  func(ctx context.Context, app *App) error
+	}{
+		{
+			name:  "installation lookup",
+			route: "GET /repos/acme/app/installation",
+			call: func(ctx context.Context, app *App) error {
+				_, err := app.installationID(ctx, "acme", "app")
+				return err
+			},
+		},
+		{
+			name:  "token mint",
+			route: "POST /app/installations/7/access_tokens",
+			call: func(ctx context.Context, app *App) error {
+				_, err := app.installationToken(ctx, 7)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method+" "+r.URL.Path != tt.route {
+					http.NotFound(w, r)
+					return
+				}
+				http.Redirect(w, r, foreign.URL+"/steal", http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(upstream.Close)
+			app, err := New(Options{AppID: "1", PrivateKey: generateRSAKey(t, 2048), BaseURL: upstream.URL})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := tt.call(t.Context(), app); !errors.Is(err, ErrForeignHost) {
+				t.Errorf("error = %v, want ErrForeignHost", err)
 			}
 		})
 	}
