@@ -70,6 +70,16 @@ func TestBlockCommands(t *testing.T) {
 				"4   -                    cccccccccccc  user:bob    2026-11-23T13:00:00Z  yes     r\n",
 		},
 		{
+			name:       "list blocks replaces control characters",
+			args:       []string{"blocks", "blog"},
+			status:     http.StatusOK,
+			body:       `{"blocks":[{"id":4,"commit":{"sha":"` + cliBadSHA + `"},"reason":"r\u001b[2Jx\ny","created_by":"user:bob","created_at":"2026-11-23T13:00:00Z"}]}`,
+			wantMethod: http.MethodGet,
+			wantPath:   "/api/v1/apps/blog/blocks",
+			wantStdout: "ID  DIGEST  COMMIT        BY        SINCE                 IN GIT  REASON\n" +
+				"4   -       cccccccccccc  user:bob  2026-11-23T13:00:00Z  no      r [2Jx y\n",
+		},
+		{
 			name:       "list no blocks",
 			args:       []string{"blocks", "blog"},
 			status:     http.StatusOK,

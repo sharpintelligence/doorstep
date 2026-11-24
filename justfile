@@ -3,6 +3,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 version := env("DOORSTEP_VERSION", "dev")
 image_name := env("DOORSTEP_IMAGE", "doorstep")
 govulncheck_version := "v1.10.0"
+deadcode_version := "v0.53.0"
 kubernetes_version := "1.35.0"
 buildinfo_package := "github.com/sharpintelligence/doorstep/internal/buildinfo"
 ldflags := "-s -w -X " + buildinfo_package + ".version=" + version
@@ -36,6 +37,15 @@ image:
 
 vuln:
     go run golang.org/x/vuln/cmd/govulncheck@{{govulncheck_version}} ./...
+
+deadcode:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unused=$(go run golang.org/x/tools/cmd/deadcode@{{deadcode_version}} ./... | grep -vE '(^|/)[a-z]*test[a-z]*/|unreachable func: (Metrics\.Gatherer|WithoutSessionLock)$' || true)
+    if [ -n "$unused" ]; then
+        echo "$unused"
+        exit 1
+    fi
 
 lint-actions:
     actionlint

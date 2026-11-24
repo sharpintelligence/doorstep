@@ -95,10 +95,6 @@ func New(opts Options) *Server {
 	return s
 }
 
-func (s *Server) Handler() http.Handler {
-	return s.handler
-}
-
 func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
 		Handler:           s.handler,

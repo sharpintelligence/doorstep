@@ -157,7 +157,7 @@ func TestHandler(t *testing.T) {
 			s.shuttingDown.Store(tt.shuttingDown)
 
 			rec := httptest.NewRecorder()
-			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody))
+			s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody))
 
 			if rec.Code != tt.wantCode {
 				t.Fatalf("status = %d, want %d (body %q)", rec.Code, tt.wantCode, rec.Body.String())
@@ -208,7 +208,7 @@ func TestNewCopiesChecks(t *testing.T) {
 	checks["late"] = failing("added after New")
 
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+	s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -242,7 +242,7 @@ func TestRoutes(t *testing.T) {
 			t.Parallel()
 			s := New(Options{Routes: tt.routes})
 			rec := httptest.NewRecorder()
-			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody))
+			s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, http.NoBody))
 			if rec.Code != tt.wantCode {
 				t.Errorf("status = %d, want %d", rec.Code, tt.wantCode)
 			}
@@ -298,7 +298,7 @@ func TestReadyzHidesCheckErrors(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+	s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 
 	if strings.Contains(rec.Body.String(), "db.internal") {
 		t.Errorf("response leaks check error: %q", rec.Body.String())
@@ -340,7 +340,7 @@ func TestReadinessCache(t *testing.T) {
 
 			for _, offset = range tt.offsets {
 				rec := httptest.NewRecorder()
-				s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+				s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 				if rec.Code != http.StatusServiceUnavailable {
 					t.Fatalf("status at %s = %d, want %d", offset, rec.Code, http.StatusServiceUnavailable)
 				}
@@ -369,7 +369,7 @@ func TestReadinessConcurrentProbesShareOneRun(t *testing.T) {
 	for range probes {
 		wg.Go(func() {
 			rec := httptest.NewRecorder()
-			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+			s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 			codes <- rec.Code
 		})
 	}
@@ -398,7 +398,7 @@ func TestReadinessSurvivesCancelledProbe(t *testing.T) {
 	cancel()
 
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/readyz", http.NoBody))
+	s.handler.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/readyz", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}

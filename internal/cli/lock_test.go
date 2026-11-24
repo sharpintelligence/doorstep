@@ -22,6 +22,7 @@ import (
 type recordedRequest struct {
 	method      string
 	path        string
+	query       string
 	auth        string
 	contentType string
 	body        string
@@ -41,6 +42,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, recordedRequest{
 		method:      r.Method,
 		path:        r.URL.Path,
+		query:       r.URL.RawQuery,
 		auth:        r.Header.Get("Authorization"),
 		contentType: r.Header.Get("Content-Type"),
 		body:        string(body),
@@ -148,6 +150,16 @@ func TestLockCommands(t *testing.T) {
 			wantStdout: "SCOPE   OWNER  SINCE                 EXPIRES               REASON\n" +
 				"global  bob    2026-11-23T10:00:00Z  -                     holiday\n" +
 				"blog    alice  2026-11-23T12:00:00Z  2026-11-23T14:00:00Z  database migration\n",
+		},
+		{
+			name:       "list replaces control characters",
+			args:       []string{"locks"},
+			status:     http.StatusOK,
+			body:       `{"locks":[{"scope":"global","owner":"bo\u001bb","reason":"a\nb","created_at":"2026-11-23T10:00:00Z","expires_at":null}]}`,
+			wantMethod: http.MethodGet,
+			wantPath:   "/api/v1/locks",
+			wantStdout: "SCOPE   OWNER  SINCE                 EXPIRES  REASON\n" +
+				"global  bo b   2026-11-23T10:00:00Z  -        a b\n",
 		},
 		{
 			name:       "list empty",

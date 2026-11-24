@@ -28,6 +28,7 @@ Recipes live in the `justfile`; `just` with no arguments lists them.
 | `just build` | static, trimmed binary at `bin/doorstep`; set `DOORSTEP_VERSION` to stamp a release version |
 | `just image` | build the container image as `doorstep:<version>` (override with `DOORSTEP_IMAGE`), stamping version, commit and commit time; needs a container engine |
 | `just vuln` | `govulncheck` (pinned in the `justfile`) over all packages; needs network access and is not part of `check` |
+| `just deadcode` | `deadcode` (pinned in the `justfile`) over all packages without `-test`, so code only tests call is reported; ignores the `*test` helper packages and two documented test seams; fails when it reports anything; needs network access and is not part of `check` |
 | `just lint-actions` | `actionlint` over `.github/workflows` |
 | `just lint-manifests` | `kustomize build` of `deploy/kustomize/base` and every example overlay, validated with `kubeconform -strict` against the Kubernetes version pinned in the `justfile`; kubeconform downloads schemas, so it needs network access and is not part of `check`; CI runs it as a separate step |
 | `just changelog [args]` | `git-cliff` with `cliff.toml`; `just changelog --unreleased` previews the next release notes |
@@ -36,6 +37,8 @@ Recipes live in the `justfile`; `just` with no arguments lists them.
 | `just check` | `fmt-check`, `vet`, `lint`, `lint-actions`, `tidy-check` and `test`; this is what CI runs |
 
 Run `just check` before pushing.
+
+`just deadcode` must print nothing. The recipe runs without `-test`, filters out the `*test` helper packages and allows two accepted test seams: `metrics.Metrics.Gatherer` and `store.WithoutSessionLock`, which tests in other packages use and which cannot be replaced without `export_test` workarounds. Remove anything else it reports.
 
 The manifests under `deploy/kustomize` are also covered by a hermetic Go test (`deploy/kustomize/manifests_test.go`, part of `just test`). It needs no kustomize binary or network and checks that environment variables are settings known to `internal/config`, that ports match the defaults, that the security context, RBAC and digest pinning have not been weakened, and that every `config.yaml` there validates. When a change renames a setting or alters a default, it fails until the manifests follow.
 

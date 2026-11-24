@@ -143,6 +143,10 @@ func readToken(lookupEnv LookupEnv) (string, error) {
 }
 
 func (c *apiClient) do(ctx context.Context, method, path string, in, out any) error {
+	return c.request(ctx, method, path, nil, in, out)
+}
+
+func (c *apiClient) request(ctx context.Context, method, path string, query url.Values, in, out any) error {
 	var body io.Reader = http.NoBody
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -151,7 +155,9 @@ func (c *apiClient) do(ctx context.Context, method, path string, in, out any) er
 		}
 		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base.JoinPath(path).String(), body)
+	u := c.base.JoinPath(path)
+	u.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return err
 	}

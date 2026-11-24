@@ -157,13 +157,13 @@ func writeBlockTable(out io.Writer, app string, blocks []blockInfo) error {
 			digest = shortDigest(b.Digest)
 		}
 		if b.Commit != nil {
-			commit = b.Commit.SHA[:min(len(b.Commit.SHA), 12)]
+			commit = shortSHA(b.Commit.SHA)
 		}
 		if b.RecordedInGit {
 			inGit = "yes"
 		}
 		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			b.ID, digest, commit, b.CreatedBy, b.CreatedAt.UTC().Format(time.RFC3339), inGit, b.Reason)
+			b.ID, digest, commit, printable(b.CreatedBy), b.CreatedAt.UTC().Format(time.RFC3339), inGit, printable(b.Reason))
 	}
 	return w.Flush()
 }

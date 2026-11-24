@@ -43,6 +43,8 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newLocksCommand(lookupEnv),
 		newDeployCommand(lookupEnv),
 		newCancelCommand(lookupEnv),
+		newDeploymentsCommand(lookupEnv),
+		newDeploymentCommand(lookupEnv),
 		newRollbackCommand(lookupEnv),
 		newBlockCommand(lookupEnv),
 		newUnblockCommand(lookupEnv),

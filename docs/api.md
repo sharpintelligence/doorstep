@@ -133,6 +133,8 @@ Returns `200` when the app is in the configuration file or still has queue entri
 
 Every deployment records its full lineage: the app commit it was built from, the image tag and the digest it resolved to, the digest it replaced, the GitOps repository and commit that pinned it, the Argo CD revision that synced it, its gate results, its outcome and who or what triggered it. Rollbacks and retries are deployments of their own that point back at the deployment they act on ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)).
 
+From the command line, [`doorstep deployments` and `doorstep deployment`](configuration.md#doorstep-deployments-and-deployment) call the two endpoints below; `-o json` prints the response as is.
+
 ### `GET /api/v1/apps/{app}/deployments`
 
 Lists the deployments of the app named `{app}`, newest first. Without `environment`, deployments of that app in every environment are returned. An app that has never been deployed (or is not configured) returns `200` with an empty list rather than `404`.
