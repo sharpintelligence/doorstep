@@ -5,7 +5,7 @@ doorstep authenticates two kinds of callers on its public listener:
 - **People** sign in through one identity provider: a generic OpenID Connect issuer (Authentik, Authelia, Keycloak, Dex, Pocket ID, ...) or GitHub. Signing in creates a server-side session held in a cookie.
 - **Programs** (CI jobs, scripts, the future CLI client) send an API token as `Authorization: Bearer dsp_...`.
 
-Both resolve to one of three roles. The code lives in `internal/auth`; the decision is recorded in [ADR 0003](decisions/0003-authentication-and-roles.md).
+Both resolve to one of three roles. The code lives in `internal/auth`; the decision is recorded in [ADR 0007](decisions/0007-authentication-and-roles.md).
 
 ## Roles
 

@@ -1,4 +1,4 @@
-# 0003: Authentication and roles
+# 0007: Authentication and roles
 
 - Status: Accepted
 - Date: 2026-11-24
