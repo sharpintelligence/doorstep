@@ -206,6 +206,11 @@ func TestParseErrors(t *testing.T) {
 			wantErr: []string{"line 6", "field duraton not found"},
 		},
 		{
+			name:    "unknown job gate key",
+			input:   "apps:\n  - name: blog\n    gates:\n      after:\n        - type: job\n          job:\n            namespace: blog\n            logs: x\n",
+			wantErr: []string{"line 8", "field logs not found"},
+		},
+		{
 			name:    "unknown notification key",
 			input:   "notifications:\n  - name: ops\n    type: slack\n    webhook_url: https://hooks.slack.com/x\n",
 			wantErr: []string{"line 4", "field webhook_url not found"},
@@ -621,6 +626,15 @@ func TestFileCatalogDefaults(t *testing.T) {
 			},
 		},
 		{
+			name: "job gate timeout defaults to ten minutes",
+			mutate: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateJob, Job: &JobGate{Namespace: "blog", Name: "smoke-test"}}}
+			},
+			want: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateJob, Name: "job", Timeout: durPtr(10 * time.Minute), Job: &JobGate{Namespace: "blog", Name: "smoke-test"}}}
+			},
+		},
+		{
 			name:   "lock gate gets no timeout",
 			mutate: func(a *App) { a.Gates.Before = []Gate{{Type: GateLock}} },
 			want:   func(a *App) { a.Gates.Before = []Gate{{Type: GateLock, Name: "lock"}} },
@@ -723,7 +737,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Pin.YAML = &YAMLPin{File: "values.yaml", Path: "image.digest"}
 	app.Gates.Before = []Gate{{Type: GateChecks, Timeout: durPtr(time.Hour)}}
 	app.Gates.Before = append(app.Gates.Before, Gate{Type: GateSchedule, Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}}})
-	app.Gates.After = []Gate{{Type: GateHealth}}
+	app.Gates.After = []Gate{{Type: GateHealth}, {Type: GateJob, Job: &JobGate{Namespace: "blog", Name: "smoke"}}}
 	app.Notify = []string{"ops"}
 	app.Source.Deployments = new(true)
 	app.Source.Statuses = new(true)
@@ -739,6 +753,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	catalog.Apps[0].Source.RequiredChecks[0] = "changed"
 	catalog.Apps[0].Pin.YAML.Path = "changed"
 	catalog.Apps[0].Gates.After[0].Name = "changed"
+	catalog.Apps[0].Gates.After[1].Job.Name = "changed"
 	*catalog.Apps[0].Gates.Before[0].Timeout = 0
 	catalog.Apps[0].Gates.Before[1].Windows[0].Cron = "changed"
 	catalog.Apps[0].Notify[0] = "changed"
@@ -755,7 +770,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 		t.Errorf("Catalog() shares migration or backup settings with the file: %+v", original)
 	}
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
-		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) ||
+		original.Gates.After[0].Name != "" || original.Gates.After[1].Job.Name != "smoke" || *original.Gates.Before[0].Timeout != Duration(time.Hour) ||
 		original.Gates.Before[1].Windows[0].Cron != "0 17 * * 5" || original.Gates.Before[1].Windows[0].Timezone != "" ||
 		original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
 		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments || !*original.Source.Statuses || *original.ArgoCD.SyncTimeout != Duration(time.Minute) {

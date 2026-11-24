@@ -84,11 +84,12 @@ const (
 	GateKindSchedule GateKind = "schedule"
 	GateKindExternal GateKind = "external"
 	GateKindBackup   GateKind = "backup"
+	GateKindJob      GateKind = "job"
 )
 
 func (k GateKind) label() string {
 	switch k {
-	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule, GateKindExternal, GateKindBackup:
+	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule, GateKindExternal, GateKindBackup, GateKindJob:
 		return string(k)
 	default:
 		return unknownLabel
@@ -194,7 +195,7 @@ var (
 	allReasons  = []RollbackReason{RollbackReasonGateFailed, RollbackReasonSyncFailed, RollbackReasonManual}
 	allPhases   = []Phase{PhaseDeploy, PhaseRollback}
 	allResults  = []GateResult{GateResultPassed, GateResultFailed, GateResultError}
-	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule, GateKindBackup}
+	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule, GateKindBackup, GateKindJob}
 
 	allNotificationTypes   = []NotificationType{NotificationSlack, NotificationWebhook, NotificationGitHub}
 	allNotificationResults = []NotificationResult{NotificationSent, NotificationFailed, NotificationDropped}

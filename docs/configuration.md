@@ -433,7 +433,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `deploy.max_batch` | `10` | Most queued commits collapsed into one deploy, 1 to 100. When several merges are waiting, the newest of the first `max_batch` is deployed and the older ones are superseded; `1` deploys every commit. An urgent deploy still supersedes older queued deploys of older commits regardless of this limit. See [queue.md](queue.md#batching). |
 | `argocd.application` | the app name | Name of the Argo CD `Application` to watch; a DNS subdomain. Several apps may share one Application, for example when it runs several images. |
 | `argocd.namespace` | `argocd` | Namespace of that Application; a DNS label. |
-| `argocd.sync_timeout` | `10m` | How long a deploy waits for the Application to sync to a revision containing the pin commit and become healthy before it fails; must be positive. See [argocd.md](argocd.md#timeouts). |
+| `argocd.sync_timeout` | `10m` | How long a deploy waits for the Application to sync to a revision containing the pin commit and become healthy before it fails; must be positive. Argo CD keeps the sync running while PostSync hooks run, so with a [`job` gate](#validation-jobs) it must also cover the validation Job's runtime. See [argocd.md](argocd.md#timeouts). |
 | `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
 | `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
@@ -510,14 +510,15 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `prometheus` | `after` | `query`, required; `condition` and/or `baseline`; see [Prometheus gates](#prometheus-gates) | A PromQL query meets its condition, and stays within a margin of its pre-deploy baseline, for `success_threshold` samples in a row. |
 | `external` | either | `timeout`, default `24h`; `apply_to_rollbacks`, default `false`; `reporters`, default any caller with the `reporter` role | Another system posted `passed` through the [external gate API](api.md#external-gate-results); see [gates.md](gates.md#external). |
 | `backup` | `before` | `webhook`, required; `when`, default `migration`; `apply_to_rollbacks`, default `false`; `timeout`, default `30m` | The operator's backup webhook reports the backup done; see [Backup gate](#backup-gate). |
+| `job` | `after` | `job`, required; `timeout`, default `10m` | The validation Job, an Argo CD PostSync hook declared in the GitOps repository, completed successfully; see [Validation Jobs](#validation-jobs). |
 
-The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak`, `prometheus`, `external` and `backup` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule`, `external` and `backup` unless they set `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
+The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak`, `prometheus`, `job`, `external` and `backup` run only when listed. Rollbacks skip `checks`, `lock`, `soak`, `prometheus` and `job`, and skip `schedule`, `external` and `backup` unless they set `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
 A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`, and a `prometheus` timeout longer than `initial_delay` + (`success_threshold` - 1) × `interval`. An `external` gate times out after `24h` unless it sets its own `timeout`, so a tool that never reports cannot hold a deployment, and the app's queue behind it, forever. Set a longer one (`timeout: 168h`) for an approval that may take days, and a short one on an `external` gate in `gates.after`, which holds a deployment that is already live.
 
 `reporters` lists the actors allowed to post results for an `external` gate, as `token:<name>` (an [API token](authentication.md#api-tokens)) or `user:<provider>:<subject>` (a signed-in user, as shown in `reported_by` and the audit log). When it is set, every other caller is refused with `403`, deployers and admins included; when it is left out, any caller with the `reporter` role or higher may report the gate. An empty list, duplicate entries and `reporters` on any other gate type are errors. Set it on every gate that guards production, so a leaked CI token of one repository cannot pass the gates of every app.
 
-A gate type other than `external` is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health`, `prometheus`, `external` or `backup`, `windows` or `timezone` on anything but `schedule`, `apply_to_rollbacks` on anything but `schedule`, `external` and `backup`, `reporters` on anything but `external`, `when` or `webhook` on anything but `backup`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
+A gate type other than `external` is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health`, `prometheus`, `job`, `external` or `backup`, `windows` or `timezone` on anything but `schedule`, `apply_to_rollbacks` on anything but `schedule`, `external` and `backup`, `reporters` on anything but `external`, `when` or `webhook` on anything but `backup`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`, `job` on anything but `job`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
 
 #### Prometheus gates
 
@@ -541,6 +542,42 @@ A `prometheus` gate samples a PromQL query after the deploy; [gates.md](gates.md
 | `timeout` | `initial_delay` + `success_threshold` × `interval` + `10m` | See [Timeouts](gates.md#timeouts). |
 
 At least one of `condition` and `baseline` is required; with both, a sample must satisfy both. Leave `baseline` out for a fixed threshold only. A sample passes the baseline when it is at most *baseline* + \|*baseline*\| × `ratio` + `absolute` (`increase`), or at least *baseline* - \|*baseline*\| × `ratio` - `absolute` (`decrease`). For an error-rate query, `or vector(0)` turns "no errors recorded" into 0 instead of no data ([gates.md](gates.md#prometheus)).
+
+#### Validation Jobs
+
+A `job` gate passes when a Kubernetes Job that runs your smoke tests, API checks or browser tests completes successfully after the deploy. doorstep does not create the Job: declare it in the app's GitOps manifests as an Argo CD PostSync hook with a fixed name, and doorstep reads its status. [gates.md](gates.md#job) shows a Job manifest and every verdict.
+
+```yaml
+apps:
+  - name: web
+    source:
+      repo: example-org/web
+    image:
+      repository: ghcr.io/example-org/web
+    gitops:
+      repo: example-org/platform
+      path: apps/web
+    argocd:
+      application: web-prod
+      sync_timeout: 20m
+    gates:
+      after:
+        - type: health
+        - type: job
+          name: smoke
+          job:
+            namespace: web-prod
+            name: web-smoke-test
+            logs_url: https://argocd.example.com/applications/{argocd_namespace}/{argocd_application}?node=batch%2FJob%2F{namespace}%2F{job}%2F0&tab=logs
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `job.namespace` | required | Namespace of the Job, usually the Application's destination namespace (not `argocd.namespace`); a DNS label. |
+| `job.name` | required | The Job's fixed `metadata.name`; a DNS subdomain. |
+| `job.logs_url` | none | Link to the Job's logs, stored as `logs_url` in the gate's evidence. Placeholders `{app}`, `{namespace}`, `{job}`, `{uid}`, `{deployment}`, `{argocd_namespace}` and `{argocd_application}` are replaced with path-escaped values. It must be an absolute `http` or `https` URL with a host and without credentials or whitespace; write literal braces as `%7B` and `%7D`. Without it the gate records no link. |
+
+The `job` block is required for type `job` and rejected on every other type; there are no global defaults, so use YAML anchors to share settings. The Job must be an Argo CD PostSync hook (`argocd.argoproj.io/hook: PostSync`, or Helm's `post-install`/`post-upgrade`) with the default `BeforeHookCreation` delete policy, and must not be removed by a `HookSucceeded` policy or a short `ttlSecondsAfterFinished` before doorstep reads it. Argo CD keeps the sync running while the hook runs, so `argocd.sync_timeout` must cover the rollout plus the Job's runtime; the gate's `timeout` covers only a Job that is missing, being replaced or still running after that. doorstep needs `get` on Jobs in `job.namespace`; see [install.md](install.md#validation-jobs).
 
 #### Backup gate
 
@@ -650,7 +687,7 @@ A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{ef
 
 ### Full example
 
-Two owners, both pin strategies, both deploy modes, freeze, soak, Prometheus and backup gates, migration detection and both notification types:
+Two owners, both pin strategies, both deploy modes, freeze, soak, Prometheus, validation Job and backup gates, migration detection and both notification types:
 
 ```yaml
 server:
@@ -775,6 +812,12 @@ apps:
           baseline:
             ratio: 0.2
             absolute: 0.001
+        - type: job
+          name: smoke
+          job:
+            namespace: api
+            name: api-smoke-test
+            logs_url: https://argocd.example.com/applications/{argocd_namespace}/{argocd_application}?node=batch%2FJob%2F{namespace}%2F{job}%2F0&tab=logs
     notify: [ops, hooks]
 ```
 

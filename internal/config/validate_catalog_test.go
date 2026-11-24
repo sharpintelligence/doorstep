@@ -69,6 +69,10 @@ func withBackup(mutate func(*Gate)) func(*Catalog) {
 	}
 }
 
+func jobGate() Gate {
+	return Gate{Type: GateJob, Name: "smoke", Timeout: durPtr(10 * time.Minute), Job: &JobGate{Namespace: "blog", Name: "smoke-test"}}
+}
+
 func TestCatalogValidate(t *testing.T) {
 	t.Parallel()
 
@@ -657,7 +661,7 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name:    "gate type required",
 			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Type = "" },
-			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want backup, checks, external, health, lock, prometheus, schedule, soak)"},
+			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want backup, checks, external, health, job, lock, prometheus, schedule, soak)"},
 		},
 		{
 			name:    "gate type unknown",
@@ -1120,6 +1124,122 @@ func TestCatalogValidate(t *testing.T) {
 				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
 			},
 			wantErr: []string{"gates.before[1].windows[0].name: must be valid UTF-8"},
+		},
+		{
+			name:   "job gate",
+			mutate: func(c *Catalog) { c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, jobGate()) },
+		},
+		{
+			name: "job gate with a logs url",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job.LogsURL = "https://argocd.example.com/applications/{argocd_namespace}/{argocd_application}?resource=&node=batch%2FJob%2F{namespace}%2F{job}%2F0&tab=logs"
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+		},
+		{
+			name: "job gate before deploy",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, jobGate())
+			},
+			wantErr: []string{"gates.before[1].type: job gates run only in gates.after"},
+		},
+		{
+			name: "job gate needs a job block",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job = nil
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{"gates.after[1].job: is required for type job"},
+		},
+		{
+			name: "job gate needs namespace and name",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job = &JobGate{}
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{"gates.after[1].job.namespace: is required", "gates.after[1].job.name: is required"},
+		},
+		{
+			name: "job gate invalid namespace and name",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job = &JobGate{Namespace: "Blog.Prod", Name: "Smoke_Test"}
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{`gates.after[1].job.namespace: "Blog.Prod" must be a DNS label`, `gates.after[1].job.name: "Smoke_Test" must be a DNS subdomain`},
+		},
+		{
+			name: "job gate name may be a DNS subdomain",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job.Name = "smoke.v2"
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+		},
+		{
+			name: "job gate timeout zero",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Timeout = durPtr(0)
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{"gates.after[1].timeout: must be positive"},
+		},
+		{
+			name: "job gate rejects duration and schedule fields",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Duration = Duration(time.Minute)
+				g.Timezone = "UTC"
+				g.ApplyToRollbacks = true
+				g.Windows = []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}}
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{
+				"gates.after[1].duration: not allowed for type job",
+				"gates.after[1].windows: not allowed for type job",
+				"gates.after[1].timezone: not allowed for type job",
+				"gates.after[1].apply_to_rollbacks: not allowed for type job",
+			},
+		},
+		{
+			name: "job gate rejects a bad logs url",
+			mutate: func(c *Catalog) {
+				g := jobGate()
+				g.Job.LogsURL = "ftp://logs.example.com/{job}"
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, g)
+			},
+			wantErr: []string{"gates.after[1].job.logs_url: must be an absolute http or https URL"},
+		},
+		{
+			name: "job block rejected on other gate types",
+			mutate: func(c *Catalog) {
+				job := &JobGate{Namespace: "blog", Name: "smoke"}
+				c.Apps[0].Gates.Before[0].Job = job
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateLock, Name: "freeze", Job: job})
+				sched := scheduleGate()
+				sched.Job = job
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, sched)
+				c.Apps[1].Gates.After[0].Job = job
+				c.Apps[1].Gates.After[1].Job = job
+			},
+			wantErr: []string{
+				"apps[0] (blog): gates.before[0].job: not allowed for type checks",
+				"apps[0] (blog): gates.before[1].job: not allowed for type lock",
+				"apps[0] (blog): gates.before[2].job: not allowed for type schedule",
+				"apps[1] (api): gates.after[0].job: not allowed for type health",
+				"apps[1] (api): gates.after[1].job: not allowed for type soak",
+			},
+		},
+		{
+			name: "two job gates need distinct names",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, jobGate(), jobGate())
+			},
+			wantErr: []string{"gates.after[2].name: duplicate of gates.after[1]"},
 		},
 		{
 			name:    "soak gate duration required",

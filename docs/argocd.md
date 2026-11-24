@@ -63,6 +63,8 @@ The host is not compared, so GitHub Enterprise URLs match too. If no source matc
 
 The `health` gate has its own `timeout` (default `10m`), measured from its first evaluation. Because `WaitSynced` already waited for health, the gate normally passes on its first evaluation; its timeout only matters when health is lost again after syncing.
 
+Argo CD keeps a sync operation `Running` until its PostSync hooks finish, and the wait treats a running operation as not ready. With a [`job` gate](gates.md#job), whose validation Job is a PostSync hook, `sync_timeout` must therefore cover the rollout plus the Job's runtime. A failed hook ends the operation `Failed`; when the app's resources are nevertheless synced and healthy the wait succeeds, as above, and the `job` gate fails the deploy with the Job's own reason (otherwise the wait can end early with `sync operation failed`). The gate's `timeout` (default `10m`) then only covers a Job that is missing, being replaced or still running after the sync. Without a `job` gate, a failed PostSync hook does not fail the deploy.
+
 ## Failing before the timeout
 
 Only deterministic conditions end a wait early:

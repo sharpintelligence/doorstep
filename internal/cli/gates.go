@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"slices"
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/argocd"
@@ -36,7 +38,7 @@ type gateDeps struct {
 type gateRegistrar func(r *gates.Registry, deps gateDeps) error
 
 func gateRegistrars() []gateRegistrar {
-	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps, registerExternalGateFromDeps, registerBackupGateFromDeps}
+	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps, registerJobGateFromDeps, registerExternalGateFromDeps, registerBackupGateFromDeps}
 }
 
 func gateObservers(deps gateDeps) []gates.Observer {
@@ -65,6 +67,28 @@ func registerExternalGateFromDeps(r *gates.Registry, deps gateDeps) error {
 
 func registerBackupGateFromDeps(r *gates.Registry, deps gateDeps) error {
 	return registerBackupGate(r, deps.lookupEnv, userAgent(), time.Now)
+}
+
+func registerJobGateFromDeps(r *gates.Registry, deps gateDeps) error {
+	if !catalogUsesGate(deps.catalog, config.GateJob) {
+		return nil
+	}
+	client, err := newKubeClient(deps.config.Kubernetes, deps.lookupEnv, os.ReadFile)
+	if err != nil {
+		return err
+	}
+	return registerJobGate(r, client)
+}
+
+func catalogUsesGate(catalog config.Catalog, gateType config.GateType) bool {
+	for _, app := range catalog.Apps {
+		for _, gate := range slices.Concat(app.Gates.Before, app.Gates.After) {
+			if gate.Type == gateType {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newGateEvaluator(deps gateDeps) (*gates.Evaluator, error) {

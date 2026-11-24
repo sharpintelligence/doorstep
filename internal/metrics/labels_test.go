@@ -37,6 +37,7 @@ func TestLabels(t *testing.T) {
 		{"gate schedule", GateKindSchedule.label(), "schedule"},
 		{"gate external", GateKindExternal.label(), "external"},
 		{"gate backup", GateKindBackup.label(), "backup"},
+		{"gate job", GateKindJob.label(), "job"},
 		{"gate unknown", GateKind("my-custom-gate").label(), "unknown"},
 		{"gate empty", GateKind("").label(), "unknown"},
 		{"result unknown", GateResult("maybe").label(), "unknown"},

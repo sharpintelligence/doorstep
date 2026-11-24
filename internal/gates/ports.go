@@ -3,6 +3,7 @@ package gates
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
@@ -26,7 +27,10 @@ const (
 	OperationSucceeded   = "Succeeded"
 )
 
-var ErrApplicationNotFound = errors.New("argo cd application not found")
+var (
+	ErrApplicationNotFound = errors.New("argo cd application not found")
+	ErrJobNotFound         = errors.New("validation job not found")
+)
 
 type TrackedChecks interface {
 	TrackedCommits(ctx context.Context, repository, sha string) ([]core.TrackedCommit, error)
@@ -54,4 +58,26 @@ type Application struct {
 	Health         string
 	HealthMessage  string
 	OperationPhase string
+}
+
+type JobReader interface {
+	Job(ctx context.Context, namespace, name string) (Job, error)
+}
+
+type Job struct {
+	UID             string
+	CreatedAt       time.Time
+	Deleting        bool
+	Annotations     map[string]string
+	Suspended       bool
+	BackoffLimit    int32
+	Active          int32
+	Succeeded       int32
+	Failed          int32
+	StartedAt       time.Time
+	CompletedAt     time.Time
+	Complete        bool
+	FailedCondition bool
+	Reason          string
+	Message         string
 }
