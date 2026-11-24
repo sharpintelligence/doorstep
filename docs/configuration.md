@@ -232,12 +232,13 @@ The lock owner is the identity the server derives from the token, never a comman
 ```sh
 doorstep rollback blog
 doorstep rollback blog --to 41 --reason "checkout errors" -o json
+doorstep rollback blog --to 41 --confirm-migration-rollback
 doorstep blocks blog
 doorstep block blog sha256:4f1c... --reason "leaks memory"
 doorstep unblock blog 0123456789abcdef0123456789abcdef01234567
 ```
 
-Thin clients of the [rollback and block API](rollback.md#api), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above. `rollback` queues a rollback of the app to its previous good version, or to the successful deployment given with `--to`, and blocks the version it replaces; `--reason` is optional and recorded on the block. `block` blocks a digest or a 40-character commit SHA by hand and needs `--reason`; `unblock` clears the matching blocks; `blocks` lists the active ones as a table or, with `-o json`, as JSON. The semantics are described in [rollback.md](rollback.md).
+Thin clients of the [rollback and block API](rollback.md#api), with the same `--server`, `DOORSTEP_SERVER_URL`, `DOORSTEP_TOKEN` and `DOORSTEP_TOKEN_FILE` settings as `doorstep lock` above. `rollback` queues a rollback of the app to its previous good version, or to the successful deployment given with `--to`, and blocks the version it replaces; `--reason` is optional and recorded on the block; `--confirm-migration-rollback` confirms a rollback across releases flagged as containing database migrations, which is refused without it ([rollback.md](rollback.md#confirmation)). `block` blocks a digest or a 40-character commit SHA by hand and needs `--reason`; `unblock` clears the matching blocks; `blocks` lists the active ones as a table or, with `-o json`, as JSON. The semantics are described in [rollback.md](rollback.md).
 
 ## `doorstep version`
 
@@ -436,6 +437,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
 | `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
+| `migrations` | none | Flag releases that contain database migrations; see [Migrations](#migrations). Without the block nothing is detected and no extra GitHub calls are made. |
 
 #### Required checks
 
@@ -454,6 +456,30 @@ When a commit is pushed to `source.branch`, doorstep tracks it for every app tha
 - Commits tracked for an app stop being evaluated when the app is removed or its `source.repo` or `source.branch` changes.
 
 There is no timeout while a commit waits for its checks; the `checks` gate's `timeout` bounds the wait once a deployment is underway.
+
+#### Migrations
+
+```yaml
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    migrations:
+      labels: [db-migration]
+      trailer: true
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `migrations.labels` | none | Pull request labels that mark a migration, compared case-insensitively. At most 10, each at most 50 characters, unique, without control characters or surrounding whitespace. A label counts only on a merged pull request whose base is `source.branch`. |
+| `migrations.trailer` | `true` | Also flag a commit whose message has a `Doorstep-Migration: true` (or `yes`) line. |
+
+The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches; the flag makes a rollback across it require `--confirm-migration-rollback`, withholds automatic rollbacks across it, and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can. See [rollback.md](rollback.md#migration-aware-releases).
 
 #### Pin strategies
 
@@ -483,14 +509,15 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy; a `Degraded` observation restarts the clock. |
 | `prometheus` | `after` | `query`, required; `condition` and/or `baseline`; see [Prometheus gates](#prometheus-gates) | A PromQL query meets its condition, and stays within a margin of its pre-deploy baseline, for `success_threshold` samples in a row. |
 | `external` | either | `timeout`, default `24h`; `apply_to_rollbacks`, default `false`; `reporters`, default any caller with the `reporter` role | Another system posted `passed` through the [external gate API](api.md#external-gate-results); see [gates.md](gates.md#external). |
+| `backup` | `before` | `webhook`, required; `when`, default `migration`; `apply_to_rollbacks`, default `false`; `timeout`, default `30m` | The operator's backup webhook reports the backup done; see [Backup gate](#backup-gate). |
 
-The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak`, `prometheus` and `external` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule` and `external` unless they set `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
+The default gates are `checks` before and `health` after; `lock`, `schedule`, `soak`, `prometheus`, `external` and `backup` run only when listed. Rollbacks skip `checks`, `lock`, `soak` and `prometheus`, and skip `schedule`, `external` and `backup` unless they set `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
 A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`, and a `prometheus` timeout longer than `initial_delay` + (`success_threshold` - 1) × `interval`. An `external` gate times out after `24h` unless it sets its own `timeout`, so a tool that never reports cannot hold a deployment, and the app's queue behind it, forever. Set a longer one (`timeout: 168h`) for an approval that may take days, and a short one on an `external` gate in `gates.after`, which holds a deployment that is already live.
 
 `reporters` lists the actors allowed to post results for an `external` gate, as `token:<name>` (an [API token](authentication.md#api-tokens)) or `user:<provider>:<subject>` (a signed-in user, as shown in `reported_by` and the audit log). When it is set, every other caller is refused with `403`, deployers and admins included; when it is left out, any caller with the `reporter` role or higher may report the gate. An empty list, duplicate entries and `reporters` on any other gate type are errors. Set it on every gate that guards production, so a leaked CI token of one repository cannot pass the gates of every app.
 
-A gate type other than `external` is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health`, `prometheus` or `external`, `windows` or `timezone` on anything but `schedule`, `apply_to_rollbacks` on anything but `schedule` and `external`, `reporters` on anything but `external`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
+A gate type other than `external` is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks`, `health`, `prometheus`, `external` or `backup`, `windows` or `timezone` on anything but `schedule`, `apply_to_rollbacks` on anything but `schedule`, `external` and `backup`, `reporters` on anything but `external`, `when` or `webhook` on anything but `backup`, `server`, `query`, `condition`, `interval`, `initial_delay`, `success_threshold`, `failure_threshold`, `no_data` or `baseline` on anything but `prometheus`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable.
 
 #### Prometheus gates
 
@@ -514,6 +541,41 @@ A `prometheus` gate samples a PromQL query after the deploy; [gates.md](gates.md
 | `timeout` | `initial_delay` + `success_threshold` × `interval` + `10m` | See [Timeouts](gates.md#timeouts). |
 
 At least one of `condition` and `baseline` is required; with both, a sample must satisfy both. Leave `baseline` out for a fixed threshold only. A sample passes the baseline when it is at most *baseline* + \|*baseline*\| × `ratio` + `absolute` (`increase`), or at least *baseline* - \|*baseline*\| × `ratio` - `absolute` (`decrease`). For an error-rate query, `or vector(0)` turns "no errors recorded" into 0 instead of no data ([gates.md](gates.md#prometheus)).
+
+#### Backup gate
+
+```yaml
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    migrations:
+      labels: [db-migration]
+    gates:
+      before:
+        - type: checks
+        - type: backup
+          when: migration
+          apply_to_rollbacks: true
+          webhook:
+            url_env: BLOG_BACKUP_URL
+            secret_file: /etc/doorstep/secrets/blog-backup-secret
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `when` | `migration` | `migration` runs the gate only for deployments flagged as containing database migrations; `always` runs it for every deploy. |
+| `apply_to_rollbacks` | `false` | Also run for rollbacks; `when` then applies to the rollback's own flag, which a confirmed rollback across migrations sets. |
+| `timeout` | `30m` | How long the backup may take, measured from the first request. A backup still running then fails the deploy. |
+| `webhook.url`, `webhook.url_env`, `webhook.url_file` | exactly one required | Endpoint that takes the backup. A literal `url` must be an absolute `http` or `https` URL without user info, query or fragment; use `url_env` or `url_file` for a URL that carries a token. |
+| `webhook.secret_env`, `webhook.secret_file` | none | At most one. Signs each request with `X-Doorstep-Signature-256`, like notification webhooks. |
+
+The gate runs after every earlier `before` gate has passed, so list it last. The request, the answers it understands and what a receiver must do are described in [gates.md](gates.md#backup).
 
 #### Deploy windows
 
@@ -588,7 +650,7 @@ A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{ef
 
 ### Full example
 
-Two owners, both pin strategies, both deploy modes, freeze, soak and Prometheus gates and both notification types:
+Two owners, both pin strategies, both deploy modes, freeze, soak, Prometheus and backup gates, migration detection and both notification types:
 
 ```yaml
 server:
@@ -679,6 +741,8 @@ apps:
     deploy:
       mode: pull_request
       max_batch: 5
+    migrations:
+      labels: [db-migration]
     argocd:
       application: api
       namespace: argo-cd
@@ -694,6 +758,11 @@ apps:
             - effect: deny
               cron: "0 17 * * 5"
               duration: 63h
+        - type: backup
+          timeout: 45m
+          webhook:
+            url_file: /etc/doorstep/secrets/api-backup-url
+            secret_env: DOORSTEP_API_BACKUP_SECRET
       after:
         - type: health
         - type: soak
@@ -805,9 +874,9 @@ Sends one synthetic `deploy.succeeded` notification to the named `notifications[
 
 Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens, Prometheus credentials) are never written inline in the configuration file.
 
-Notification secrets, Prometheus credentials (`prometheus[].bearer_token_*`, `prometheus[].password_*`) and the sign-in client secret (`auth.oidc.client_secret_*` or `auth.github.client_secret_*`) are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
+Notification secrets, Prometheus credentials (`prometheus[].bearer_token_*`, `prometheus[].password_*`), backup gate webhook URLs and secrets (`webhook.url_*` and `webhook.secret_*`) and the sign-in client secret (`auth.oidc.client_secret_*` or `auth.github.client_secret_*`) are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
 
-`doorstep serve` checks every referenced notification secret, Prometheus credential and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
+`doorstep serve` checks every referenced notification secret, Prometheus credential, backup gate secret and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
 The database URL, the GitHub App private key, the GitHub webhook secret and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `github.webhook_secret_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections. The private key and webhook secret are read once at startup, so rotating them needs a restart.
 

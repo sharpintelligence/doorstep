@@ -30,6 +30,7 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | 409 | `gate_not_applicable` | the deployment is a rollback and the gate does not set `apply_to_rollbacks` |
   | 409 | `gate_not_ready` | an after-deploy gate was reported before the deployment is `verifying`; retry after `Retry-After` |
   | 409 | `gate_decided` | the gate already has a different final verdict |
+  | 409 | `migration_confirmation_required` | the requested rollback crosses releases flagged as containing database migrations and was not confirmed with `confirm_migration_rollback`; the body also carries `to` and `migrations` ([rollback.md](rollback.md#confirmation)) |
   | 415 | `unsupported_media_type` | a request body that is not `application/json` |
   | 500 | `internal` | anything else; details are logged, never returned |
   | 503 | `contended` | a lock or the app's deployments changed while the request ran; retry after `Retry-After` |
@@ -270,6 +271,8 @@ curl -fsS -X POST \
 | `rollback_of_id` | the deployment this rollback reverts |
 | `superseded_by_id` | the newer deployment that replaced this one before it started pinning |
 | `failure_reason` | why it failed |
+| `migration` | `true` when the release is flagged as containing database migrations, or the rollback was confirmed across such releases ([rollback.md](rollback.md#migration-aware-releases)) |
+| `migration_reason` | why it was flagged, at most 200 characters, such as `label db-migration on #12 (abc1234)` or `rolls back across deployment 44` |
 | `created_at`, `updated_at`, `started_at`, `finished_at` | RFC 3339 timestamps in UTC; `started_at` is when it first became active, `finished_at` when it reached a terminal state |
 
 Optional fields and empty strings are omitted. `gitops` and `argocd` are always present as objects, empty until known.

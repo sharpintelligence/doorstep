@@ -39,6 +39,7 @@ type Binding struct {
 	Phase          core.GatePhase
 	Timeout        time.Duration
 	SkipOnRollback bool
+	Deferred       bool
 	Gate           Gate
 }
 

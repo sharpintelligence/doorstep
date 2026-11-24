@@ -12,7 +12,7 @@ func TestRecorderPrimeApp(t *testing.T) {
 		wantSeries int
 	}{
 		{name: "deployment durations per outcome", apps: []string{"web"}, metric: "doorstep_deployment_duration_seconds", wantSeries: 6},
-		{name: "gate durations for every combination", apps: []string{"web"}, metric: "doorstep_gate_evaluation_duration_seconds", wantSeries: 42},
+		{name: "gate durations for every combination", apps: []string{"web"}, metric: "doorstep_gate_evaluation_duration_seconds", wantSeries: 48},
 		{name: "several apps", apps: []string{"web", "api"}, metric: "doorstep_deployment_duration_seconds", wantSeries: 12},
 		{name: "priming twice changes nothing", apps: []string{"web", "web"}, metric: "doorstep_deployment_duration_seconds", wantSeries: 6},
 		{name: "nothing primed", metric: "doorstep_deployment_duration_seconds"},

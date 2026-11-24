@@ -530,6 +530,37 @@ func TestFileCatalogDefaults(t *testing.T) {
 			want:   func(a *App) { a.Deploy.MaxBatch = intPtr(0) },
 		},
 		{
+			name:   "migrations block enables the trailer by default",
+			mutate: func(a *App) { a.Migrations = &Migrations{Labels: []string{"db-migration"}} },
+			want:   func(a *App) { a.Migrations = &Migrations{Labels: []string{"db-migration"}, Trailer: new(true)} },
+		},
+		{
+			name:   "migrations trailer can be disabled",
+			mutate: func(a *App) { a.Migrations = &Migrations{Labels: []string{"db"}, Trailer: new(false)} },
+			want:   func(a *App) { a.Migrations = &Migrations{Labels: []string{"db"}, Trailer: new(false)} },
+		},
+		{
+			name: "backup gate defaults name, when and timeout",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateChecks}, {Type: GateBackup, Webhook: &GateWebhook{URLEnv: "BACKUP_URL"}}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = append(a.Gates.Before, Gate{
+					Type: GateBackup, Name: "backup", When: GateWhenMigration, Timeout: durPtr(DefaultBackupTimeout),
+					Webhook: &GateWebhook{URLEnv: "BACKUP_URL"},
+				})
+			},
+		},
+		{
+			name: "backup gate keeps an explicit when",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateChecks}, {Type: GateBackup, Name: "snapshot", When: GateWhenAlways, Timeout: durPtr(time.Hour), ApplyToRollbacks: true}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = append(a.Gates.Before, Gate{Type: GateBackup, Name: "snapshot", When: GateWhenAlways, Timeout: durPtr(time.Hour), ApplyToRollbacks: true})
+			},
+		},
+		{
 			name: "argocd overrides kept",
 			mutate: func(a *App) {
 				a.ArgoCD = ArgoCD{Application: "web", Namespace: "gitops", SyncTimeout: durPtr(time.Minute)}
@@ -697,6 +728,8 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Source.Deployments = new(true)
 	app.Source.Statuses = new(true)
 	app.ArgoCD.SyncTimeout = durPtr(time.Minute)
+	app.Migrations = &Migrations{Labels: []string{"db-migration"}}
+	app.Gates.Before = append(app.Gates.Before, Gate{Type: GateBackup, Webhook: &GateWebhook{URLEnv: "BACKUP_URL"}})
 	file := File{
 		Apps:          []App{app},
 		Notifications: []Notification{{Name: "ops", Type: NotifySlack, WebhookURLEnv: "X", Events: []string{"deploy.failed"}}},
@@ -714,8 +747,13 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	*catalog.Apps[0].Source.Deployments = false
 	*catalog.Apps[0].Source.Statuses = false
 	*catalog.Apps[0].ArgoCD.SyncTimeout = 0
+	catalog.Apps[0].Migrations.Labels[0] = "changed"
+	catalog.Apps[0].Gates.Before[2].Webhook.URLEnv = "CHANGED"
 
 	original := file.Apps[0]
+	if original.Migrations.Labels[0] != "db-migration" || original.Migrations.Trailer != nil || original.Gates.Before[2].Webhook.URLEnv != "BACKUP_URL" {
+		t.Errorf("Catalog() shares migration or backup settings with the file: %+v", original)
+	}
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
 		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) ||
 		original.Gates.Before[1].Windows[0].Cron != "0 17 * * 5" || original.Gates.Before[1].Windows[0].Timezone != "" ||

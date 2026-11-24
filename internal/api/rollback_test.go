@@ -46,7 +46,18 @@ func (f *fakeRollbacks) Rollback(_ context.Context, req rollback.Request) (rollb
 	rb := sampleDeployment(9, core.KindRollback, core.StateQueued, goodSHA, rollbackDigest)
 	rb.RollbackOfID = &bad.ID
 	block := sampleBlock()
-	return rollback.Result{Rollback: rb, RolledBack: bad, Block: &block, Cancelled: []core.DeploymentID{7, 8}}, nil
+	result := rollback.Result{Rollback: rb, RolledBack: bad, Block: &block, Cancelled: []core.DeploymentID{7, 8}}
+	if req.ConfirmMigration {
+		result.Rollback.Migration, result.Rollback.MigrationReason = true, "rolls back across deployment 5"
+		result.Migrations = []core.Deployment{migrationDeployment()}
+	}
+	return result, nil
+}
+
+func migrationDeployment() core.Deployment {
+	d := sampleDeployment(5, core.KindDeploy, core.StateSucceeded, badSHA, badDigest)
+	d.Migration, d.MigrationReason = true, "label db-migration on #12 (ccccccc)"
+	return d
 }
 
 func (f *fakeRollbacks) Block(_ context.Context, req rollback.BlockRequest) (core.Block, bool, error) {
@@ -187,8 +198,59 @@ func TestRollbackEndpoint(t *testing.T) {
 				if c := body["cancelled"].([]any); len(c) != 2 {
 					t.Errorf("cancelled = %v", c)
 				}
+				if m, ok := body["migrations"].([]any); !ok || len(m) != 0 {
+					t.Errorf("migrations = %v, want an empty array", body["migrations"])
+				}
+				if _, ok := dep["migration"]; ok || req.ConfirmMigration {
+					t.Errorf("unflagged rollback reports migration fields: %v, confirm %v", dep, req.ConfirmMigration)
+				}
 			},
 		},
+		{
+			name:       "confirmed migration rollback",
+			req:        request{method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{"to_deployment_id":4,"confirm_migration_rollback":true}`},
+			wantStatus: http.StatusCreated,
+			wantCalled: true,
+			check: func(t *testing.T, req rollback.Request, body map[string]any) {
+				t.Helper()
+				if !req.ConfirmMigration {
+					t.Errorf("request = %+v, want the confirmation passed on", req)
+				}
+				dep := body["deployment"].(map[string]any)
+				if dep["migration"] != true || dep["migration_reason"] != "rolls back across deployment 5" {
+					t.Errorf("deployment = %v", dep)
+				}
+				m := body["migrations"].([]any)
+				if len(m) != 1 || m[0].(map[string]any)["id"] != float64(5) || m[0].(map[string]any)["migration_reason"] != "label db-migration on #12 (ccccccc)" {
+					t.Errorf("migrations = %v", m)
+				}
+			},
+		},
+		{
+			name: "migration confirmation required",
+			req:  request{method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{"to_deployment_id":4}`},
+			rollbackErr: fmt.Errorf("roll back web: %w", &core.MigrationRollbackError{
+				To:         sampleDeployment(4, core.KindDeploy, core.StateSucceeded, goodSHA, rollbackDigest),
+				Migrations: []core.Deployment{migrationDeployment()},
+			}),
+			wantStatus: http.StatusConflict, wantCode: "migration_confirmation_required", wantCalled: true,
+			check: func(t *testing.T, _ rollback.Request, body map[string]any) {
+				t.Helper()
+				msg := body["error"].(map[string]any)["message"].(string)
+				for _, part := range []string{"deployment 4", "deployment 5", "confirm_migration_rollback=true", "--confirm-migration-rollback"} {
+					if !strings.Contains(msg, part) {
+						t.Errorf("message %q does not mention %q", msg, part)
+					}
+				}
+				if to := body["to"].(map[string]any); to["id"] != float64(4) {
+					t.Errorf("to = %v", to)
+				}
+				if m := body["migrations"].([]any); len(m) != 1 || m[0].(map[string]any)["migration"] != true {
+					t.Errorf("migrations = %v", m)
+				}
+			},
+		},
+		{name: "confirmation must be a boolean", req: request{method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{"confirm_migration_rollback":"yes"}`}, wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
 		{
 			name:       "explicit deployment and reason",
 			req:        request{method: http.MethodPost, path: "/api/v1/apps/web/rollback", body: `{"to_deployment_id":4,"reason":"5xx"}`},

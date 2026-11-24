@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/argocd"
 	"github.com/sharpintelligence/doorstep/internal/config"
@@ -35,7 +36,7 @@ type gateDeps struct {
 type gateRegistrar func(r *gates.Registry, deps gateDeps) error
 
 func gateRegistrars() []gateRegistrar {
-	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps, registerExternalGateFromDeps}
+	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps, registerExternalGateFromDeps, registerBackupGateFromDeps}
 }
 
 func gateObservers(deps gateDeps) []gates.Observer {
@@ -60,6 +61,10 @@ func registerPrometheusGateFromDeps(r *gates.Registry, deps gateDeps) error {
 
 func registerExternalGateFromDeps(r *gates.Registry, deps gateDeps) error {
 	return gates.RegisterExternal(r, deps.store)
+}
+
+func registerBackupGateFromDeps(r *gates.Registry, deps gateDeps) error {
+	return registerBackupGate(r, deps.lookupEnv, userAgent(), time.Now)
 }
 
 func newGateEvaluator(deps gateDeps) (*gates.Evaluator, error) {

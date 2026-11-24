@@ -25,6 +25,7 @@ const (
 	codeNoRollbackTarget     = "no_rollback_target"
 	codeRollbackInProgress   = "rollback_in_progress"
 	codeBlocked              = "blocked"
+	codeMigrationConfirmationRequired = "migration_confirmation_required"
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeGateNotExternal      = "gate_not_external"
 	codeDeploymentFinished   = "deployment_finished"

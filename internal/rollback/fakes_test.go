@@ -189,6 +189,28 @@ func (f *fakeRepo) LastSuccessfulDeployment(_ context.Context, t core.Target, ex
 	return core.Deployment{}, fmt.Errorf("last successful deployment of %s: %w", t, core.ErrNotFound)
 }
 
+func (f *fakeRepo) MigrationsBetween(_ context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail("MigrationsBetween"); err != nil {
+		return nil, err
+	}
+	var firstSeen core.DeploymentID
+	for _, d := range f.state.deployments {
+		if d.Target == t && d.Kind == core.KindDeploy && d.Commit.SHA == to.Commit.SHA && (firstSeen == 0 || d.ID < firstSeen) {
+			firstSeen = d.ID
+		}
+	}
+	var crossed []core.Deployment
+	for _, d := range f.state.deployments {
+		if d.Target == t && d.Kind == core.KindDeploy && d.Migration && d.Commit.SHA != to.Commit.SHA && d.ID > firstSeen && d.ID <= current.ID {
+			crossed = append(crossed, d)
+		}
+	}
+	slices.SortFunc(crossed, func(a, b core.Deployment) int { return cmp.Compare(a.ID, b.ID) })
+	return crossed, nil
+}
+
 func (f *fakeRepo) GetDeployment(_ context.Context, id core.DeploymentID) (core.Deployment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	maxContentsSize  = 1 << 20
-	base64LineLength = 60
+	maxContentsSize   = 1 << 20
+	maxComparePerPage = 250
+	base64LineLength  = 60
 )
 
 type Commit struct {
@@ -36,6 +37,7 @@ type PullRequest struct {
 	State          string
 	Merged         bool
 	MergeCommitSHA string
+	Labels         []string
 }
 
 type fakeCommit struct {
@@ -57,6 +59,7 @@ type fakePull struct {
 	mergeCommit string
 	headSHA     string
 	headRepo    string
+	labels      []string
 }
 
 type rejection struct {
@@ -190,6 +193,7 @@ func (r *Repo) Pulls() []PullRequest {
 			State:          p.state,
 			Merged:         p.merged,
 			MergeCommitSHA: p.mergeCommit,
+			Labels:         slices.Clone(p.labels),
 		})
 	}
 	return out
@@ -238,6 +242,45 @@ func (r *Repo) ClosePull(number int) {
 	}
 }
 
+func (r *Repo) AddPull(p PullRequest) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := p.State
+	if state == "" {
+		state = "open"
+		if p.Merged {
+			state = "closed"
+		}
+	}
+	base := p.Base
+	if base == "" {
+		base = r.defaultBranch
+	}
+	pull := &fakePull{
+		number:      len(r.pulls) + 1,
+		title:       p.Title,
+		body:        p.Body,
+		head:        p.Head,
+		base:        base,
+		state:       state,
+		merged:      p.Merged,
+		mergeCommit: p.MergeCommitSHA,
+		headSHA:     p.MergeCommitSHA,
+		headRepo:    r.FullName(),
+		labels:      slices.Clone(p.Labels),
+	}
+	r.pulls = append(r.pulls, pull)
+	return pull.number
+}
+
+func (r *Repo) LabelPull(number int, labels ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.pullLocked(number); p != nil {
+		p.labels = append(p.labels, labels...)
+	}
+}
+
 func (r *Repo) SetPullHeadRepo(number int, fullName string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -254,6 +297,8 @@ func (s *Server) routeFakeRepos() {
 		"DELETE /repos/{owner}/{repo}/git/refs/{ref...}":         (*Repo).handleDeleteRef,
 		"PATCH /repos/{owner}/{repo}/git/refs/{ref...}":          (*Repo).handleUpdateRef,
 		"GET /repos/{owner}/{repo}/commits":                      (*Repo).handleListCommits,
+		"GET /repos/{owner}/{repo}/commits/{sha}":                (*Repo).handleGetCommit,
+		"GET /repos/{owner}/{repo}/commits/{sha}/pulls":          (*Repo).handleCommitPulls,
 		"GET /repos/{owner}/{repo}/compare/{basehead}":           (*Repo).handleCompare,
 		"GET /repos/{owner}/{repo}/pulls":                        (*Repo).handleListPulls,
 		"POST /repos/{owner}/{repo}/pulls":                       (*Repo).handleCreatePull,
@@ -545,12 +590,69 @@ func (r *Repo) handleCompare(w http.ResponseWriter, req *http.Request) {
 	default:
 		status = "diverged"
 	}
+	inBase := map[string]bool{}
+	for _, c := range r.ancestorsLocked(mergeBase) {
+		inBase[c.sha] = true
+	}
+	var ahead []*fakeCommit
+	for _, c := range r.ancestorsLocked(head) {
+		if !inBase[c.sha] {
+			ahead = append(ahead, c)
+		}
+	}
+	slices.Reverse(ahead)
+	perPage := maxComparePerPage
+	if n, err := strconv.Atoi(req.URL.Query().Get("per_page")); err == nil && n > 0 {
+		perPage = min(n, maxComparePerPage)
+	}
+	commits := []any{}
+	for _, c := range ahead[:min(len(ahead), perPage)] {
+		commits = append(commits, commitJSON(c))
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"status":            status,
-		"ahead_by":          len(r.ancestorsLocked(head)) - len(r.ancestorsLocked(mergeBase)),
+		"ahead_by":          len(ahead),
 		"behind_by":         len(r.ancestorsLocked(base)) - len(r.ancestorsLocked(mergeBase)),
+		"total_commits":     len(ahead),
 		"merge_base_commit": map[string]string{"sha": mergeBase.sha},
+		"commits":           commits,
 	})
+}
+
+func (r *Repo) handleGetCommit(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.resolveLocked(req.PathValue("sha"))
+	if !ok {
+		WriteError(w, http.StatusUnprocessableEntity, "No commit found for SHA: "+req.PathValue("sha"))
+		return
+	}
+	WriteJSON(w, http.StatusOK, commitJSON(c))
+}
+
+func (r *Repo) handleCommitPulls(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sha := req.PathValue("sha")
+	if _, ok := r.commits[sha]; !ok {
+		WriteError(w, http.StatusUnprocessableEntity, "No commit found for SHA: "+sha)
+		return
+	}
+	out := []any{}
+	for _, p := range r.pulls {
+		if p.mergeCommit == sha || r.headLocked(p) == sha {
+			out = append(out, r.pullJSONLocked(p))
+		}
+	}
+	WriteJSON(w, http.StatusOK, out)
+}
+
+func commitJSON(c *fakeCommit) map[string]any {
+	parents := make([]map[string]string, 0, len(c.parents))
+	for _, p := range c.parents {
+		parents = append(parents, map[string]string{"sha": p})
+	}
+	return map[string]any{"sha": c.sha, "commit": map[string]string{"message": c.message}, "parents": parents}
 }
 
 func (r *Repo) handleListPulls(w http.ResponseWriter, req *http.Request) {
@@ -793,7 +895,16 @@ func (r *Repo) pullJSONLocked(p *fakePull) map[string]any {
 		"changed_files":    len(r.changedFilesLocked(base, head)),
 		"head":             map[string]any{"ref": p.head, "sha": head, "repo": headRepo},
 		"base":             map[string]any{"ref": p.base, "sha": base},
+		"labels":           labelsJSON(p.labels),
 	}
+}
+
+func labelsJSON(labels []string) []map[string]string {
+	out := make([]map[string]string, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, map[string]string{"name": l})
+	}
+	return out
 }
 
 func (r *Repo) mergeableStateLocked(p *fakePull, base, head string) string {

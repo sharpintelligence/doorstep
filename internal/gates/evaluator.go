@@ -127,6 +127,7 @@ func (e *Evaluator) evaluate(ctx context.Context, d core.Deployment, phase core.
 		for _, r := range recorded {
 			previous[r.Name] = r
 		}
+		settled := true
 		for _, b := range bindings {
 			if err := ctx.Err(); err != nil {
 				return core.GateOutcome{}, err
@@ -134,6 +135,13 @@ func (e *Evaluator) evaluate(ctx context.Context, d core.Deployment, phase core.
 			prev, found := previous[b.Name]
 			if found && prev.Status.Terminal() && !rerun {
 				results = append(results, prev)
+				settled = settled && cleared(prev.Status)
+				continue
+			}
+			if b.Deferred && !settled {
+				if found {
+					results = append(results, prev)
+				}
 				continue
 			}
 			var prevPtr *core.GateResult
@@ -145,6 +153,7 @@ func (e *Evaluator) evaluate(ctx context.Context, d core.Deployment, phase core.
 				return core.GateOutcome{}, err
 			}
 			results = append(results, result)
+			settled = settled && cleared(result.Status)
 		}
 	}
 	return core.GateOutcome{Phase: phase, Status: core.AggregateGateStatus(results), Results: results}, nil
@@ -297,6 +306,10 @@ func (e *Evaluator) callReturned(key callKey, state *callState) {
 	if e.abandoned[key]--; e.abandoned[key] <= 0 {
 		delete(e.abandoned, key)
 	}
+}
+
+func cleared(status core.GateStatus) bool {
+	return status == core.GatePassed || status == core.GateSkipped
 }
 
 func validateEvaluation(ev Evaluation) error {

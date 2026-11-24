@@ -51,11 +51,13 @@ func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
 		commits = announcingCommits{Commits: commits, announcer: in.announcer}
 	}
 	service, err := intake.New(intake.Options{
-		Apps:     apps,
-		Commits:  commits,
-		Checks:   intake.GitHub{Clients: in.githubApp},
-		Branches: intake.GitHub{Clients: in.githubApp},
-		Logger:   in.logger,
+		Apps:       apps,
+		Commits:    commits,
+		Checks:     intake.GitHub{Clients: in.githubApp},
+		Branches:   intake.GitHub{Clients: in.githubApp},
+		Migrations: intake.GitHub{Clients: in.githubApp},
+		Baselines:  in.store,
+		Logger:     in.logger,
 	})
 	if err != nil {
 		return intakeWiring{}, err

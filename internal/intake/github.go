@@ -55,6 +55,30 @@ func (g GitHub) BranchHead(ctx context.Context, repository, branch string) (stri
 	return head, err
 }
 
+func (g GitHub) Range(ctx context.Context, repository, base, head string, limit int) (github.CommitRange, error) {
+	client, owner, name, err := g.client(ctx, repository)
+	if err != nil {
+		return github.CommitRange{}, fmt.Errorf("compare %s...%s in %s: %w", base, head, repository, err)
+	}
+	return client.CommitRange(ctx, owner, name, base, head, limit)
+}
+
+func (g GitHub) Commit(ctx context.Context, repository, sha string) (github.CommitInfo, error) {
+	client, owner, name, err := g.client(ctx, repository)
+	if err != nil {
+		return github.CommitInfo{}, fmt.Errorf("read commit %s in %s: %w", sha, repository, err)
+	}
+	return client.Commit(ctx, owner, name, sha)
+}
+
+func (g GitHub) PullRequests(ctx context.Context, repository, sha string) ([]github.CommitPullRequest, error) {
+	client, owner, name, err := g.client(ctx, repository)
+	if err != nil {
+		return nil, fmt.Errorf("read pull requests of %s in %s: %w", sha, repository, err)
+	}
+	return client.CommitPullRequests(ctx, owner, name, sha)
+}
+
 func (g GitHub) client(ctx context.Context, repository string) (*github.Client, string, string, error) {
 	owner, name, err := splitRepository(repository)
 	if err != nil {

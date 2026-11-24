@@ -278,3 +278,56 @@ func (s *Store) TimeInState(ctx context.Context, id core.DeploymentID, state cor
 	}
 	return time.Duration(micros) * time.Microsecond, nil
 }
+
+const MaxMigrationsBetween = 20
+
+const migrationsBetweenSQL = `SELECT` + deploymentColumns + deploymentTables + `
+WHERE a.name = $1
+  AND a.environment = $2
+  AND d.kind = 'deploy'
+  AND d.migration
+  AND d.commit_sha <> $3
+  AND d.id > COALESCE((
+      SELECT min(f.id) FROM deployments f
+      WHERE f.app_id = d.app_id AND f.kind = 'deploy' AND f.commit_sha = $3
+  ), 0)
+  AND d.id <= $4
+ORDER BY d.id
+LIMIT $5`
+
+const lastDeployCommitSQL = `
+SELECT d.source_repository, d.commit_sha` + deploymentTables + `
+WHERE a.name = $1
+  AND a.environment = $2
+  AND d.kind = 'deploy'
+ORDER BY d.id DESC
+LIMIT 1`
+
+func (s *Store) MigrationsBetween(ctx context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error) {
+	if err := t.Validate(); err != nil {
+		return nil, fmt.Errorf("migrations between deployments: %w", err)
+	}
+	if err := core.ValidateCommitSHA(to.Commit.SHA); err != nil {
+		return nil, fmt.Errorf("migrations between deployments: target: %w", err)
+	}
+	crossed, err := s.queryDeployments(ctx, migrationsBetweenSQL, t.App, t.Environment, to.Commit.SHA, current.ID, MaxMigrationsBetween)
+	if err != nil {
+		return nil, fmt.Errorf("migrations of %s between deployment %d and %d: %w", t, to.ID, current.ID, err)
+	}
+	return crossed, nil
+}
+
+func (s *Store) LastDeployCommit(ctx context.Context, t core.Target) (core.Commit, bool, error) {
+	if err := t.Validate(); err != nil {
+		return core.Commit{}, false, fmt.Errorf("last deploy commit: %w", err)
+	}
+	var c core.Commit
+	err := s.db.QueryRow(ctx, lastDeployCommitSQL, t.App, t.Environment).Scan(&c.Repository, &c.SHA)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.Commit{}, false, nil
+	}
+	if err != nil {
+		return core.Commit{}, false, fmt.Errorf("last deploy commit of %s: %w", t, err)
+	}
+	return c, true, nil
+}

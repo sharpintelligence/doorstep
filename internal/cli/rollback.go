@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	flagTo            = "to"
-	shortDigestLength = len("sha256:") + 12
+	flagTo                       = "to"
+	flagConfirmMigrationRollback = "confirm-migration-rollback"
+	shortDigestLength            = len("sha256:") + 12
 )
 
 type rollbackBody struct {
-	ToDeploymentID *int64 `json:"to_deployment_id,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	ToDeploymentID           *int64 `json:"to_deployment_id,omitempty"`
+	Reason                   string `json:"reason,omitempty"`
+	ConfirmMigrationRollback bool   `json:"confirm_migration_rollback,omitempty"`
 }
 
 type deploymentImage struct {
@@ -32,11 +34,13 @@ type deploymentImage struct {
 }
 
 type deploymentInfo struct {
-	ID    int64           `json:"id"`
-	App   string          `json:"app"`
-	Kind  string          `json:"kind"`
-	State string          `json:"state"`
-	Image deploymentImage `json:"image"`
+	ID              int64           `json:"id"`
+	App             string          `json:"app"`
+	Kind            string          `json:"kind"`
+	State           string          `json:"state"`
+	Image           deploymentImage `json:"image"`
+	Migration       bool            `json:"migration"`
+	MigrationReason string          `json:"migration_reason"`
 }
 
 type blockCommitInfo struct {
@@ -56,10 +60,11 @@ type blockInfo struct {
 }
 
 type rollbackInfo struct {
-	Deployment deploymentInfo `json:"deployment"`
-	RolledBack deploymentInfo `json:"rolled_back"`
-	Block      *blockInfo     `json:"block"`
-	Cancelled  []int64        `json:"cancelled"`
+	Deployment deploymentInfo   `json:"deployment"`
+	RolledBack deploymentInfo   `json:"rolled_back"`
+	Block      *blockInfo       `json:"block"`
+	Cancelled  []int64          `json:"cancelled"`
+	Migrations []deploymentInfo `json:"migrations"`
 }
 
 func (b blockInfo) subject() string {
@@ -99,15 +104,18 @@ func writeIndentedJSON(out io.Writer, raw json.RawMessage) error {
 func newRollbackCommand(lookupEnv LookupEnv) *cobra.Command {
 	var server, reason, output string
 	var to int64
+	var confirmMigration bool
 	cmd := &cobra.Command{
-		Use:   "rollback <app> [--to <deployment-id>] [--reason <text>]",
+		Use:   "rollback <app> [--to <deployment-id>] [--reason <text>] [--confirm-migration-rollback]",
 		Short: "Roll an app back to its previous good version",
 		Long: "Roll an app back to its previous good version. doorstep queues a rollback deployment ahead of every other deploy, " +
 			"which re-pins the digest of the last successful deployment through the normal deploy path, cancels the deploy in flight, " +
 			"and blocks the version it replaces so it is not deployed again automatically. Use --to to pick an earlier successful deployment. " +
-			"Remove the block with doorstep unblock.",
+			"Remove the block with doorstep unblock. A rollback that would undo a release flagged as containing database migrations " +
+			"is refused until you confirm it with --confirm-migration-rollback, since the old version may not work with the migrated schema.",
 		Example: "  doorstep rollback blog\n" +
-			"  doorstep rollback blog --to 41 --reason \"checkout errors\"",
+			"  doorstep rollback blog --to 41 --reason \"checkout errors\"\n" +
+			"  doorstep rollback blog --to 41 --confirm-migration-rollback",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app := args[0]
@@ -117,7 +125,7 @@ func newRollbackCommand(lookupEnv LookupEnv) *cobra.Command {
 			if err := validateOutput(output); err != nil {
 				return err
 			}
-			body := rollbackBody{Reason: strings.TrimSpace(reason)}
+			body := rollbackBody{Reason: strings.TrimSpace(reason), ConfirmMigrationRollback: confirmMigration}
 			if cmd.Flags().Changed(flagTo) {
 				if to <= 0 {
 					return fmt.Errorf("--%s: must be a positive deployment id, got %d", flagTo, to)
@@ -146,6 +154,7 @@ func newRollbackCommand(lookupEnv LookupEnv) *cobra.Command {
 	addServerFlag(flags, &server)
 	flags.Int64Var(&to, flagTo, 0, "roll back to this successful deployment instead of the previous one")
 	flags.StringVar(&reason, flagReason, "", "why the version is rolled back; recorded on the block")
+	flags.BoolVar(&confirmMigration, flagConfirmMigrationRollback, false, "confirm a rollback across releases flagged as containing database migrations")
 	flags.StringVarP(&output, flagOutput, "o", outputTable, "output format: table or json")
 	return cmd
 }
@@ -162,6 +171,17 @@ func writeRollback(out io.Writer, app string, r rollbackInfo) error {
 			ids = append(ids, strconv.FormatInt(id, 10))
 		}
 		line += "; cancelled " + strings.Join(ids, ", ")
+	}
+	if len(r.Migrations) > 0 {
+		ids := make([]string, 0, len(r.Migrations))
+		for _, d := range r.Migrations {
+			ids = append(ids, strconv.FormatInt(d.ID, 10))
+		}
+		word := "deployment "
+		if len(ids) > 1 {
+			word = "deployments "
+		}
+		line += "; confirmed rollback across migrations in " + word + strings.Join(ids, ", ")
 	}
 	_, err := fmt.Fprintln(out, line)
 	return err

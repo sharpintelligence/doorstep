@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -47,6 +48,24 @@ func scheduleGate() Gate {
 			{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour), Name: "business hours", Timezone: "Europe/London"},
 			{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York"},
 		},
+	}
+}
+
+func backupGate() Gate {
+	return Gate{
+		Type:    GateBackup,
+		Name:    "backup",
+		Timeout: durPtr(30 * time.Minute),
+		When:    GateWhenMigration,
+		Webhook: &GateWebhook{URL: "https://backup.example.com/hooks/doorstep", SecretEnv: "BACKUP_SECRET"},
+	}
+}
+
+func withBackup(mutate func(*Gate)) func(*Catalog) {
+	return func(c *Catalog) {
+		g := backupGate()
+		mutate(&g)
+		c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
 	}
 }
 
@@ -849,6 +868,127 @@ func TestCatalogValidate(t *testing.T) {
 			name:    "schedule gate",
 			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, scheduleGate()) },
 			wantErr: nil,
+		},
+		{name: "backup gate", mutate: withBackup(func(*Gate) {})},
+		{name: "backup gate always for rollbacks too", mutate: withBackup(func(g *Gate) {
+			g.When = GateWhenAlways
+			g.ApplyToRollbacks = true
+			g.Webhook = &GateWebhook{URLFile: "/etc/doorstep/backup-url", SecretFile: "/etc/doorstep/backup-secret"}
+		})},
+		{name: "backup gate with url env and no secret", mutate: withBackup(func(g *Gate) {
+			g.Webhook = &GateWebhook{URLEnv: "BACKUP_URL"}
+		})},
+		{
+			name:    "backup gate needs a webhook",
+			mutate:  withBackup(func(g *Gate) { g.Webhook = nil }),
+			wantErr: []string{"gates.before[1].webhook: is required for type backup"},
+		},
+		{
+			name:    "backup gate needs exactly one url source",
+			mutate:  withBackup(func(g *Gate) { g.Webhook.URLEnv = "BACKUP_URL" }),
+			wantErr: []string{"gates.before[1].webhook.url, gates.before[1].webhook.url_env, gates.before[1].webhook.url_file: set exactly one"},
+		},
+		{
+			name:    "backup gate without a url source",
+			mutate:  withBackup(func(g *Gate) { g.Webhook.URL = "" }),
+			wantErr: []string{"webhook.url_file: set exactly one"},
+		},
+		{
+			name:    "backup gate url must be absolute http",
+			mutate:  withBackup(func(g *Gate) { g.Webhook.URL = "ftp://backup.example.com" }),
+			wantErr: []string{"gates.before[1].webhook.url: must use http or https"},
+		},
+		{
+			name:    "backup gate url must not carry a query",
+			mutate:  withBackup(func(g *Gate) { g.Webhook.URL = "https://backup.example.com/?token=x" }),
+			wantErr: []string{"gates.before[1].webhook.url: must not include a query string"},
+		},
+		{
+			name:    "backup gate at most one secret",
+			mutate:  withBackup(func(g *Gate) { g.Webhook.SecretFile = "/etc/doorstep/secret" }),
+			wantErr: []string{"gates.before[1].webhook.secret_env, gates.before[1].webhook.secret_file: set at most one"},
+		},
+		{
+			name: "backup gate bad secret sources",
+			mutate: withBackup(func(g *Gate) {
+				g.Webhook = &GateWebhook{URLEnv: "backup-url", SecretFile: "relative/secret"}
+			}),
+			wantErr: []string{"gates.before[1].webhook.url_env:", "gates.before[1].webhook.secret_file:"},
+		},
+		{
+			name:    "backup gate unknown when",
+			mutate:  withBackup(func(g *Gate) { g.When = "sometimes" }),
+			wantErr: []string{`gates.before[1].when: unknown value "sometimes" (want migration or always)`},
+		},
+		{
+			name:    "backup gate needs a timeout",
+			mutate:  withBackup(func(g *Gate) { g.Timeout = durPtr(0) }),
+			wantErr: []string{"gates.before[1].timeout: must be positive"},
+		},
+		{
+			name:    "backup gate rejects windows",
+			mutate:  withBackup(func(g *Gate) { g.Timezone = "UTC" }),
+			wantErr: []string{"gates.before[1].timezone: not allowed for type backup"},
+		},
+		{
+			name: "backup gate after deploy",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, backupGate())
+			},
+			wantErr: []string{"gates.after[1].type: backup gates run only in gates.before"},
+		},
+		{
+			name: "other gates reject when and webhook",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before[0].When = GateWhenAlways
+				c.Apps[0].Gates.Before[0].Webhook = &GateWebhook{URL: "https://example.com"}
+			},
+			wantErr: []string{"gates.before[0].when: not allowed for type checks", "gates.before[0].webhook: not allowed for type checks"},
+		},
+		{
+			name: "migrations with labels and trailer",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Migrations = &Migrations{Labels: []string{"db-migration", "schema change"}}
+			},
+		},
+		{
+			name:   "migrations with trailer only",
+			mutate: func(c *Catalog) { c.Apps[0].Migrations = &Migrations{} },
+		},
+		{
+			name: "migrations with labels only",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Migrations = &Migrations{Labels: []string{"db-migration"}, Trailer: new(false)}
+			},
+		},
+		{
+			name:    "migrations with nothing to match",
+			mutate:  func(c *Catalog) { c.Apps[0].Migrations = &Migrations{Trailer: new(false)} },
+			wantErr: []string{"apps[0] (blog): migrations: set at least one label or enable trailer"},
+		},
+		{
+			name: "migrations bad labels",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Migrations = &Migrations{Labels: []string{"", " padded", strings.Repeat("x", MaxMigrationLabelLength+1), "bad\tlabel", "DB-Migration", "db-migration"}}
+			},
+			wantErr: []string{
+				"migrations.labels[0]: must not be empty",
+				"migrations.labels[1]: must not start or end with whitespace",
+				"migrations.labels[2]: must be at most 50 characters",
+				"migrations.labels[3]: must not contain control characters",
+				"migrations.labels[5]: duplicate of migrations.labels[4]",
+			},
+		},
+		{
+			name: "migrations too many labels",
+			mutate: func(c *Catalog) {
+				labels := make([]string, MaxMigrationLabels+1)
+				for i := range labels {
+					labels[i] = fmt.Sprintf("label-%d", i)
+				}
+				c.Apps[0].Migrations = &Migrations{Labels: labels}
+			},
+			wantErr: []string{"migrations.labels: has 11 labels, more than the limit of 10"},
 		},
 		{
 			name: "schedule gate after deploy",

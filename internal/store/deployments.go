@@ -15,12 +15,14 @@ INSERT INTO deployments (
     app_id, kind, state, source, requested_by,
     source_repository, commit_sha, image_repository, image_tag,
     image_digest, previous_digest, pin_commit_sha,
-    parent_id, rollback_of_id, failure_reason
+    parent_id, rollback_of_id, failure_reason,
+    migration, migration_reason
 ) VALUES (
     $1, $2, $3, $4, $5,
     $6, $7, $8, $9,
     NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''),
-    $13, $14, $15
+    $13, $14, $15,
+    $16, $17
 )
 RETURNING id`
 
@@ -37,6 +39,7 @@ const deploymentColumns = `
     COALESCE(d.image_digest, ''), COALESCE(d.previous_digest, ''), COALESCE(d.pin_commit_sha, ''),
     COALESCE(d.gitops_repository, ''), COALESCE(d.argocd_revision, ''),
     d.parent_id, d.rollback_of_id, d.superseded_by_id, d.failure_reason,
+    d.migration, d.migration_reason,
     d.created_at, d.updated_at, d.started_at, d.finished_at`
 
 const deploymentTables = `
@@ -54,6 +57,7 @@ func deploymentFields(d *core.Deployment) []any {
 		&d.Digest, &d.PreviousDigest, &d.PinCommitSHA,
 		&d.GitOpsRepository, &d.ArgoCDRevision,
 		&d.ParentID, &d.RollbackOfID, &d.SupersededByID, &d.FailureReason,
+		&d.Migration, &d.MigrationReason,
 		&d.CreatedAt, &d.UpdatedAt, &d.StartedAt, &d.FinishedAt,
 	}
 }
@@ -130,6 +134,7 @@ func (s *Store) CreateDeployment(ctx context.Context, d core.Deployment, priorit
 			d.Commit.Repository, d.Commit.SHA, d.Image.Repository, d.Image.Tag,
 			d.Digest, d.PreviousDigest, d.PinCommitSHA,
 			d.ParentID, d.RollbackOfID, d.FailureReason,
+			d.Migration, d.MigrationReason,
 		).Scan(&id)
 		if err != nil {
 			return fmt.Errorf("insert deployment: %w", err)

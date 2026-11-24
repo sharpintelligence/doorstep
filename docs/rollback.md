@@ -9,6 +9,7 @@ In the MVP a rollback is requested from the API or the CLI. The UI button comes 
 ```sh
 doorstep rollback blog
 doorstep rollback blog --to 41 --reason "checkout errors"
+doorstep rollback blog --to 41 --confirm-migration-rollback
 ```
 
 One request does all of the following in one Postgres transaction, under the app's row lock (the lock intake and the queue use for the same app), so it either happens completely or not at all:
@@ -19,10 +20,11 @@ One request does all of the following in one Postgres transaction, under the app
    - By default: the last `succeeded` deployment of the app (latest `finished_at`) that has a digest, whose digest differs from the current one and is not blocked. Successful rollbacks count, since they are what ran.
    - `--to <deployment-id>` (API `to_deployment_id`), or `to_digest` (API only, the newest succeeded deployment with that digest): the deployment must belong to the same app, be `succeeded`, have a digest, differ from the current digest and not be blocked. A blocked target fails with `409 blocked`; anything else fails with `400 invalid_request`.
    - Postgres history picks the target because only history knows a digest passed its gates; git still decides what is actually pinned when the rollback runs.
+   - **Check for migrations.** When the rollback would cross a release flagged as containing database migrations and the request does not confirm it, the request fails with `409 migration_confirmation_required` and writes nothing: no cancel, no block, no audit row. See [Migration-aware releases](#migration-aware-releases).
 4. **Cancel what the rollback replaces.** A current deployment that is still in flight is moved to `cancelled` with a compare-and-set. Queued deploys of the blocked commit are cancelled too. Other queued deploys (newer merges) are left alone and run after the rollback; to stop them as well, freeze the app with `doorstep lock`.
-5. **Queue the rollback** at priority `rollback` (200), ahead of everything else for the app: kind `rollback`, `rollback_of_id` set to the current deployment, source `api`, `requested_by` the caller, the commit and image copied from the target, and the digest preset to the target's digest. The engine therefore never resolves a tag for a rollback and pins exactly the previous digest even if the tag moved. The rollback is always queued, even when the target digest is already pinned: the pin is then a no-op, and the rollback still waits for Argo CD to report synced and healthy and leaves a history row.
+5. **Queue the rollback** at priority `rollback` (200), ahead of everything else for the app: kind `rollback`, `rollback_of_id` set to the current deployment, source `api`, `requested_by` the caller, the commit and image copied from the target, and the digest preset to the target's digest. A confirmed rollback across migrations is itself flagged (`migration: true`, reason `rolls back across deployments 44, 46`), so the history shows the risk and a `backup` gate with `apply_to_rollbacks` runs before it. The engine therefore never resolves a tag for a rollback and pins exactly the previous digest even if the tag moved. The rollback is always queued, even when the target digest is already pinned: the pin is then a no-op, and the rollback still waits for Argo CD to report synced and healthy and leaves a history row.
 6. **Block the replaced version** (see below) with the reason given, or `rolled back by <actor>`.
-7. **Audit** a `rollback.request` row naming the rollback deployment, with `rolled_back_deployment_id`, `to_deployment_id`, `digest`, `blocked_digest`, `blocked_commit`, `block_id`, `reason` and `cancelled` in its detail.
+7. **Audit** a `rollback.request` row naming the rollback deployment, with `rolled_back_deployment_id`, `to_deployment_id`, `digest`, `blocked_digest`, `blocked_commit`, `block_id`, `reason` and `cancelled` in its detail, plus `migration_confirmed: true` and `migration_deployment_ids` when the rollback crossed confirmed migrations.
 
 If another writer changes one of the deployments between reading and cancelling it, the whole transaction is retried, at most three times; after that the request fails with `503 contended` and `Retry-After: 1`.
 
@@ -68,6 +70,76 @@ Postgres is the operational source of truth: a block or unblock takes effect in 
 
 The lag is harmless for unblocks: until the unblock reaches git, git still says "blocked", which is the safe side. A block that never reaches git (because the app is never pinned again) exists only in Postgres; restoring doorstep from git alone would lose it. An explicit flush with an empty commit and a command that rebuilds blocks from the git history are possible follow-ups.
 
+## Migration-aware releases
+
+A release can contain database migrations. Rolling such a release back puts old code on a migrated schema, which may not work, so doorstep makes that an explicit decision. It is opt-in per app ([configuration.md](configuration.md#migrations)); the design is recorded in [ADR 0015](decisions/0015-migration-aware-releases.md).
+
+### Detection
+
+```yaml
+apps:
+  - name: blog
+    migrations:
+      labels: [db-migration]
+      trailer: true
+```
+
+A commit counts as a migration when
+
+- a pull request returned by GitHub's `commits/{sha}/pulls` for it is **merged**, has the app's branch as its base, and carries one of `labels` (compared case-insensitively). Open pull requests that merely contain the commit, and pull requests into other branches, do not count; or
+- `trailer` is on (the default when the block exists) and its message has a line `Doorstep-Migration: true` or `Doorstep-Migration: yes` anywhere, case-insensitively. Leading list markers and trailing whitespace are tolerated, so the line survives squash-merge message rewriting.
+
+The flag describes the **whole release**, not just its head commit. Intake drops stale pushes and supersedes commits that never went green, so a migration merged seconds before another pull request may never get a deployment of its own; checking only the head would miss it exactly when merges are busy. Intake therefore inspects every commit between the app's previously enqueued deploy commit (its newest `deploy` row) and the new head with one compare call (at most 50 commits), plus one `commits/{sha}/pulls` call per commit when labels are configured:
+
+| Situation | What is inspected |
+| --- | --- |
+| no earlier deploy, or the head is the earlier commit | the head commit only |
+| compare reports `behind` or `identical`, or answers `404` (force push, deleted history) | the head commit only |
+| more than 50 commits | nothing: the release is flagged conservatively with `52 commits since the last release, too many to inspect` |
+| otherwise | every commit in the range |
+
+Detection runs in intake when a commit's checks become `success`, the last moment before it is queued, outside the Postgres transaction so rollback requests never wait on GitHub. Reads are shared within one evaluation pass. If GitHub cannot be read, the commit is **not** settled or queued: intake logs `reading migration flags failed; not enqueued` and the next check event or poll (at most a minute later) tries again. An operator who opted in wants the guard to be reliable, so a deploy with unknown migration status never slips through.
+
+The result is stored on the deployment: `migration` and `migration_reason` (at most 200 characters), for example `label db-migration on #12 (abc1234); trailer Doorstep-Migration in def5678`. The API, the history and the backup gate read it from there. Deployments that were batched away (`superseded`) keep their flag, so batching loses nothing. Deploys requested through other paths are not inspected and are unflagged.
+
+### What counts as crossing
+
+A rollback from the current deployment to a target **crosses** a migration when a `deploy` row of the app
+
+- is flagged,
+- was created after the target's commit was first enqueued (the smallest id of the `deploy` rows with that commit),
+- is not of the target's commit, and
+- is no newer than the current deployment.
+
+`(*store.Store).MigrationsBetween` answers this in one query inside the rollback transaction, at most 20 rows, oldest first. Using "first enqueued" ages commits the way the queue does, which keeps the answer right through batching, earlier rollbacks and re-enqueues. For example:
+
+1. v1 deploys; v2 (flagged) deploys; rolling back to v1 crosses v2.
+2. After that rollback (to v1), v3 deploys. Rolling back to v1 again still crosses v2, because v2 is newer than v1's first deploy.
+3. Rolling back **to** v2 crosses nothing: v2's migration is what the schema already has. Rolling forward crosses nothing either. Rollback rows are never counted.
+
+### Confirmation
+
+Without confirmation a crossing rollback fails with `409 migration_confirmation_required`:
+
+```json
+{
+  "error": {"code": "migration_confirmation_required", "message": "rolling back to deployment 41 crosses database migrations in deployment 44 (label db-migration on #12 (abc1234)); the old version may not work with the migrated schema. Confirm with confirm_migration_rollback=true (API) or --confirm-migration-rollback (CLI)"},
+  "to": {"id": 41, "...": "..."},
+  "migrations": [{"id": 44, "migration": true, "migration_reason": "label db-migration on #12 (abc1234)", "...": "..."}]
+}
+```
+
+Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollback blog --confirm-migration-rollback`. The `deployer` role is enough. The check runs after the target is chosen, so `rollback_in_progress`, `no_rollback_target` and `blocked` take precedence, and it is part of the same transaction as the rest of the request. A confirmed rollback is stored with `migration: true` and audits `migration_confirmed` and `migration_deployment_ids`.
+
+### Automatic rollbacks
+
+An automatic rollback after a failed gate must never cross a migration unattended. Before queuing one, the engine calls `MigrationsBetween` (or `(*rollback.Service).MigrationsCrossed`) with the target it picked and the failing deploy; when the answer is not empty it does not roll back and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, and notifies as for any failure. A person then decides.
+
+### Backup before deploy
+
+A `backup` gate in `gates.before` asks an operator-owned webhook to back the database up before a flagged release is pinned, and holds the deploy until it reports success ([gates.md](gates.md#backup)). It runs for flagged deploys by default (`when: migration`), for every deploy with `when: always`, and for rollbacks only with `apply_to_rollbacks: true`.
+
+## What the engine must do
 ## What the engine does
 
 The [engine](engine.md) executes queued rollbacks like deploys and calls the `BlockList` port, which `*rollback.Service` implements ([architecture.md](architecture.md#engine-ports)):
@@ -75,6 +147,7 @@ The [engine](engine.md) executes queued rollbacks like deploys and calls the `Bl
 - For kind `deploy`, it calls `Blocked(target, commit, digest)` right after resolving the digest; when it reports a block, it fails the deployment with a reason that names the block.
 - Before `Pin`, it calls `PendingTrailers(target)` and passes them as `gitops.Request.Blocks` and `Unblocks`; after a `Pin` whose result has `Changed`, it calls `MarkMirrored(target, trailers, result.Commit)`. A `MarkMirrored` error is logged at `warn` and the trailers ride on the next pin commit again.
 - For kind `rollback`, it uses the preset digest without resolving, the `checks`, `lock` and `soak` gates (and `schedule` without `apply_to_rollbacks`) record `skipped` ([gates.md](gates.md#rollbacks)), and it still waits for Argo CD to report synced and healthy.
+- Before queuing an automatic rollback after a failed gate, it calls `MigrationsBetween(target, to, failing)` on the transaction-bound store (`to` is the `LastSuccessfulDeployment` it picked). When that returns any deployment, it queues nothing and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, then notifies.
 - It stops as soon as a transition returns `core.ErrStateConflict` or the context is cancelled.
 - `deploy.queued` for the rollback and `deploy.cancelled` for the deployments the request cancelled are announced by `cli` right after the request commits, through `Engine.Queued` and `Engine.Cancelled`; `Cancelled` also closes the pull request of a cancelled deployment that had started pinning.
 
@@ -93,7 +166,7 @@ All endpoints are under `/api/v1/apps/{app}`, use the [error envelope](api.md#co
 Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback, whether the request sends `Content-Length: 0` or a chunked body with no bytes; a non-empty body must be `application/json`):
 
 ```json
-{"to_deployment_id": 41, "reason": "checkout errors"}
+{"to_deployment_id": 41, "reason": "checkout errors", "confirm_migration_rollback": true}
 ```
 
 | Field | Type | Notes |
@@ -101,6 +174,7 @@ Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback, 
 | `to_deployment_id` | integer | roll back to this succeeded deployment |
 | `to_digest` | string | roll back to the newest succeeded deployment with this digest; at most one of the two |
 | `reason` | string | optional, at most 500 characters, no control characters; recorded on the block |
+| `confirm_migration_rollback` | boolean | confirms a rollback across releases flagged as containing database migrations; ignored when nothing is crossed |
 
 `201 Created` with `Location: /api/v1/deployments/{id}`:
 
@@ -109,11 +183,12 @@ Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback, 
   "deployment": {"id": 43, "kind": "rollback", "state": "queued", "rollback_of_id": 42, "...": "..."},
   "rolled_back": {"id": 42, "kind": "deploy", "state": "cancelled", "...": "..."},
   "block": {"id": 7, "app": "blog", "digest": "sha256:...", "commit": {"repository": "example-user/blog", "sha": "..."}, "reason": "checkout errors", "created_by": "user:oidc:3f2a", "deployment_id": 42, "rollback_id": 43, "created_at": "2026-11-24T12:00:00Z", "recorded_in_git": false},
-  "cancelled": [42]
+  "cancelled": [42],
+  "migrations": []
 }
 ```
 
-`deployment` and `rolled_back` use the [deployment fields](api.md#deployment-fields). `block` is `null` when nothing was blocked.
+`deployment` and `rolled_back` use the [deployment fields](api.md#deployment-fields). `block` is `null` when nothing was blocked. `migrations` lists the flagged deployments a confirmed rollback crossed, and is empty otherwise.
 
 | Status | Code | When |
 | --- | --- | --- |
@@ -122,6 +197,7 @@ Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback, 
 | 409 | `no_rollback_target` | nothing has been deployed, or there is no earlier successful, unblocked digest |
 | 409 | `rollback_in_progress` | a rollback of the app is queued or in flight; the body also has `deployment` |
 | 409 | `blocked` | the explicit target's digest is blocked; the body also has `block` |
+| 409 | `migration_confirmation_required` | the rollback crosses flagged releases and `confirm_migration_rollback` is not `true`; the body also has `to` and `migrations` |
 | 503 | `contended` | deployments kept changing during the request; retry after `Retry-After` |
 
 ### `GET /api/v1/apps/{app}/blocks`
@@ -140,7 +216,7 @@ Role `deployer`. `ref` is a `sha256:` digest or a 40-character lowercase commit 
 
 | Command | Does |
 | --- | --- |
-| `doorstep rollback <app> [--to <deployment-id>] [--reason <text>] [-o table\|json]` | requests a rollback and prints `rollback 43 queued for blog: ghcr.io/example-user/blog@sha256:1111aaaa2222 (reverting deployment 42); blocked sha256:... (commit ...); cancelled 42` |
+| `doorstep rollback <app> [--to <deployment-id>] [--reason <text>] [--confirm-migration-rollback] [-o table\|json]` | requests a rollback and prints `rollback 43 queued for blog: ghcr.io/example-user/blog@sha256:1111aaaa2222 (reverting deployment 42); blocked sha256:... (commit ...); cancelled 42`, plus `; confirmed rollback across migrations in deployment 44` after a confirmed crossing |
 | `doorstep block <app> <digest\|commit> --reason <text>` | blocks a version by hand |
 | `doorstep unblock <app> <digest\|commit>` | clears the matching blocks and prints each one |
 | `doorstep blocks <app> [-o table\|json]` | lists the active blocks |

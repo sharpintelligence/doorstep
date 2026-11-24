@@ -14,12 +14,14 @@ import (
 var zeroSHA = strings.Repeat("0", 40)
 
 type Options struct {
-	Apps     []App
-	Commits  Commits
-	Checks   CheckSource
-	Branches Branches
-	Logger   *slog.Logger
-	Now      func() time.Time
+	Apps       []App
+	Commits    Commits
+	Checks     CheckSource
+	Branches   Branches
+	Migrations MigrationSource
+	Baselines  Baselines
+	Logger     *slog.Logger
+	Now        func() time.Time
 }
 
 type Push struct {
@@ -37,15 +39,19 @@ type Result struct {
 }
 
 type Service struct {
-	apps     []App
-	targets  map[core.Target]App
-	followed []core.FollowedBranch
-	commits  Commits
-	checks   CheckSource
-	branches Branches
-	logger   *slog.Logger
-	now      func() time.Time
+	apps       []App
+	targets    map[core.Target]App
+	followed   []core.FollowedBranch
+	commits    Commits
+	checks     CheckSource
+	branches   Branches
+	migrations MigrationSource
+	baselines  Baselines
+	logger     *slog.Logger
+	now        func() time.Time
 }
+
+var errMigrationsUnread = errors.New("migration flags were not read for this evaluation")
 
 func New(opts Options) (*Service, error) {
 	if opts.Commits == nil {
@@ -58,12 +64,14 @@ func New(opts Options) (*Service, error) {
 		return nil, errors.New("intake: branch source is required")
 	}
 	s := &Service{
-		targets:  make(map[core.Target]App, len(opts.Apps)),
-		commits:  opts.Commits,
-		checks:   opts.Checks,
-		branches: opts.Branches,
-		logger:   opts.Logger,
-		now:      opts.Now,
+		targets:    make(map[core.Target]App, len(opts.Apps)),
+		commits:    opts.Commits,
+		checks:     opts.Checks,
+		branches:   opts.Branches,
+		migrations: opts.Migrations,
+		baselines:  opts.Baselines,
+		logger:     opts.Logger,
+		now:        opts.Now,
 	}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
@@ -82,6 +90,13 @@ func New(opts Options) (*Service, error) {
 			continue
 		}
 		app.RequiredChecks = append([]string(nil), app.RequiredChecks...)
+		if app.Migrations != nil {
+			if opts.Migrations == nil || opts.Baselines == nil {
+				errs = append(errs, fmt.Errorf("apps[%d] (%s): migration detection needs a migration source and baselines", i, app.Target))
+				continue
+			}
+			app.Migrations = app.Migrations.clone()
+		}
 		s.targets[app.Target] = app
 		s.apps = append(s.apps, app)
 		s.followed = append(s.followed, core.FollowedBranch{Target: app.Target, Repository: app.Repository, Branch: app.Branch})
@@ -252,6 +267,7 @@ func (s *Service) evaluate(ctx context.Context, commits []core.TrackedCommit) ([
 	}
 
 	reads := map[snapshotKey]readSnapshot{}
+	migrations := newMigrationReader(s.migrations)
 	var errs []error
 	results := make([]Result, 0, len(commits))
 	for _, c := range commits {
@@ -272,7 +288,7 @@ func (s *Service) evaluate(ctx context.Context, commits []core.TrackedCommit) ([
 			results = append(results, Result{Commit: c})
 			continue
 		}
-		result, err := s.settle(ctx, c, read)
+		result, err := s.settle(ctx, c, read, migrations)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Target, err))
 		}
@@ -295,10 +311,23 @@ func (s *Service) read(ctx context.Context, commit core.Commit, q *snapshotQuery
 	return readSnapshot{snapshot: snapshot, readAt: readAt}
 }
 
-func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSnapshot) (Result, error) {
+func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSnapshot, migrations *migrationReader) (Result, error) {
 	app := s.targets[c.Target]
 	state, checks := Evaluate(app.RequiredChecks, read.snapshot)
 	eval := core.ChecksEvaluation{State: state, Checks: checks, ReadAt: read.readAt}
+	log := s.logger.With("app", c.Target.String(), "repository", c.Commit.Repository, "sha", c.Commit.SHA, "state", string(state))
+	var (
+		flag     MigrationFlag
+		detected bool
+	)
+	if state == core.ChecksSuccess && app.Migrations != nil {
+		var err error
+		if flag, err = s.migration(ctx, migrations, app, c.Commit); err != nil {
+			log.WarnContext(ctx, "reading migration flags failed; not enqueued", "error", err)
+			return Result{Commit: c}, fmt.Errorf("detect migrations of %s: %w", c.Commit.SHA, err)
+		}
+		detected = true
+	}
 	var blocked *core.Block
 	settled, enqueued, err := s.commits.Settle(ctx, c.ID, eval, func(ctx context.Context, q Queue, b Blocks) (core.DeploymentID, error) {
 		blocked = nil
@@ -310,15 +339,20 @@ func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSna
 			blocked = &block
 			return 0, &core.BlockedError{Block: block}
 		}
-		d, err := q.Enqueue(ctx, app.deployment(c))
+		if app.Migrations != nil && !detected {
+			return 0, errMigrationsUnread
+		}
+		d, err := q.Enqueue(ctx, app.deployment(c, flag))
 		return d.ID, err
 	})
-	log := s.logger.With("app", c.Target.String(), "repository", c.Commit.Repository, "sha", c.Commit.SHA, "state", string(state))
 	if err != nil {
 		log.WarnContext(ctx, "settling commit checks failed", "error", err)
 		return Result{Commit: c}, fmt.Errorf("settle %s: %w", c.Commit.SHA, err)
 	}
 	switch {
+	case enqueued && flag.Flagged:
+		log.InfoContext(ctx, "evaluated commit checks", "enqueued", true, "deployment_id", int64(*settled.DeploymentID),
+			"migration", true, "migration_reason", flag.Reason)
 	case enqueued:
 		log.InfoContext(ctx, "evaluated commit checks", "enqueued", true, "deployment_id", int64(*settled.DeploymentID))
 	case blocked != nil:

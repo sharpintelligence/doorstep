@@ -55,6 +55,7 @@ func TestMigrateFreshSchema(t *testing.T) {
 		"00001_initial_schema.sql", "00002_queue_notify.sql", "00003_lock_scope_and_events.sql", "00004_deployment_lineage.sql",
 		"00005_tracked_commits.sql", "00006_gate_result_phase.sql", "00007_auth.sql", "00008_blocks.sql", "00009_webhook_deliveries.sql",
 		"00010_gate_reports.sql",
+		"00011_deployment_migration.sql",
 	}
 	for i, name := range wantNames {
 		if i >= len(applied) || applied[i].Version != int64(i+1) || applied[i].Name != name {

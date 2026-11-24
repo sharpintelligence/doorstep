@@ -45,6 +45,22 @@ func TestRollbackCommand(t *testing.T) {
 			wantStdout: "rollback 9 queued for blog: ghcr.io/acme/blog@sha256:bbbbbbbbbbbb (reverting deployment 7)\n",
 		},
 		{
+			name: "confirmed migration rollback",
+			args: []string{"rollback", "blog", "--to", "41", "--confirm-migration-rollback"},
+			body: `{"deployment":{"id":9,"migration":true,"migration_reason":"rolls back across deployments 44, 46","image":{"repository":"ghcr.io/acme/blog","digest":"` + cliGoodDigest +
+				`"}},"rolled_back":{"id":46},"block":null,"cancelled":[],"migrations":[{"id":44,"migration":true},{"id":46,"migration":true}]}`,
+			wantBody: `{"to_deployment_id":41,"confirm_migration_rollback":true}`,
+			wantStdout: "rollback 9 queued for blog: ghcr.io/acme/blog@sha256:bbbbbbbbbbbb (reverting deployment 46); " +
+				"confirmed rollback across migrations in deployments 44, 46\n",
+		},
+		{
+			name:       "one crossed migration",
+			args:       []string{"rollback", "blog", "--confirm-migration-rollback"},
+			body:       `{"deployment":{"id":9,"image":{"repository":"ghcr.io/acme/blog","digest":"` + cliGoodDigest + `"}},"rolled_back":{"id":44},"cancelled":[],"migrations":[{"id":44}]}`,
+			wantBody:   `{"confirm_migration_rollback":true}`,
+			wantStdout: "rollback 9 queued for blog: ghcr.io/acme/blog@sha256:bbbbbbbbbbbb (reverting deployment 44); confirmed rollback across migrations in deployment 44\n",
+		},
+		{
 			name:       "json output",
 			args:       []string{"rollback", "blog", "-o", "json"},
 			body:       `{"deployment":{"id":9},"cancelled":[]}`,
@@ -106,6 +122,15 @@ func TestRollbackCommandErrors(t *testing.T) {
 			status:       http.StatusConflict,
 			body:         `{"error":{"code":"rollback_in_progress","message":"rollback 9 of blog/default is already queued"},"deployment":{"id":9}}`,
 			wantStderr:   "doorstep: rollback 9 of blog/default is already queued",
+			wantRequests: 1,
+		},
+		{
+			name:   "migration confirmation required",
+			args:   []string{"rollback", "blog"},
+			status: http.StatusConflict,
+			body: `{"error":{"code":"migration_confirmation_required","message":"rolling back to deployment 41 crosses database migrations in deployment 44 (trailer Doorstep-Migration in 4444444); ` +
+				`the old version may not work with the migrated schema. Confirm with confirm_migration_rollback=true (API) or --confirm-migration-rollback (CLI)"},"to":{"id":41},"migrations":[{"id":44}]}`,
+			wantStderr:   "doorstep: rolling back to deployment 41 crosses database migrations in deployment 44",
 			wantRequests: 1,
 		},
 		{

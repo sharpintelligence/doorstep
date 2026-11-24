@@ -6,6 +6,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
@@ -260,6 +262,7 @@ func validateApp(r reporter, a App, notifications map[string]bool, servers []str
 	}
 
 	validateGates(r, a.Gates, servers)
+	validateMigrations(r, a.Migrations)
 
 	seen := make(map[string]bool, len(a.Notify))
 	for i, name := range a.Notify {
@@ -367,6 +370,11 @@ func validateGates(r reporter, g Gates, servers []string) {
 			} else if gate.Reporters != nil {
 				r.addf(field+".reporters", "not allowed for type %s", gate.Type)
 			}
+			if spec.webhook {
+				validateWebhookGate(r, field, gate)
+			} else {
+				forbidWebhookFields(r, field, gate)
+			}
 		}
 	}
 }
@@ -403,4 +411,86 @@ func validateReporterActor(actor string) error {
 		return fmt.Errorf("%q must be token:<name> or user:<provider>:<subject>", actor)
 	}
 	return core.Actor{Kind: core.ActorKind(kind), ID: id}.Validate()
+}
+
+func validateWebhookGate(r reporter, gateField string, g Gate) {
+	switch g.When {
+	case GateWhenMigration, GateWhenAlways:
+	default:
+		r.addf(gateField+".when", "unknown value %q (want %s or %s)", g.When, GateWhenMigration, GateWhenAlways)
+	}
+	if g.Webhook == nil {
+		r.addf(gateField+".webhook", "is required for type %s", g.Type)
+		return
+	}
+	w := *g.Webhook
+	prefix := gateField + ".webhook."
+	exactlyOne(r, []field{{prefix + "url", w.URL}, {prefix + "url_env", w.URLEnv}, {prefix + "url_file", w.URLFile}})
+	if w.URL != "" {
+		r.check(prefix+"url", validateURL(w.URL, "url_env or url_file"))
+	}
+	if w.SecretEnv != "" && w.SecretFile != "" {
+		r.addf(prefix+"secret_env, "+prefix+"secret_file", "set at most one")
+	}
+	for _, f := range []field{{prefix + "url_env", w.URLEnv}, {prefix + "secret_env", w.SecretEnv}} {
+		if f.value != "" {
+			r.check(f.name, validateEnvName(f.value))
+		}
+	}
+	for _, f := range []field{{prefix + "url_file", w.URLFile}, {prefix + "secret_file", w.SecretFile}} {
+		if f.value != "" {
+			r.check(f.name, validateSecretFile(f.value))
+		}
+	}
+}
+
+func forbidWebhookFields(r reporter, field string, g Gate) {
+	if g.When != "" {
+		r.addf(field+".when", "not allowed for type %s", g.Type)
+	}
+	if g.Webhook != nil {
+		r.addf(field+".webhook", "not allowed for type %s", g.Type)
+	}
+}
+
+func validateMigrations(r reporter, m *Migrations) {
+	if m == nil {
+		return
+	}
+	if len(m.Labels) == 0 && !m.TrailerEnabled() {
+		r.addf("migrations", "set at least one label or enable trailer")
+	}
+	if len(m.Labels) > MaxMigrationLabels {
+		r.addf("migrations.labels", "has %d labels, more than the limit of %d", len(m.Labels), MaxMigrationLabels)
+	}
+	seen := make(map[string]int, len(m.Labels))
+	for i, label := range m.Labels {
+		field := fmt.Sprintf("migrations.labels[%d]", i)
+		if err := validateLabel(label); err != nil {
+			r.check(field, err)
+			continue
+		}
+		key := strings.ToLower(label)
+		if first, dup := seen[key]; dup {
+			r.addf(field, "duplicate of migrations.labels[%d] (labels match case-insensitively)", first)
+			continue
+		}
+		seen[key] = i
+	}
+}
+
+func validateLabel(label string) error {
+	switch {
+	case strings.TrimSpace(label) == "":
+		return errors.New("must not be empty")
+	case strings.TrimSpace(label) != label:
+		return errors.New("must not start or end with whitespace")
+	case !utf8.ValidString(label):
+		return errors.New("must be valid UTF-8")
+	case utf8.RuneCountInString(label) > MaxMigrationLabelLength:
+		return fmt.Errorf("must be at most %d characters", MaxMigrationLabelLength)
+	case strings.ContainsFunc(label, unicode.IsControl):
+		return errors.New("must not contain control characters")
+	}
+	return nil
 }

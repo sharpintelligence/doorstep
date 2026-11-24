@@ -60,6 +60,8 @@ type Deployment struct {
 	RollbackOfID     *DeploymentID
 	SupersededByID   *DeploymentID
 	FailureReason    string
+	Migration        bool
+	MigrationReason  string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	StartedAt        *time.Time
@@ -86,6 +88,7 @@ func (d Deployment) Validate() error {
 	if d.PinCommitSHA != "" {
 		errs = append(errs, prefixError("pin commit", ValidateCommitSHA(d.PinCommitSHA)))
 	}
+	errs = append(errs, validateMigration(d.Migration, d.MigrationReason))
 	switch d.Kind {
 	case KindRollback:
 		if d.RollbackOfID == nil {
