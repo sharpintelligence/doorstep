@@ -16,9 +16,15 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
 
   | Status | Code | When |
   | --- | --- | --- |
+  | 400 | `invalid_request` | malformed or invalid request body |
+  | 401 | `unauthorized` | lock endpoints without valid credentials |
   | 404 | `not_found` | unknown resource or unknown API path |
   | 405 | `method_not_allowed` | wrong method; the `Allow` header lists the right ones |
+  | 409 | `locked` | the app or the global scope is already frozen |
+  | 415 | `unsupported_media_type` | a request body that is not `application/json` |
   | 500 | `internal` | anything else; details are logged, never returned |
+
+The lock endpoints (`/api/v1/apps/{app}/lock`, `/api/v1/lock`, `/api/v1/locks`) are documented in [locks.md](locks.md#api).
 
 ## `GET /api/v1/apps/{app}/queue`
 

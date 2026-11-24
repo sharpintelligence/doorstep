@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -106,6 +107,28 @@ func TestTarget(t *testing.T) {
 	}
 }
 
+func TestLockScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		lock Lock
+		want string
+	}{
+		{name: "app", lock: Lock{Target: Target{App: "web", Environment: DefaultEnvironment}}, want: "web"},
+		{name: "global", lock: Lock{Global: true}, want: GlobalScope},
+		{name: "global ignores target", lock: Lock{Global: true, Target: Target{App: "web"}}, want: GlobalScope},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.lock.Scope(); got != tt.want {
+				t.Errorf("Scope() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestImageRef(t *testing.T) {
 	t.Parallel()
 
@@ -146,6 +169,7 @@ func TestEnumValues(t *testing.T) {
 		{name: "lock kind", values: stringsOf(LockKinds()), valid: func(s string) bool { return LockKind(s).Valid() }, invalid: []string{"", "manual"}},
 		{name: "gate status", values: stringsOf(GateStatuses()), valid: func(s string) bool { return GateStatus(s).Valid() }, invalid: []string{"", "running"}},
 		{name: "event type", values: stringsOf(EventTypes()), valid: func(s string) bool { return EventType(s).Valid() }, invalid: []string{"", "comment"}},
+		{name: "lock action", values: stringsOf(LockActions()), valid: func(s string) bool { return LockAction(s).Valid() }, invalid: []string{"", "Locked", "stolen"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,5 +273,46 @@ func assertError(t *testing.T, err error, contains []string, is error) {
 	}
 	if is != nil && !errors.Is(err, is) {
 		t.Errorf("error %v does not wrap %v", err, is)
+	}
+}
+
+func TestLockHeldError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		lock Lock
+		want string
+	}{
+		{name: "app", lock: Lock{Target: Target{App: "web", Environment: DefaultEnvironment}, Owner: "alice", Reason: "migration"}, want: "web is already locked by alice: migration"},
+		{name: "global", lock: Lock{Global: true, Owner: "bob", Reason: "holiday"}, want: "global is already locked by bob: holiday"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var err error = &LockHeldError{Lock: tt.lock}
+			if err.Error() != tt.want {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.want)
+			}
+			if !errors.Is(err, ErrLockHeld) {
+				t.Errorf("%v does not wrap ErrLockHeld", err)
+			}
+			held, ok := errors.AsType[*LockHeldError](fmt.Errorf("wrapped: %w", err))
+			if !ok || held.Lock.Owner != tt.lock.Owner {
+				t.Errorf("AsType = %+v, %v", held, ok)
+			}
+		})
+	}
+}
+
+func TestLockRequestScope(t *testing.T) {
+	t.Parallel()
+
+	target := Target{App: "web", Environment: DefaultEnvironment}
+	if got := (LockRequest{Target: &target}).Scope(); got != "web" {
+		t.Errorf("app Scope() = %q", got)
+	}
+	if got := (LockRequest{}).Scope(); got != GlobalScope {
+		t.Errorf("global Scope() = %q", got)
 	}
 }

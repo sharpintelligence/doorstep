@@ -288,6 +288,202 @@ func TestClaim(t *testing.T) {
 	}
 }
 
+func (e *claimEnv) enqueueRollback(app string, priority int) {
+	e.t.Helper()
+	d := newDeployment(app)
+	d.Kind = core.KindRollback
+	origin := e.ids[0]
+	d.RollbackOfID = &origin
+	e.ids = append(e.ids, mustCreate(e.t, e.st, d, priority).ID)
+}
+
+func (e *claimEnv) freeze(app string) {
+	e.t.Helper()
+	var target *core.Target
+	if app != "" {
+		target = &core.Target{App: app, Environment: "prod"}
+	}
+	if _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: target, Owner: "ops", Reason: "test"}); err != nil {
+		e.t.Fatalf("AcquireFreeze(%q): %v", app, err)
+	}
+}
+
+func (e *claimEnv) unfreeze(app string) {
+	e.t.Helper()
+	var target *core.Target
+	if app != "" {
+		target = &core.Target{App: app, Environment: "prod"}
+	}
+	if _, err := e.st.ReleaseFreeze(e.t.Context(), target, "ops"); err != nil {
+		e.t.Fatalf("ReleaseFreeze(%q): %v", app, err)
+	}
+}
+
+func (e *claimEnv) execAll(sql string) {
+	e.t.Helper()
+	mustExec(e.t, e.st, sql)
+}
+
+const (
+	expireAllFreezes = "UPDATE locks SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 second' WHERE kind = 'freeze'"
+)
+
+func TestClaimHonoursFreezes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		run  func(e *claimEnv)
+	}{
+		{
+			name: "app freeze blocks a queued deploy but not other apps",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueue("api", 0)
+				e.freeze("web")
+				e.expectClaim("w1", 1, 1)
+				e.expectClaim("w2", none, 0)
+			},
+		},
+		{
+			name: "frozen app sorting first does not hide other work",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 10)
+				e.enqueue("api", 0)
+				e.freeze("web")
+				e.expectClaim("w1", 1, 1)
+			},
+		},
+		{
+			name: "frozen head holds the entries behind it",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueue("web", 0)
+				e.freeze("web")
+				e.expectClaim("w1", none, 0)
+				e.unfreeze("web")
+				e.expectClaim("w1", 0, 1)
+			},
+		},
+		{
+			name: "global freeze blocks every queued deploy",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueue("api", 0)
+				e.freeze("")
+				e.expectClaim("w1", none, 0)
+				e.unfreeze("")
+				e.expectClaim("w1", 0, 1)
+				e.expectClaim("w1", 1, 1)
+			},
+		},
+		{
+			name: "expired freeze does not block",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueue("api", 0)
+				e.freeze("web")
+				e.freeze("")
+				e.expectClaim("w1", none, 0)
+				e.execAll(expireAllFreezes)
+				e.expectClaim("w1", 0, 1)
+				e.expectClaim("w1", 1, 1)
+			},
+		},
+		{
+			name: "active deployment with an expired lease is reclaimed under an app freeze",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.expectClaim("w1", 0, 1)
+				e.exec(startEntry, 0)
+				e.freeze("web")
+				e.exec(expireLease, 0)
+				e.expectClaim("w2", 0, 2)
+			},
+		},
+		{
+			name: "active deployment with an expired lease is reclaimed under a global freeze",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.expectClaim("w1", 0, 1)
+				e.exec(startEntry, 0)
+				e.freeze("")
+				e.exec(expireLease, 0)
+				e.expectClaim("w2", 0, 2)
+			},
+		},
+		{
+			name: "rollback runs under an app freeze ahead of the frozen deploy",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.enqueueRollback("web", 100)
+				e.freeze("web")
+				e.expectClaim("w1", 1, 1)
+				e.exec(completeEntry, 1)
+				e.expectClaim("w1", none, 0)
+			},
+		},
+		{
+			name: "rollback runs under a global freeze",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				e.exec(cancelEntry, 0)
+				e.enqueueRollback("web", 100)
+				e.enqueue("api", 0)
+				e.freeze("")
+				e.expectClaim("w1", 1, 1)
+				e.expectClaim("w1", none, 0)
+			},
+		},
+		{
+			name: "freeze on another environment does not block",
+			run: func(e *claimEnv) {
+				e.enqueue("web", 0)
+				if _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: &core.Target{App: "web", Environment: "staging"}, Owner: "ops", Reason: "staging"}); err != nil {
+					e.t.Fatalf("AcquireFreeze: %v", err)
+				}
+				e.expectClaim("w1", 0, 1)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.run(&claimEnv{t: t, st: storetest.Open(t)})
+		})
+	}
+}
+
+func TestClaimRecheckRejectsFreezeCommittedDuringClaim(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		app    string
+		freeze string
+	}{
+		{name: "app freeze", app: "web", freeze: "INSERT INTO locks (app_id, kind, owner) SELECT id, 'freeze', 'ops' FROM apps WHERE name = 'web'"},
+		{name: "global freeze", app: "web", freeze: "INSERT INTO locks (app_id, kind, owner) VALUES (NULL, 'freeze', 'ops')"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			mustCreate(t, st, newDeployment(tt.app), 0)
+			mustExec(t, st, "CREATE FUNCTION freeze_on_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "+tt.freeze+"; RETURN NEW; END $$")
+			mustExec(t, st, "CREATE TRIGGER freeze_on_lease AFTER UPDATE OF lease_owner ON queue_entries FOR EACH ROW WHEN (NEW.lease_owner IS NOT NULL) EXECUTE FUNCTION freeze_on_lease()")
+
+			d, ok, err := store.ClaimExcluding(t.Context(), st, "w1", testLease, []store.AppID{})
+			if !errors.Is(err, store.ErrClaimRejected) || ok {
+				t.Fatalf("ClaimExcluding = %d, %v, %v; want the claim rejected", d.ID, ok, err)
+			}
+			if n := queryInt(t, st, "SELECT count(*) FROM queue_entries WHERE lease_owner IS NOT NULL"); n != 0 {
+				t.Errorf("rejected claim left %d leases", n)
+			}
+		})
+	}
+}
+
 func TestClaimTakesOnlyClaimableStates(t *testing.T) {
 	t.Parallel()
 

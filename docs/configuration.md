@@ -29,8 +29,9 @@ Apps and notification targets are only read from the configuration file; they ha
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
 | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
+| | `DOORSTEP_LOCK_REMINDER_INTERVAL` | `24h` | How long a freeze lock may be held before doorstep sends a reminder, and how often it repeats while the lock stays held. Go duration syntax. `0s` disables reminders (expired locks are still cleaned up); otherwise at least `1m`; must not be negative. See [locks.md](locks.md#reminders). |
 
-The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings).
+The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval has no flag.
 
 Example:
 
@@ -76,6 +77,8 @@ Applies pending database migrations, printing one line per applied migration (or
 ```
 VERSION  STATE    APPLIED AT            NAME
 1        applied  2026-11-23T10:00:00Z  00001_initial_schema.sql
+2        applied  2026-11-23T10:00:00Z  00002_queue_notify.sql
+3        pending  -                     00003_lock_scope_and_events.sql
 ```
 
 Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
@@ -178,6 +181,26 @@ Registries are reached over HTTPS. Plain HTTP is only attempted, as a fallback a
 
 The plain HTTP fallback also carries credentials. When a credential matches one of those local or private hosts, the `Authorization` header (basic credentials, or the bearer token after a token exchange) is sent over HTTP whenever HTTPS fails, and anyone who can block port 443 on the path can force that and read the secret. Only configure credentials for such a registry when the network path to it is trusted, or serve it over HTTPS and address it by a host name outside the list above (such as a cluster DNS name), which is never contacted over plain HTTP.
 
+## `doorstep lock`, `unlock` and `locks`
+
+```sh
+doorstep lock blog --reason "database migration" --for 2h
+doorstep lock --global --reason "holiday freeze" --until 2027-01-02T09:00:00Z
+doorstep locks
+doorstep unlock blog
+doorstep unlock --global
+```
+
+Thin clients of the [lock API](locks.md#api) on a running server. `lock` freezes deploys of one app, or of every app with `--global`; `--reason` is required, and `--for` (Go duration) or `--until` (RFC 3339 time) sets an optional expiry. `unlock` releases a freeze. `locks` lists the live freezes as a table, or as JSON with `--output json` (`-o json`). The semantics are described in [locks.md](locks.md).
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--server` | `DOORSTEP_SERVER_URL` | `http://127.0.0.1:8080` | Base URL of the doorstep server (its metrics listener while the API is served only there, see [api.md](api.md)), `http` or `https`, optionally with a path prefix. Must not contain user information, a query or a fragment. Use `https` whenever the connection leaves the host or cluster, since the token is sent with every request. |
+| | `DOORSTEP_TOKEN` | none | API token, sent as `Authorization: Bearer <token>`. There is no flag, so the token never shows up in process listings or shell history. |
+| | `DOORSTEP_TOKEN_FILE` | none | File holding the API token, such as a mounted Secret; surrounding whitespace is trimmed, and the file may be at most 64 KiB. Setting both token variables is an error. |
+
+The lock owner is the identity the server derives from the token, never a command-line value. Requests time out after 30 seconds, redirects are not followed (so the token is never forwarded to another host), and responses larger than 1 MiB are rejected. When the server refuses a request, the command prints the server's error message, for example `doorstep: blog is already locked by alice: database migration`, and exits 1.
+
 ## `doorstep version`
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.
@@ -235,6 +258,7 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `github.private_key_file` | none | `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY` |
 | `github.api_url` | none | `DOORSTEP_GITHUB_API_URL` |
 | `registry.credentials_file` | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` |
+| `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
 
 A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL and the GitHub App private key can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
 
@@ -324,6 +348,8 @@ github:
   private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
 registry:
   credentials_file: /etc/doorstep/registry/.dockerconfigjson
+locks:
+  reminder_interval: 12h
 
 notifications:
   - name: ops

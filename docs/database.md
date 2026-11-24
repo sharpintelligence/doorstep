@@ -85,7 +85,14 @@ Migration 00002 adds row triggers that call `notify_queue_change()`, which runs 
 
 ### `locks`
 
-`(app_id, kind)` is unique, with `kind` `deployment` or `freeze`, so one deployment lock and one manual freeze can coexist on a target. Columns: `owner`, `reason`, optional `deployment_id` (`ON DELETE CASCADE`), `created_at` and optional `expires_at`. Released locks are deleted; the audit trail is in `deployment_events`.
+`(app_id, kind)` is unique, with `kind` `deployment` or `freeze`, so one deployment lock and one manual freeze can coexist on a target. Columns: `owner`, `reason`, optional `deployment_id` (`ON DELETE CASCADE`), `created_at`, optional `expires_at` and `reminded_at` (when the last long-held reminder was sent). Released and expired locks are deleted; their audit trail is in [`lock_events`](#lock_events).
+
+- **Global freeze.** A row with a null `app_id` is a global freeze. `locks_global_check` only allows that for kind `freeze` without a `deployment_id`, and the partial unique index `locks_global_kind_key` on `kind WHERE app_id IS NULL` allows one. Unique constraints treat nulls as distinct, so `locks_app_id_kind_key` does not cover global rows; the composite foreign key to `deployments` is `MATCH SIMPLE` and is not checked when `app_id` is null.
+- **Expiry.** `locks_expires_at_check` requires `expires_at > created_at`. A lock is live while `expires_at` is null or after `now()`; every query compares against `now()`, so an expired row is ignored at once and deleted later. See [locks.md](locks.md#expiry).
+
+### `lock_events`
+
+The append-only audit of freeze locks: `app_id` (null for the global freeze), `action` (`locked`, `unlocked`, `expired`, `reminded`, `core.LockActions`), `owner` of the lock, `actor` (who unlocked it; empty for system actions), `reason`, `expires_at` and `occurred_at`. Indexed by `(app_id, id DESC)`. Each row is written in the same statement or transaction as the lock change it records. It is separate from `deployment_events`, which requires a deployment, because a freeze belongs to an app or to everything rather than to one deployment.
 
 ### `gate_results`
 
@@ -107,7 +114,8 @@ The append-only history: `deployment_id`, denormalised `app_id`, `type` (`transi
 - `available_at <= now()`;
 - it has no live lease (`lease_expires_at` is null or in the past);
 - it is the head of its target: no other claimable entry for the same app ranks higher, where the rank is the row `(deployment is in an active state, priority, -deployment_id)` compared with `>`. An in-flight deployment therefore always outranks queued entries of its app, even after its lease expired, so a higher-priority entry can never be claimed while another deployment of the target is active (which `deployments_one_active_per_app` would reject);
-- no other entry for the same app holds a live lease, even one whose deployment has just become terminal, because its worker may still be finishing a step.
+- no other entry for the same app holds a live lease, even one whose deployment has just become terminal, because its worker may still be finishing a step;
+- it is not frozen: its deployment is in an active state, or of kind `rollback`, or no live freeze covers its app (neither the app's own `freeze` row nor the global one). See [locks.md](locks.md#what-a-freeze-blocks).
 
 Eligible entries are ordered by the same rank: `(d.state <> 'queued') DESC, priority DESC, deployment_id`, so resumed in-flight work is claimed before new work anywhere. Claiming sets `lease_owner`, sets `lease_expires_at = now() + lease` and increments `attempts`; the result carries the attempt number and lease expiry.
 
@@ -115,7 +123,7 @@ The head-of-line rule serialises work per target without a second mechanism. The
 
 `SKIP LOCKED` also locks the target's `apps` row, so concurrent claimers skip a target another worker is claiming. Because a `READ COMMITTED` statement works from a snapshot taken when it starts, a claim can still race with one that committed a moment earlier; after claiming, a second statement (with a fresh snapshot, while the `apps` row is locked) checks that no other entry for the target holds a live lease, and if one does, the claim is rolled back and retried with that target excluded, so a contended target never makes `Claim` report an empty queue while other targets have work. Each retry excludes one more target, so the loop ends. The partial unique index on active deployments remains the final guard.
 
-Freeze locks do not yet affect claiming; the locks work adds that as another condition.
+The same re-check also rejects the claim when a live freeze now covers a queued deploy, which catches a freeze committed between the claim's snapshot and its lease; the target is excluded and the loop continues. Taking an app freeze locks the app's `apps` row first (`FOR NO KEY UPDATE`), the row a claim locks with `SKIP LOCKED`, so an app freeze and a claim of that app are strictly ordered. A frozen head of line also holds every entry behind it, because the head-of-line rule does not look at freezes; a higher-priority rollback becomes the head and is claimed.
 
 ### Batching
 
@@ -143,7 +151,7 @@ The result carries the winner, its claim and the superseded ids. Rollbacks and i
 
 ## Clock
 
-Row timestamps, lease expiry and every eligibility comparison use the database's `now()`. Several replicas must agree on when a lease expires, and the database is the only clock they share. This is the one exception to the injected `Clock` rule in [architecture.md](architecture.md#dependency-rules): the engine still uses an injected clock for its own timing, and passes lease lengths to the store as durations. Tests force a lease to expire by updating `lease_expires_at` directly.
+Row timestamps, lease expiry, lock expiry and reminders, and every eligibility comparison use the database's `now()`. Several replicas must agree on when a lease expires, and the database is the only clock they share. This is the one exception to the injected `Clock` rule in [architecture.md](architecture.md#dependency-rules): the engine still uses an injected clock for its own timing, and passes lease lengths to the store as durations. Tests force a lease to expire by updating `lease_expires_at` directly.
 
 ## Testing
 

@@ -50,15 +50,15 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | Package | Responsibility | Status |
 | --- | --- | --- |
 | `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run` | built |
-| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file | built |
+| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file; `lock`, `unlock` and `locks` call the API through a small shared client | built |
 | `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates, notification targets) and secret references | built |
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
 | `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
-| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, queue claims with batching, leases and `LISTEN/NOTIFY`; see [database.md](database.md) | built |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
 | `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
-| `internal/locks` | per-target deployment locks and manual freeze locks | planned |
+| `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends only on `core` through a `Repository` port that `*store.Store` satisfies; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
 | `internal/history` | append-only transition log and its read models | planned |
 | `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
 | `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, authenticates extra handlers with installation tokens | built |
@@ -70,7 +70,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
 | `internal/notify` | Slack, ntfy and generic webhook notifications | planned |
 | `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
-| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication; see [api.md](api.md) | built |
+| `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, a middleware seam for authentication, queue and lock endpoints; see [api.md](api.md) | built |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
 | `internal/auth` | hashed API tokens for CLI/CI, OIDC login for the UI | planned |
 | `internal/metrics` | Prometheus metrics on a private registry, typed recorder, lazy queue depth collector, dedicated listener | built |
@@ -85,7 +85,7 @@ The design is ports and adapters.
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
 - Adapters (`store`, `queue`, `locks`, `history`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `history`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers.
 - `store` imports only `core`.
-- `api` and `web` call `engine` for commands and `store` read models for queries. They contribute handlers; `server` owns the listener, middleware and health endpoints.
+- `api` and `web` call `engine` for commands and `store` read models for queries. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
 - No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The only exceptions are the link-time `buildinfo.version`, `buildinfo.commit` and `buildinfo.commitTime` variables, which the release image build sets because it has no `.git` directory. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
@@ -112,9 +112,7 @@ type Queue interface {
 }
 
 type Locker interface {
-	Acquire(ctx context.Context, t core.Target, owner, reason string) (core.Lock, error)
-	Release(ctx context.Context, t core.Target, owner string) error
-	Get(ctx context.Context, t core.Target) (core.Lock, bool, error)
+	Blocking(ctx context.Context, t core.Target) ([]core.Lock, error)
 }
 
 type DigestResolver interface {
@@ -145,6 +143,8 @@ type Clock interface {
 ```
 
 `*queue.Queue` implements the `Queue` port today (see [queue.md](queue.md)); its `Claimed`, `EnqueueOptions` and `EnqueueResult` types live in `queue`, so the engine bead either moves them to `core` or declares the port over its own types with a thin adapter, keeping `engine` free of adapter imports. `queue.Runner` drives the engine through a `Handler` and is started by `serve` once the engine exists.
+
+`Locker` is what `locks.Service` offers the engine: the live freezes (app and global) that block a target, so the engine can record the `lock` gate as pending with the owner and reason as evidence. The claim itself already skips frozen deploys ([locks.md](locks.md)). Per-target serialisation needs no lock rows: head-of-line claiming and the one-active-deployment index provide it, and kind `deployment` lock rows are reserved for the engine.
 
 `PinWriter` has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). Both preserve comments and formatting through the yaml v3 `Node` API.
 
@@ -203,7 +203,7 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - Enqueueing a deploy is idempotent per app and commit SHA while a deploy of that commit is queued or in flight.
 - `LISTEN/NOTIFY` is only a wake-up hint: a trigger on `queue_entries` notifies on enqueue, completion, release and priority changes, and `queue.Runner` also polls every 5 seconds, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
-- Manual freeze locks are rows in a `locks` table, visible and removable in the UI and CLI.
+- Manual freeze locks are rows in a `locks` table, per app or global, visible and removable through the API and CLI. A live freeze stops queued deploys from being claimed; in-flight deployments and rollbacks are not blocked ([ADR 0004](decisions/0004-freeze-locks.md), [locks.md](locks.md)). Every replica sweeps expired locks and sends reminders for long-held ones once a minute.
 
 Postgres is the only stateful dependency. Running more than one replica is safe. The schema, migration policy and claim semantics are described in [database.md](database.md).
 
@@ -276,11 +276,16 @@ One listener (default `:8080`) serves everything public:
 | `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s), currently `postgres`; `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
 | `GET /metrics` | Prometheus exposition, on the metrics listener (default `:9090`) rather than this one unless `--metrics-listen-addr` is set empty (see [metrics.md](metrics.md)) | built |
 | `GET /api/v1/apps/{app}/queue` | an app's queue in run order; served only on the metrics listener until the auth work lands (see [api.md](api.md)) | built |
+| `POST /api/v1/apps/{app}/lock`, `DELETE /api/v1/apps/{app}/lock` | freeze or release one app; see [locks.md](locks.md#api) | built |
+| `POST /api/v1/lock`, `DELETE /api/v1/lock` | global freeze | built |
+| `GET /api/v1/locks` | live freezes | built |
 | `/api/v1/...` | further JSON API resources; unknown API paths answer with a JSON `404` | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
 
 The JSON API is one handler from `api.New`, mounted at `api.Prefix` (`/api/v1/`) on the metrics listener only, and not at all when that listener is disabled, until authentication exists; its `Options.Middleware` wraps every API route, which is where authentication plugs in.
+
+Lock routes authenticate through `api.Authenticator` and answer `401` with `WWW-Authenticate: Bearer` when it fails. API tokens are not issued yet, so `serve` currently wires `api.RejectAll` through `apiAuthenticator` in `internal/cli/serve.go`, which the token work replaces.
 
 Readiness checks are registered by name in `server.Options.Checks`; `serve` registers `postgres`, which pings the connection pool. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. Further handlers are mounted through `server.Options.Routes` (a map of `ServeMux` pattern to handler), which keeps them inside the request logging and panic recovery middleware; `/metrics` requests are logged at debug like probes.
 

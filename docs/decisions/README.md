@@ -9,6 +9,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0001](0001-go-and-core-design.md) | Go, and doorstep's core design | Accepted | 2026-11-23 |
 | [0002](0002-rollback-is-a-new-deployment.md) | A rollback is a new deployment | Accepted | 2026-11-23 |
 | [0003](0003-queue-batching-and-urgent.md) | Queue batching and urgent deploys | Accepted | 2026-11-23 |
+| [0004](0004-freeze-locks.md) | Freeze locks stop new deploys, not recovery | Proposed | 2026-11-23 |
 
 ## When to write one
 

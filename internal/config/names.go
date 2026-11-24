@@ -37,6 +37,10 @@ func isDNSLabel(s string) bool {
 	return true
 }
 
+func ValidateAppName(s string) error {
+	return validateName(s)
+}
+
 func validateName(s string) error {
 	if s == "" {
 		return errors.New("is required")

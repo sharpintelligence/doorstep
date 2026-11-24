@@ -19,6 +19,7 @@ func TestDefault(t *testing.T) {
 		Server: Server{ListenAddr: ":8080", MetricsListenAddr: ":9090", ShutdownDelay: 5 * time.Second, ShutdownTimeout: 15 * time.Second},
 		Log:    Log{Level: "info", Format: "json"},
 		GitHub: GitHub{APIURL: "https://api.github.com"},
+		Locks:  Locks{ReminderInterval: 24 * time.Hour},
 	}
 	got := Default()
 	if got != want {
@@ -101,6 +102,22 @@ func TestFromEnv(t *testing.T) {
 			name: "registry credentials file",
 			env:  map[string]string{EnvRegistryCredentialsFile: "/etc/doorstep/registry/.dockerconfigjson"},
 			want: func(c *Config) { c.Registry.CredentialsFile = "/etc/doorstep/registry/.dockerconfigjson" },
+		},
+		{
+			name: "lock reminder interval",
+			env:  map[string]string{EnvLockReminderInterval: "12h"},
+			want: func(c *Config) { c.Locks.ReminderInterval = 12 * time.Hour },
+		},
+		{
+			name: "lock reminders disabled",
+			env:  map[string]string{EnvLockReminderInterval: "0s"},
+			want: func(c *Config) { c.Locks.ReminderInterval = 0 },
+		},
+		{
+			name:    "unparseable lock reminder interval",
+			env:     map[string]string{EnvLockReminderInterval: "daily"},
+			want:    func(*Config) {},
+			wantErr: []string{EnvLockReminderInterval, `"daily"`},
 		},
 		{
 			name: "all variables",
@@ -258,6 +275,18 @@ func TestValidate(t *testing.T) {
 			wantIs:  []error{logging.ErrUnknownFormat},
 		},
 		{name: "database URL file", mutate: func(c *Config) { c.Database = Database{URLFile: "/run/secrets/db"} }},
+		{name: "lock reminders disabled", mutate: func(c *Config) { c.Locks.ReminderInterval = 0 }},
+		{name: "lock reminder at minimum", mutate: func(c *Config) { c.Locks.ReminderInterval = time.Minute }},
+		{
+			name:    "lock reminder below minimum",
+			mutate:  func(c *Config) { c.Locks.ReminderInterval = 59 * time.Second },
+			wantErr: []string{"lock reminder interval: must be 0 (disabled) or at least 1m0s, got 59s"},
+		},
+		{
+			name:    "negative lock reminder",
+			mutate:  func(c *Config) { c.Locks.ReminderInterval = -time.Hour },
+			wantErr: []string{"lock reminder interval: must not be negative, got -1h0m0s"},
+		},
 		{
 			name:    "no database source",
 			mutate:  func(c *Config) { c.Database = Database{} },

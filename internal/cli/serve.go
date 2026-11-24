@@ -17,11 +17,14 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/api"
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
+	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
 	"github.com/sharpintelligence/doorstep/internal/queue"
 	"github.com/sharpintelligence/doorstep/internal/registry"
 	"github.com/sharpintelligence/doorstep/internal/server"
+	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
 func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
@@ -139,7 +142,18 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 
 	apps := newCatalogApps(in.catalog)
 	q := queue.New(queue.Options{Store: st, MaxBatch: apps.MaxBatch, Logger: logger})
-	apiHandler := api.New(api.Options{Logger: logger, Queue: q, Apps: apps})
+	locksService, reminder, err := newLocks(st, cfg.Locks, logger)
+	if err != nil {
+		return err
+	}
+	apiHandler := api.New(api.Options{
+		Logger:        logger,
+		Queue:         q,
+		Apps:          apps,
+		Locks:         locksService,
+		Targets:       catalogTargets(in.catalog),
+		Authenticator: apiAuthenticator(),
+	})
 
 	build := buildinfo.Read()
 	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
@@ -166,33 +180,76 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		slog.Any("build", build),
 	)
 
+	runs := []func(context.Context) error{
+		func(ctx context.Context) error { return reminder.Run(ctx, locks.SweepInterval) },
+	}
 	if cfg.Server.MetricsListenAddr == "" {
 		logger.WarnContext(ctx, "API disabled; it is served only on the metrics listener until API authentication exists")
 		maps.Copy(mainRoutes, metricsRoutes)
-		if err := newServer(mainRoutes).Run(ctx, ln); err != nil {
-			return err
+	} else {
+		metricsLn, err := lc.Listen(ctx, "tcp", cfg.Server.MetricsListenAddr)
+		if err != nil {
+			return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
 		}
-		logger.InfoContext(ctx, "stopped")
-		return nil
+		logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
+		metricsRoutes[api.Prefix] = apiHandler
+		metricsServer := newServer(metricsRoutes)
+		runs = append(runs, func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) })
 	}
-
-	metricsLn, err := lc.Listen(ctx, "tcp", cfg.Server.MetricsListenAddr)
-	if err != nil {
-		return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
-	}
-	logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
-	metricsRoutes[api.Prefix] = apiHandler
-
 	mainServer := newServer(mainRoutes)
-	metricsServer := newServer(metricsRoutes)
-	err = runServers(ctx,
-		func(ctx context.Context) error { return mainServer.Run(ctx, ln) },
-		func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) },
-	)
-	if err != nil {
+	runs = append(runs, func(ctx context.Context) error { return mainServer.Run(ctx, ln) })
+
+	if err := runServers(ctx, runs...); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "stopped")
+	return nil
+}
+
+func newLocks(st *store.Store, cfg config.Locks, logger *slog.Logger) (*locks.Service, *locks.Reminder, error) {
+	notifier := lockLogNotifier{logger: logger}
+	service, err := locks.New(locks.Options{Repository: st, Notifier: notifier, Logger: logger})
+	if err != nil {
+		return nil, nil, err
+	}
+	reminder, err := locks.NewReminder(locks.ReminderOptions{Repository: st, Notifier: notifier, Logger: logger, Every: cfg.ReminderInterval})
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, reminder, nil
+}
+
+func apiAuthenticator() api.Authenticator {
+	return api.RejectAll{}
+}
+
+func catalogTargets(catalog config.Catalog) api.Targets {
+	return func(app string) (core.Target, bool) {
+		if _, ok := catalog.App(app); !ok {
+			return core.Target{}, false
+		}
+		return core.Target{App: app, Environment: core.DefaultEnvironment}, true
+	}
+}
+
+type lockLogNotifier struct {
+	logger *slog.Logger
+}
+
+func (n lockLogNotifier) NotifyLock(ctx context.Context, ev core.LockEvent) error {
+	attrs := []slog.Attr{
+		slog.String("action", string(ev.Action)),
+		slog.String("scope", ev.Lock.Scope()),
+		slog.String("owner", ev.Lock.Owner),
+		slog.String("reason", ev.Lock.Reason),
+	}
+	if ev.Actor != "" {
+		attrs = append(attrs, slog.String("actor", ev.Actor))
+	}
+	if ev.Lock.ExpiresAt != nil {
+		attrs = append(attrs, slog.Time("expires_at", *ev.Lock.ExpiresAt))
+	}
+	n.logger.LogAttrs(ctx, slog.LevelDebug, "lock event", attrs...)
 	return nil
 }
 
