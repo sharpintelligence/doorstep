@@ -38,6 +38,7 @@ type Options struct {
 	ShutdownTimeout time.Duration
 	Checks          map[string]Check
 	Routes          map[string]http.Handler
+	Middleware      []func(http.Handler) http.Handler
 }
 
 type Server struct {
@@ -91,7 +92,11 @@ func New(opts Options) *Server {
 		}
 		mux.Handle(pattern, handler)
 	}
-	s.handler = logRequests(s.logger, recoverPanics(s.logger, mux))
+	handler := http.Handler(mux)
+	for i := len(opts.Middleware) - 1; i >= 0; i-- {
+		handler = opts.Middleware[i](handler)
+	}
+	s.handler = logRequests(s.logger, recoverPanics(s.logger, handler))
 	return s
 }
 

@@ -106,6 +106,7 @@ func (c Catalog) Validate() error {
 		}
 	}
 
+	errs = append(errs, c.Auth.validate()...)
 	return errors.Join(errs...)
 }
 

@@ -110,5 +110,5 @@ The handler contract for the engine: do one idempotent step (or the whole deploy
 ## Observability
 
 - `doorstep_queue_depth` reports entries whose deployment is `queued` and not leased, across all apps ([metrics.md](metrics.md)).
-- `GET /api/v1/apps/{app}/queue`, on the metrics listener until API authentication exists, shows an app's entries in run order ([api.md](api.md)).
+- `GET /api/v1/apps/{app}/queue`, needs the viewer role and shows an app's entries in run order ([api.md](api.md)).
 - Superseded deployments and priority changes are in the deployment events.

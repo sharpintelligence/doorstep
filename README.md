@@ -4,7 +4,7 @@ A homelab deployment engine for Argo CD: queues and locks deploys, writes image 
 
 ## Status
 
-Early development. The binary currently provides `serve` (HTTP server with health endpoints, backed by Postgres), `migrate`, `image resolve`, `config validate`, `notify test` and `version`; the deployment engine is being built.
+Early development. The binary currently provides `serve` (HTTP server with health endpoints, OIDC or GitHub sign-in and API tokens, backed by Postgres), `migrate`, `token` and `version`; the deployment engine is being built.
 
 ## Quickstart
 
@@ -39,6 +39,7 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 - [Architecture](docs/architecture.md)
 - [Installing on Kubernetes](docs/install.md)
 - [Configuration](docs/configuration.md)
+- [Authentication and roles](docs/authentication.md)
 - [Database](docs/database.md)
 - [HTTP API](docs/api.md)
 - [GitHub App](docs/github-app.md)

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -56,10 +57,11 @@ func TestDocumentedExamplesAreValid(t *testing.T) {
 		if len(file.Apps) == 0 {
 			t.Errorf("yaml block %d defines no apps:\n%s", i, block)
 		}
-		if err := file.Apply(Default()).ValidateSettings(); err != nil {
+		settings := file.Apply(Default())
+		if err := settings.ValidateSettings(); err != nil {
 			t.Errorf("yaml block %d has invalid settings: %v", i, err)
 		}
-		if err := file.Catalog().Validate(); err != nil {
+		if err := errors.Join(file.Catalog().Validate(), file.Catalog().ValidateWith(settings)); err != nil {
 			t.Errorf("yaml block %d is invalid: %v", i, err)
 		}
 	}

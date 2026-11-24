@@ -434,7 +434,7 @@ func TestServerURLWithPathPrefix(t *testing.T) {
 
 type staticAuth struct{}
 
-func (staticAuth) Authenticate(r *http.Request) (string, error) {
+func (staticAuth) Authenticate(r *http.Request, _ core.Role) (string, error) {
 	if r.Header.Get("Authorization") == "Bearer tok-123" {
 		return "alice", nil
 	}

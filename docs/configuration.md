@@ -13,7 +13,7 @@ An environment variable that is set but empty counts as set, and is then validat
 
 A secret with several possible sources is resolved as a whole: when any flag or environment variable for the database URL is set, it replaces `database.url_file` from the file, and when either `DOORSTEP_GITHUB_APP_PRIVATE_KEY` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is set, it replaces `github.private_key_file`. Sources at the same level still conflict, so setting both database environment variables is an error.
 
-Apps and notification targets are only read from the configuration file; they have no flags or environment variables.
+Apps, notification targets and the `auth` section are only read from the configuration file; they have no flags or environment variables.
 
 ## `doorstep serve`
 
@@ -21,7 +21,7 @@ Apps and notification targets are only read from the configuration file; they ha
 | --- | --- | --- | --- |
 | `--config` | `DOORSTEP_CONFIG` | none | Path to the YAML configuration file. Optional: without it doorstep runs with built-in defaults and no apps, and logs a `no apps configured` warning. A set but empty value is an error. |
 | `--listen-addr` | `DOORSTEP_LISTEN_ADDR` | `:8080` | Address for the HTTP listener as `host:port`. The port must be numeric; `0` picks a free port. |
-| `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | `:9090` | Address for the `/metrics` listener as `host:port`; `/metrics` is served only there. Must differ from `--listen-addr`. Set it to an empty value to serve `/metrics` on the main listener instead, which is only safe when the main listener is not reachable from the internet. Until API authentication exists, the `/api/v1/` JSON API is served only on this listener; an empty value disables it. See [metrics.md](metrics.md) and [api.md](api.md). |
+| `--metrics-listen-addr` | `DOORSTEP_METRICS_LISTEN_ADDR` | `:9090` | Address for the `/metrics` listener as `host:port`; `/metrics` is served only there. Must differ from `--listen-addr`. Set it to an empty value to serve `/metrics` on the main listener instead, which is only safe when the main listener is not reachable from the internet. See [metrics.md](metrics.md). |
 | `--shutdown-delay` | `DOORSTEP_SHUTDOWN_DELAY` | `5s` | How long the server keeps serving after `SIGINT`/`SIGTERM` while `/readyz` reports `shutting_down`, before it stops accepting connections. Gives load balancers time to stop routing to the instance. Go duration syntax. `0s` disables it; must not be negative. |
 | `--shutdown-timeout` | `DOORSTEP_SHUTDOWN_TIMEOUT` | `15s` | How long in-flight requests may run once the shutdown delay has passed, before the server is closed. Go duration syntax (`30s`, `1m`). Must be positive. |
 | `--public-url` | `DOORSTEP_PUBLIC_URL` | empty | The external base URL people use to reach doorstep, such as `https://doorstep.example.com`. Notifications link to `<public url>/deployments/<id>` and GitHub deployment statuses use that as their log URL; without it those links are left out. Must be an absolute `http` or `https` URL with a host and without user information, query or fragment; a trailing slash is ignored. See [notifications.md](notifications.md#links). |
@@ -82,7 +82,7 @@ VERSION  STATE    APPLIED AT            NAME
 3        pending  -                     00003_lock_scope_and_events.sql
 ```
 
-Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
+Both accept `--config`, `--database-url-file`, `--log-level` and `--log-format` and the matching environment variables. From the configuration file they use `log` and `database`; other settings and apps are ignored. Migration progress is logged to stderr. Concurrent runs (several replicas starting at once) are serialised by a Postgres advisory lock keyed by the schema, so instances that share a schema wait for each other while instances in other schemas of the same database do not. If the database has a newer schema than the binary, `migrate` and `serve` fail rather than run against it.
 
 ## GitHub App
 
@@ -196,7 +196,7 @@ Thin clients of the [lock API](locks.md#api) on a running server. `lock` freezes
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--server` | `DOORSTEP_SERVER_URL` | `http://127.0.0.1:8080` | Base URL of the doorstep server (its metrics listener while the API is served only there, see [api.md](api.md)), `http` or `https`, optionally with a path prefix. Must not contain user information, a query or a fragment. The token is sent with every request, so with a token set the client refuses plain `http` to anything but a loopback address (`localhost`, `127.0.0.0/8`, `::1`); use `https` whenever the connection leaves the host. |
+| `--server` | `DOORSTEP_SERVER_URL` | `http://127.0.0.1:8080` | Base URL of the doorstep server (the main listener, see [api.md](api.md)), `http` or `https`, optionally with a path prefix. Must not contain user information, a query or a fragment. The token is sent with every request, so with a token set the client refuses plain `http` to anything but a loopback address (`localhost`, `127.0.0.0/8`, `::1`); use `https` whenever the connection leaves the host. |
 | | `DOORSTEP_TOKEN` | none | API token, sent as `Authorization: Bearer <token>`. There is no flag, so the token never shows up in process listings or shell history. |
 | | `DOORSTEP_TOKEN_FILE` | none | File holding the API token, such as a mounted Secret; surrounding whitespace is trimmed, and the file may be at most 64 KiB. Setting both token variables is an error. |
 
@@ -208,7 +208,7 @@ Prints the release version, VCS commit, commit time and Go version. `--json` pri
 
 ## Configuration file
 
-`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, notification targets and apps. `doorstep migrate` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep. On Kubernetes, the [kustomize base](install.md#configuration) generates the ConfigMap with a content hash in its name, so changing the file rolls the Deployment automatically.
+`doorstep serve --config /etc/doorstep/config.yaml` (or `DOORSTEP_CONFIG=/etc/doorstep/config.yaml`) reads one YAML file that holds runtime settings, sign-in settings, notification targets and apps. `doorstep migrate`, `doorstep token` and `doorstep image resolve` accept the same flag and variable and read the runtime settings they need from it. The file is read once at startup; to change it, update the file (or ConfigMap) and restart doorstep. On Kubernetes, the [kustomize base](install.md#configuration) generates the ConfigMap with a content hash in its name, so changing the file rolls the Deployment automatically.
 
 Parsing is strict:
 
@@ -263,6 +263,57 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
 
 A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL and the GitHub App private key can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
+
+### `auth`
+
+Sign-in with one identity provider and how its users map to roles. Without `oidc` or `github`, only API tokens authenticate, the `/auth/*` routes are not mounted, and `session_ttl`, `default_role` and `roles` are rejected. Configuring a provider also requires [`server.public_url`](#doorstep-serve). [authentication.md](authentication.md) explains the roles, the sign-in flow and how to register doorstep with each provider.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `session_ttl` | `12h` | Absolute lifetime of a session from sign-in, between `5m` and `720h`. Sessions are not extended by activity. Roles are decided at sign-in, so this also bounds how long a role change takes to apply. |
+| `default_role` | none | Role granted to a user who matches no entry in `roles`: `viewer`, `deployer` or `admin`. Empty refuses sign-in to such users. |
+| `roles.<role>.groups` | none | Groups that grant `<role>` (`viewer`, `deployer` or `admin`). OIDC: values of the groups claim, compared exactly. GitHub: an organization login (`example-org`) or `org/team-slug` (`example-org/platform`), compared case-insensitively. |
+| `roles.<role>.users` | none | Users that grant `<role>`. OIDC: the `sub` claim, or an email address that the provider marks verified. GitHub: logins. |
+| `oidc.issuer_url` | required | Issuer URL; its `/.well-known/openid-configuration` must be reachable. `https`, or `http` only on a loopback host, without user information, query or fragment. |
+| `oidc.client_id` | required | Client ID registered at the provider; no whitespace. |
+| `oidc.client_secret_env` / `oidc.client_secret_file` | exactly one | Environment variable or absolute file path holding the client secret; see [Secrets](#secrets). |
+| `oidc.scopes` | `[openid, profile, email, groups]` | Scopes requested; must include `openid`, without duplicates. |
+| `oidc.groups_claim` | `groups` | Claim holding the user's groups, read from the ID token or else from UserInfo. |
+| `oidc.username_claim` | `preferred_username` | Claim used as the user's ID in logs and the audit trail, falling back to `sub`. It is not used for role mapping. |
+| `github.client_id` | required | Client ID of a GitHub OAuth App, or of the GitHub App's own client credentials. |
+| `github.client_secret_env` / `github.client_secret_file` | exactly one | Environment variable or absolute file path holding the client secret. |
+
+Each role under `roles` needs at least one group or user, and entries must be unique and non-empty. On sign-in the highest role with a matching entry wins (`admin`, then `deployer`, then `viewer`). GitHub sign-in uses `github.api_url` for the API and derives the OAuth URLs from it, so GitHub Enterprise Server needs no extra setting.
+
+```yaml
+server:
+  public_url: https://deploy.example.com
+auth:
+  session_ttl: 8h
+  oidc:
+    issuer_url: https://auth.example.com/application/o/doorstep/
+    client_id: doorstep
+    client_secret_file: /etc/doorstep/secrets/oidc-client-secret
+    scopes: [openid, profile, email]
+  roles:
+    admin:
+      groups: [homelab-admins]
+    deployer:
+      groups: [developers]
+      users: [alice@example.com]
+    viewer:
+      groups: [family]
+
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+```
 
 ### `notifications[]`
 
@@ -497,13 +548,23 @@ volumes:
 
 Restart the Deployment after changing the ConfigMap.
 
+## `doorstep token`
+
+```sh
+doorstep token create --name NAME --role viewer|deployer|admin [--expires-in DURATION]
+doorstep token list
+doorstep token revoke NAME
+```
+
+Creates, lists and revokes API tokens by talking to the database directly. `create` prints the token once on stdout, and its details on stderr. The commands take the same flags, environment variables and configuration file settings as [`doorstep migrate`](#doorstep-migrate), and fail without changing anything when the database schema is behind; run `doorstep migrate` first. See [authentication.md](authentication.md#api-tokens).
+
 ## `doorstep config validate`
 
 ```sh
 doorstep config validate --config config.yaml
 ```
 
-Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags, so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
+Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags (so a file with a sign-in provider must set `server.public_url` itself to pass), so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
 
 ## `doorstep notify test`
 
@@ -517,9 +578,9 @@ Sends one synthetic `deploy.succeeded` notification to the named `notifications[
 
 Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file.
 
-Notification secrets are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
+Notification secrets and the sign-in client secret (`auth.oidc.client_secret_*` or `auth.github.client_secret_*`) are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
 
-`doorstep serve` checks every referenced notification secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
+`doorstep serve` checks every referenced notification and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
 The database URL, the GitHub App private key and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections.
 

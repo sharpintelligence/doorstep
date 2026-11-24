@@ -17,6 +17,7 @@ const (
 type Catalog struct {
 	Apps          []App
 	Notifications []Notification
+	Auth          Auth
 }
 
 func (c Catalog) App(name string) (App, bool) {
@@ -46,6 +47,9 @@ func (c Catalog) SecretRefs() []SecretRef {
 		if secret, ok := n.SigningSecret(); ok {
 			refs = append(refs, secret)
 		}
+	}
+	if secret, ok := c.Auth.ClientSecret(); ok {
+		refs = append(refs, secret)
 	}
 	return refs
 }
