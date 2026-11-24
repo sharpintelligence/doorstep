@@ -498,6 +498,14 @@ func TestRunHelp(t *testing.T) {
 			want: []string{"--config", "--registry-credentials-file", config.EnvRegistryCredentialsFile},
 		},
 		{
+			args: []string{"argocd", "status", "--help"},
+			want: []string{"--config", "--kubeconfig", "--kube-context", "--revision", config.EnvKubeconfig},
+		},
+		{
+			args: []string{"argocd"},
+			want: []string{"status"},
+		},
+		{
 			args: []string{"config", "validate", "--help"},
 			want: []string{"--config", config.EnvConfig, "without resolving secrets"},
 		},
@@ -584,12 +592,13 @@ func TestResolveServeConfig(t *testing.T) {
 
 	const databaseURL = "postgres://doorstep@localhost/doorstep"
 	flags := config.Config{
-		Server:   config.Server{ListenAddr: "127.0.0.1:7000", MetricsListenAddr: "127.0.0.1:7001", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second, PublicURL: "https://flag.example.com"},
-		Log:      config.Log{Level: "error", Format: "text"},
-		Database: config.Database{URLFile: "/run/secrets/database-url"},
-		GitHub:   config.Default().GitHub,
-		Registry: config.Registry{CredentialsFile: "/flag/config.json"},
-		Locks:    config.Default().Locks,
+		Server:     config.Server{ListenAddr: "127.0.0.1:7000", MetricsListenAddr: "127.0.0.1:7001", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second, PublicURL: "https://flag.example.com"},
+		Log:        config.Log{Level: "error", Format: "text"},
+		Database:   config.Database{URLFile: "/run/secrets/database-url"},
+		GitHub:     config.Default().GitHub,
+		Registry:   config.Registry{CredentialsFile: "/flag/config.json"},
+		Locks:      config.Default().Locks,
+		Kubernetes: config.Kubernetes{Kubeconfig: "/flag/kubeconfig", Context: "flag-context"},
 	}
 	const fileSettings = `
 server:
@@ -610,14 +619,18 @@ registry:
   credentials_file: /file/config.json
 locks:
   reminder_interval: 6h
+kubernetes:
+  kubeconfig: /file/kubeconfig
+  context: file-context
 `
 	fileConfig := config.Config{
-		Server:   config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
-		Log:      config.Log{Level: "warn", Format: "text"},
-		Database: config.Database{URL: databaseURL},
-		GitHub:   config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3"},
-		Registry: config.Registry{CredentialsFile: "/file/config.json"},
-		Locks:    config.Locks{ReminderInterval: 6 * time.Hour},
+		Server:     config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
+		Log:        config.Log{Level: "warn", Format: "text"},
+		Database:   config.Database{URL: databaseURL},
+		GitHub:     config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3"},
+		Registry:   config.Registry{CredentialsFile: "/file/config.json"},
+		Locks:      config.Locks{ReminderInterval: 6 * time.Hour},
+		Kubernetes: config.Kubernetes{Kubeconfig: "/file/kubeconfig", Context: "file-context"},
 	}
 	oneAppCatalog := config.File{
 		Notifications: []config.Notification{{Name: "ops", Type: config.NotifySlack, WebhookURLEnv: "TEST_SLACK_URL"}},
@@ -681,7 +694,7 @@ locks:
 		},
 		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagMetricsListenAddr, flagShutdownDelay, flagShutdownTimeout, flagPublicURL, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
+			changed: []string{flagListenAddr, flagMetricsListenAddr, flagShutdownDelay, flagShutdownTimeout, flagPublicURL, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile, flagKubeconfig, flagKubeContext},
 			want:    func(c *config.Config) { *c = flags },
 		},
 		{
@@ -822,6 +835,25 @@ locks:
 				*c = fileConfig
 				c.Server.MetricsListenAddr = flags.Server.MetricsListenAddr
 				c.Registry.CredentialsFile = flags.Registry.CredentialsFile
+			},
+		},
+		{
+			name: "kubernetes environment over file",
+			file: fileSettings,
+			env:  map[string]string{config.EnvKubeconfig: "/env/kubeconfig", config.EnvKubeContext: "env-context"},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Kubernetes = config.Kubernetes{Kubeconfig: "/env/kubeconfig", Context: "env-context"}
+			},
+		},
+		{
+			name:    "kubernetes flags over environment",
+			file:    fileSettings,
+			env:     map[string]string{config.EnvKubeconfig: "/env/kubeconfig"},
+			changed: []string{flagKubeconfig, flagKubeContext},
+			want: func(c *config.Config) {
+				*c = fileConfig
+				c.Kubernetes = flags.Kubernetes
 			},
 		},
 		{

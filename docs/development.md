@@ -79,6 +79,19 @@ with an `auth` section in `dev.yaml` pointing at a local issuer (Dex, or a Keycl
 
 Tests never contact a real identity provider: `internal/auth` tests run a fake OIDC issuer on `httptest` (discovery, JWKS with a generated RSA key, token and UserInfo endpoints) and a fake GitHub.
 
+## Argo CD locally
+
+doorstep reads Argo CD Applications only from a kubeconfig you name; it never picks up `$KUBECONFIG` or `~/.kube/config` on its own. With kind, k3d, k3s, minikube or MicroK8s, point it at the cluster's kubeconfig and context:
+
+```sh
+kind export kubeconfig --name homelab --kubeconfig /tmp/kind-homelab.yaml
+bin/doorstep argocd status blog --config dev.yaml --kubeconfig /tmp/kind-homelab.yaml --kube-context kind-homelab
+```
+
+`DOORSTEP_KUBECONFIG` and `DOORSTEP_KUBE_CONTEXT` (or the `kubernetes` section of the configuration file) select the same connection without flags. For clusters whose kubeconfig uses an exec credential plugin (EKS, GKE, AKS), run `kubectl proxy` and use a kubeconfig whose server is `http://127.0.0.1:8001`; see [argocd.md](argocd.md#with-a-kubeconfig).
+
+Tests never need a cluster: `argocdtest.NewServer(t)` (in `internal/argocd/argocdtest`) serves `get` and `watch` for Applications built with `argocdtest.Synced` and friends, pushes watch events on `Set`, `Update` and `Delete`, closes or expires watches, injects status codes with `FailNext`, counts requests and writes a kubeconfig for it with `Kubeconfig(t)`.
+
 ## GitHub in tests
 
 Tests that need GitHub never call the real API and need no credentials. `githubtest.NewServer(t)` (in `internal/github/githubtest`) starts a fake API with a freshly generated App key: it verifies App JWTs, serves installation lookup and token minting (`Install`, `Suspend`, `Uninstall`, call counters, an injectable clock) and authenticates extra handlers registered with `Handle` by installation token. Point `github.Options.BaseURL` at its `URL`, using its `AppID` and `PrivateKey`.

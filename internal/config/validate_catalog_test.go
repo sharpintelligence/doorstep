@@ -591,6 +591,20 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{`argocd.namespace: "argo.cd" must be a DNS label`},
 		},
 		{
+			name:   "argocd sync timeout",
+			mutate: func(c *Catalog) { c.Apps[0].ArgoCD.SyncTimeout = durPtr(30 * time.Minute) },
+		},
+		{
+			name:    "argocd sync timeout zero",
+			mutate:  func(c *Catalog) { c.Apps[0].ArgoCD.SyncTimeout = durPtr(0) },
+			wantErr: []string{"argocd.sync_timeout: must be positive"},
+		},
+		{
+			name:    "argocd sync timeout negative",
+			mutate:  func(c *Catalog) { c.Apps[0].ArgoCD.SyncTimeout = durPtr(-time.Minute) },
+			wantErr: []string{"argocd.sync_timeout: must be positive"},
+		},
+		{
 			name: "two apps share an Argo CD application",
 			mutate: func(c *Catalog) {
 				c.Apps[1].ArgoCD.Application = "blog"

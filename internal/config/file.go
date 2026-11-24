@@ -22,6 +22,7 @@ type File struct {
 	GitHub        FileGitHub     `yaml:"github"`
 	Registry      FileRegistry   `yaml:"registry"`
 	Locks         FileLocks      `yaml:"locks"`
+	Kubernetes    FileKubernetes `yaml:"kubernetes"`
 	Auth          Auth           `yaml:"auth"`
 	Notifications []Notification `yaml:"notifications"`
 	Apps          []App          `yaml:"apps"`
@@ -56,6 +57,11 @@ type FileRegistry struct {
 
 type FileLocks struct {
 	ReminderInterval *Duration `yaml:"reminder_interval"`
+}
+
+type FileKubernetes struct {
+	Kubeconfig *string `yaml:"kubeconfig"`
+	Context    *string `yaml:"context"`
 }
 
 func Parse(r io.Reader) (File, error) {
@@ -128,6 +134,12 @@ func (f File) Apply(base Config) Config {
 	}
 	if f.Locks.ReminderInterval != nil {
 		cfg.Locks.ReminderInterval = f.Locks.ReminderInterval.Std()
+	}
+	if f.Kubernetes.Kubeconfig != nil {
+		cfg.Kubernetes.Kubeconfig = *f.Kubernetes.Kubeconfig
+	}
+	if f.Kubernetes.Context != nil {
+		cfg.Kubernetes.Context = *f.Kubernetes.Context
 	}
 	return cfg
 }

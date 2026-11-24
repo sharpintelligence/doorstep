@@ -36,6 +36,7 @@ apps:
     argocd:
       application: api
       namespace: argocd
+      sync_timeout: 15m
     gates:
       after:
         - type: health

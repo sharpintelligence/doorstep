@@ -114,6 +114,13 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Registry.CredentialsFile = "/etc/doorstep/registry/.dockerconfigjson" },
 		},
 		{
+			name: "kubeconfig and context",
+			env:  map[string]string{EnvKubeconfig: "/home/dev/.kube/config", EnvKubeContext: "kind-homelab"},
+			want: func(c *Config) {
+				c.Kubernetes = Kubernetes{Kubeconfig: "/home/dev/.kube/config", Context: "kind-homelab"}
+			},
+		},
+		{
 			name: "lock reminder interval",
 			env:  map[string]string{EnvLockReminderInterval: "12h"},
 			want: func(c *Config) { c.Locks.ReminderInterval = 12 * time.Hour },
@@ -328,6 +335,15 @@ func TestValidate(t *testing.T) {
 			name:    "lock reminder below minimum",
 			mutate:  func(c *Config) { c.Locks.ReminderInterval = 59 * time.Second },
 			wantErr: []string{"lock reminder interval: must be 0 (disabled) or at least 1m0s, got 59s"},
+		},
+		{
+			name:   "kubeconfig with context",
+			mutate: func(c *Config) { c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "prod"} },
+		},
+		{
+			name:    "kube context without kubeconfig",
+			mutate:  func(c *Config) { c.Kubernetes.Context = "prod" },
+			wantErr: []string{`kubernetes context: "prod" needs a kubeconfig`},
 		},
 		{
 			name:    "negative lock reminder",

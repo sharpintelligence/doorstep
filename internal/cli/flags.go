@@ -22,6 +22,9 @@ const (
 	flagDatabaseURLFile   = "database-url-file"
 
 	flagRegistryAuthFile = "registry-credentials-file"
+
+	flagKubeconfig  = "kubeconfig"
+	flagKubeContext = "kube-context"
 )
 
 func bindLogFlags(flags *pflag.FlagSet, overrides *config.Config) {
@@ -35,6 +38,13 @@ func bindLogFlags(flags *pflag.FlagSet, overrides *config.Config) {
 func bindDatabaseFlags(flags *pflag.FlagSet, overrides *config.Config) {
 	flags.StringVar(&overrides.Database.URLFile, flagDatabaseURLFile, "",
 		"file holding the Postgres connection URL (env "+config.EnvDatabaseURLFile+", or the URL itself in "+config.EnvDatabaseURL+")")
+}
+
+func bindKubernetesFlags(flags *pflag.FlagSet, overrides *config.Config) {
+	flags.StringVar(&overrides.Kubernetes.Kubeconfig, flagKubeconfig, "",
+		"kubeconfig file for reading Argo CD Applications; empty uses the in-cluster service account (env "+config.EnvKubeconfig+")")
+	flags.StringVar(&overrides.Kubernetes.Context, flagKubeContext, "",
+		"context in the kubeconfig; empty uses its current-context (env "+config.EnvKubeContext+")")
 }
 
 func resolveConfig(changed func(name string) bool, overrides config.Config, file config.File, lookupEnv LookupEnv) (config.Config, error) {
@@ -65,6 +75,12 @@ func resolveConfig(changed func(name string) bool, overrides config.Config, file
 	}
 	if changed(flagDatabaseURLFile) {
 		cfg.Database = config.Database{URLFile: overrides.Database.URLFile}
+	}
+	if changed(flagKubeconfig) {
+		cfg.Kubernetes.Kubeconfig = overrides.Kubernetes.Kubeconfig
+	}
+	if changed(flagKubeContext) {
+		cfg.Kubernetes.Context = overrides.Kubernetes.Context
 	}
 	return cfg, nil
 }

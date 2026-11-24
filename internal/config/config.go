@@ -27,18 +27,22 @@ const (
 
 	EnvLockReminderInterval = "DOORSTEP_LOCK_REMINDER_INTERVAL"
 
+	EnvKubeconfig  = "DOORSTEP_KUBECONFIG"
+	EnvKubeContext = "DOORSTEP_KUBE_CONTEXT"
+
 	MinLockReminderInterval = time.Minute
 )
 
 var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
 
 type Config struct {
-	Server   Server
-	Log      Log
-	Database Database
-	GitHub   GitHub
-	Registry Registry
-	Locks    Locks
+	Server     Server
+	Log        Log
+	Database   Database
+	GitHub     GitHub
+	Registry   Registry
+	Locks      Locks
+	Kubernetes Kubernetes
 }
 
 type Server struct {
@@ -65,6 +69,18 @@ type Registry struct {
 
 type Locks struct {
 	ReminderInterval time.Duration
+}
+
+type Kubernetes struct {
+	Kubeconfig string
+	Context    string
+}
+
+func (k Kubernetes) Validate() error {
+	if k.Context != "" && k.Kubeconfig == "" {
+		return fmt.Errorf("kubernetes context: %q needs a kubeconfig; in-cluster access has no contexts", k.Context)
+	}
+	return nil
 }
 
 func Default() Config {
@@ -116,6 +132,12 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup(EnvRegistryCredentialsFile); ok {
 		cfg.Registry.CredentialsFile = v
 	}
+	if v, ok := lookup(EnvKubeconfig); ok {
+		cfg.Kubernetes.Kubeconfig = v
+	}
+	if v, ok := lookup(EnvKubeContext); ok {
+		cfg.Kubernetes.Context = v
+	}
 	return cfg, errors.Join(errs...)
 }
 
@@ -164,7 +186,7 @@ func (c Config) ValidateSettings() error {
 			errs = append(errs, fmt.Errorf("public url: %w", err))
 		}
 	}
-	errs = append(errs, c.Log.Validate(), c.Locks.Validate())
+	errs = append(errs, c.Log.Validate(), c.Locks.Validate(), c.Kubernetes.Validate())
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }

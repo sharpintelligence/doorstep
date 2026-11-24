@@ -30,9 +30,11 @@ Apps, notification targets and the `auth` section are only read from the configu
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
 | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
+| | `DOORSTEP_KUBECONFIG` | empty (in-cluster) | Kubeconfig file used to read Argo CD Applications. Empty uses the pod's ServiceAccount; doorstep never falls back to `$KUBECONFIG` or `~/.kube/config`. Only a subset of kubeconfig settings is supported; see [argocd.md](argocd.md#connecting-to-the-cluster). `serve` does not read Applications yet; the `--kubeconfig` flag is offered by [`argocd status`](#doorstep-argocd-status). |
+| | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` | Context in that kubeconfig. Requires a kubeconfig. The `--kube-context` flag is offered by `argocd status`. |
 | | `DOORSTEP_LOCK_REMINDER_INTERVAL` | `24h` | How long a freeze lock may be held before doorstep sends a reminder, and how often it repeats while the lock stays held. Go duration syntax. `0s` disables reminders (expired locks are still cleaned up); otherwise at least `1m`; must not be negative. See [locks.md](locks.md#reminders). |
 
-The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval has no flag.
+The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval and the Kubernetes connection have no `serve` flag.
 
 Example:
 
@@ -261,6 +263,8 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `github.api_url` | none | `DOORSTEP_GITHUB_API_URL` |
 | `registry.credentials_file` | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` |
 | `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
+| `kubernetes.kubeconfig` | `--kubeconfig` (`argocd status` only) | `DOORSTEP_KUBECONFIG` |
+| `kubernetes.context` | `--kube-context` (`argocd status` only) | `DOORSTEP_KUBE_CONTEXT` |
 
 A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL and the GitHub App private key can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
 
@@ -350,6 +354,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `deploy.max_batch` | `10` | Most queued commits collapsed into one deploy, 1 to 100. When several merges are waiting, the newest of the first `max_batch` is deployed and the older ones are superseded; `1` deploys every commit. An urgent deploy still supersedes older queued deploys of older commits regardless of this limit. See [queue.md](queue.md#batching). |
 | `argocd.application` | the app name | Name of the Argo CD `Application` to watch; a DNS subdomain. Several apps may share one Application, for example when it runs several images. |
 | `argocd.namespace` | `argocd` | Namespace of that Application; a DNS label. |
+| `argocd.sync_timeout` | `10m` | How long a deploy waits for the Application to sync to a revision containing the pin commit and become healthy before it fails; must be positive. See [argocd.md](argocd.md#timeouts). |
 | `gates.before` | `checks` | Gates evaluated before the pin is written; see [Gates](#gates). |
 | `gates.after` | `health` | Gates evaluated after Argo CD has synced the pin. |
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
@@ -393,7 +398,7 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `type` | Phase | Settings | Passes when |
 | --- | --- | --- | --- |
 | `checks` | `before` | `timeout`, default `30m` | The checks in `source.required_checks` (or all checks) succeeded on the commit. |
-| `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. |
+| `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. The deploy already waited for this for up to `argocd.sync_timeout`, so the gate's timeout only matters when health is lost again afterwards. |
 | `soak` | `after` | `duration`, required | The Application stays healthy for `duration`. |
 
 A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)).
@@ -489,6 +494,7 @@ apps:
     argocd:
       application: api
       namespace: argo-cd
+      sync_timeout: 20m
     gates:
       before:
         - type: checks
@@ -575,6 +581,14 @@ doorstep config validate --config config.yaml
 ```
 
 Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags (so a file with a sign-in provider must set `server.public_url` itself to pass), so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
+
+## `doorstep argocd status`
+
+```sh
+doorstep argocd status <app> --config config.yaml [--kubeconfig PATH] [--kube-context NAME] [--revision SHA]
+```
+
+Reads the app's Argo CD Application with the same Kubernetes connection as `serve` and prints its sync state, revision, last operation, health and unhealthy resources. With `--revision`, it also reports whether the synced revision contains that GitOps commit, whether the app counts as ready and the failure reason. It exits 1 when the Application cannot be read, which makes it a quick check of RBAC and connectivity. The path comes from `--config` or `DOORSTEP_CONFIG`. See [argocd.md](argocd.md#doorstep-argocd-status).
 
 ## `doorstep notify test`
 
