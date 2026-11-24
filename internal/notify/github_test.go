@@ -42,6 +42,8 @@ type fakeDeploymentsAPI struct {
 	lists       int
 	creates     int
 	failStatus  int
+	failMessage string
+	failHeader  http.Header
 }
 
 func (f *fakeDeploymentsAPI) register(srv *githubtest.Server) {
@@ -51,24 +53,31 @@ func (f *fakeDeploymentsAPI) register(srv *githubtest.Server) {
 }
 
 func (f *fakeDeploymentsAPI) setFailure(status int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.failStatus = status
+	f.setFailureResponse(status, "Resource not accessible by integration", nil)
 }
 
-func (f *fakeDeploymentsAPI) fail() (int, bool) {
-	if f.failStatus != 0 {
-		return f.failStatus, true
+func (f *fakeDeploymentsAPI) setFailureResponse(status int, message string, header http.Header) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failStatus, f.failMessage, f.failHeader = status, message, header
+}
+
+func (f *fakeDeploymentsAPI) fail(w http.ResponseWriter) bool {
+	if f.failStatus == 0 {
+		return false
 	}
-	return 0, false
+	for key, values := range f.failHeader {
+		w.Header()[key] = values
+	}
+	githubtest.WriteError(w, f.failStatus, f.failMessage)
+	return true
 }
 
 func (f *fakeDeploymentsAPI) list(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++
-	if status, ok := f.fail(); ok {
-		githubtest.WriteError(w, status, "Resource not accessible by integration")
+	if f.fail(w) {
 		return
 	}
 	repo := r.PathValue("owner") + "/" + r.PathValue("repo")
@@ -87,8 +96,7 @@ func (f *fakeDeploymentsAPI) create(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creates++
-	if status, ok := f.fail(); ok {
-		githubtest.WriteError(w, status, "Resource not accessible by integration")
+	if f.fail(w) {
 		return
 	}
 	var d fakeGitHubDeployment
@@ -105,8 +113,7 @@ func (f *fakeDeploymentsAPI) create(w http.ResponseWriter, r *http.Request) {
 func (f *fakeDeploymentsAPI) status(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if status, ok := f.fail(); ok {
-		githubtest.WriteError(w, status, "Resource not accessible by integration")
+	if f.fail(w) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -233,7 +240,7 @@ func TestGitHubSinkFindsExistingDeploymentAfterRestart(t *testing.T) {
 		t.Fatalf("creates = %d, lists = %d; want the restarted sink to find the existing deployment", creates, lists)
 	}
 	last := statuses[len(statuses)-1]
-	if last.State != "failure" || last.Description != "Failed: health gate: Application blog is Degraded" || last.deploymentID != deployments[0].ID {
+	if last.State != "failure" || last.Description != "Failed" || last.deploymentID != deployments[0].ID {
 		t.Errorf("failure status = %+v", last)
 	}
 }
@@ -265,7 +272,7 @@ func TestGitHubSinkRollback(t *testing.T) {
 	}
 	want := []string{
 		"1:in_progress:Deploying",
-		"1:failure:Failed: health gate: Application blog is Degraded",
+		"1:failure:Failed",
 		"2:in_progress:Rolling back",
 		"2:success:Rolled back #42",
 	}
@@ -400,6 +407,76 @@ func TestGitHubSinkTransientErrorsAreRetryable(t *testing.T) {
 	}
 }
 
+func TestGitHubSinkRateLimitsAreRetried(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		status         int
+		message        string
+		header         http.Header
+		wantRetryAfter time.Duration
+		wantDelay      bool
+	}{
+		{
+			name:      "primary rate limit",
+			status:    http.StatusForbidden,
+			message:   "API rate limit exceeded for installation ID 1.",
+			header:    http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}},
+			wantDelay: true,
+		},
+		{
+			name:           "secondary rate limit",
+			status:         http.StatusForbidden,
+			message:        "You have exceeded a secondary rate limit.",
+			header:         http.Header{"Retry-After": {"60"}},
+			wantRetryAfter: time.Minute,
+			wantDelay:      true,
+		},
+		{
+			name:    "secondary rate limit without headers",
+			status:  http.StatusForbidden,
+			message: "You have exceeded a secondary rate limit.",
+		},
+		{
+			name:           "too many requests",
+			status:         http.StatusTooManyRequests,
+			header:         http.Header{"Retry-After": {"9"}},
+			wantRetryAfter: 9 * time.Second,
+			wantDelay:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newGitHubFixture(t)
+			f.api.setFailureResponse(tt.status, tt.message, tt.header)
+			logger, logs := newTestLogger()
+			sink, err := NewGitHub(GitHubOptions{Repos: f.app, Apps: map[string]bool{"blog": true}, Logger: logger, Now: f.clock.Now})
+			if err != nil {
+				t.Fatalf("NewGitHub: %v", err)
+			}
+			err = deliver(t, sink, sampleNamed(t, "deploy-started"))
+			if err == nil || !retryable(err) || isReported(err) {
+				t.Fatalf("deliver() = %v, want a retryable, unreported error", err)
+			}
+			delay, ok := retryAfter(err, time.Now())
+			if ok != tt.wantDelay {
+				t.Fatalf("retryAfter() ok = %t, want %t", ok, tt.wantDelay)
+			}
+			if tt.wantRetryAfter > 0 && delay != tt.wantRetryAfter {
+				t.Errorf("retryAfter() = %s, want %s", delay, tt.wantRetryAfter)
+			}
+			if tt.wantDelay && delay <= 0 {
+				t.Errorf("retryAfter() = %s, want a positive delay", delay)
+			}
+			if got := logs.count(t, "cannot report deployments to github", "WARN"); got != 0 {
+				t.Errorf("permission warnings = %d, want 0: %s", got, logs)
+			}
+		})
+	}
+}
+
 func TestGitHubSinkCacheIsBounded(t *testing.T) {
 	t.Parallel()
 
@@ -420,6 +497,30 @@ func TestGitHubSinkCacheIsBounded(t *testing.T) {
 	}
 	if _, err := NewGitHub(GitHubOptions{}); err == nil {
 		t.Error("NewGitHub without a repository client source succeeded")
+	}
+}
+
+func TestGitHubStatusDescriptionOmitsFailureReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sample string
+		want   string
+	}{
+		{sample: "deploy-failed", want: "Failed"},
+		{sample: "rollback-failed", want: "Rollback failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sample, func(t *testing.T) {
+			t.Parallel()
+			n := sampleNamed(t, tt.sample)
+			if n.Deployment.FailureReason == "" {
+				t.Fatal("sample has no failure reason")
+			}
+			if got := statusDescription(n); got != tt.want {
+				t.Errorf("statusDescription() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

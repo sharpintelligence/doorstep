@@ -70,7 +70,7 @@ func retryable(err error) bool {
 		return retryableStatus(statusErr.StatusCode)
 	}
 	if apiErr, ok := errors.AsType[*github.APIError](err); ok {
-		return retryableStatus(apiErr.StatusCode)
+		return apiErr.RateLimited() || retryableStatus(apiErr.StatusCode)
 	}
 	return true
 }
@@ -79,10 +79,24 @@ func retryableStatus(code int) bool {
 	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
 
-func retryAfter(err error) (time.Duration, bool) {
-	statusErr, ok := errors.AsType[*StatusError](err)
-	if !ok || statusErr.RetryAfter <= 0 {
+func retryAfter(err error, now time.Time) (time.Duration, bool) {
+	if statusErr, ok := errors.AsType[*StatusError](err); ok && statusErr.RetryAfter > 0 {
+		return statusErr.RetryAfter, true
+	}
+	apiErr, ok := errors.AsType[*github.APIError](err)
+	switch {
+	case !ok:
+		return 0, false
+	case apiErr.RetryAfter > 0:
+		return apiErr.RetryAfter, true
+	case apiErr.RateLimitExhausted && apiErr.RateLimitReset.After(now):
+		return apiErr.RateLimitReset.Sub(now), true
+	default:
 		return 0, false
 	}
-	return statusErr.RetryAfter, true
+}
+
+func isRateLimited(err error) bool {
+	apiErr, ok := errors.AsType[*github.APIError](err)
+	return ok && apiErr.RateLimited()
 }

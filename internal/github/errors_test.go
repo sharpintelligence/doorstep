@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -123,6 +124,96 @@ func TestHasMessage(t *testing.T) {
 			t.Parallel()
 			if got := HasMessage(tt.err, tt.status, tt.fragment); got != tt.want {
 				t.Fatalf("HasMessage() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewAPIErrorRateLimit(t *testing.T) {
+	t.Parallel()
+
+	reset := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name            string
+		status          int
+		header          http.Header
+		message         string
+		wantRetryAfter  time.Duration
+		wantExhausted   bool
+		wantReset       time.Time
+		wantRateLimited bool
+	}{
+		{
+			name:            "primary rate limit",
+			status:          http.StatusForbidden,
+			header:          http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {"1795514400"}},
+			message:         "API rate limit exceeded for installation ID 1.",
+			wantExhausted:   true,
+			wantReset:       reset,
+			wantRateLimited: true,
+		},
+		{
+			name:            "secondary rate limit with retry after",
+			status:          http.StatusForbidden,
+			header:          http.Header{"Retry-After": {"60"}, "X-Ratelimit-Remaining": {"4000"}},
+			message:         "You have exceeded a secondary rate limit.",
+			wantRetryAfter:  time.Minute,
+			wantRateLimited: true,
+		},
+		{
+			name:            "secondary rate limit by message only",
+			status:          http.StatusForbidden,
+			header:          http.Header{"X-Ratelimit-Remaining": {"4000"}},
+			message:         "You have exceeded a secondary rate limit.",
+			wantRateLimited: true,
+		},
+		{
+			name:            "too many requests",
+			status:          http.StatusTooManyRequests,
+			header:          http.Header{"Retry-After": {"5"}},
+			wantRetryAfter:  5 * time.Second,
+			wantRateLimited: true,
+		},
+		{
+			name:      "missing permission",
+			status:    http.StatusForbidden,
+			header:    http.Header{"X-Ratelimit-Remaining": {"4999"}, "X-Ratelimit-Reset": {"1795514400"}},
+			message:   "Resource not accessible by integration",
+			wantReset: reset,
+		},
+		{
+			name:    "malformed headers",
+			status:  http.StatusForbidden,
+			header:  http.Header{"Retry-After": {"Tue, 24 Nov 2026 10:00:00 GMT"}, "X-Ratelimit-Reset": {"soon"}, "X-Ratelimit-Remaining": {""}},
+			message: "Resource not accessible by integration",
+		},
+		{
+			name:           "server error",
+			status:         http.StatusBadGateway,
+			header:         http.Header{"Retry-After": {"3"}},
+			wantRetryAfter: 3 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := json.Marshal(map[string]string{"message": tt.message})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			apiErr := newAPIError(&http.Response{StatusCode: tt.status, Header: tt.header}, strings.NewReader(string(body)))
+			if apiErr.RetryAfter != tt.wantRetryAfter {
+				t.Errorf("RetryAfter = %s, want %s", apiErr.RetryAfter, tt.wantRetryAfter)
+			}
+			if apiErr.RateLimitExhausted != tt.wantExhausted {
+				t.Errorf("RateLimitExhausted = %t, want %t", apiErr.RateLimitExhausted, tt.wantExhausted)
+			}
+			if !apiErr.RateLimitReset.Equal(tt.wantReset) {
+				t.Errorf("RateLimitReset = %s, want %s", apiErr.RateLimitReset, tt.wantReset)
+			}
+			if got := apiErr.RateLimited(); got != tt.wantRateLimited {
+				t.Errorf("RateLimited() = %t, want %t", got, tt.wantRateLimited)
 			}
 		})
 	}

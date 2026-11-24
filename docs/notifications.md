@@ -143,9 +143,11 @@ Answer with any `2xx` status. A target that returns HTML or JSON in the body nee
 
 ## Delivery
 
+> **Not wired into `serve` yet.** The dispatcher, targets and GitHub reporter described here are built and tested, and `doorstep notify test` uses them, but nothing emits notifications until the deployment engine lands (doorstep-ehl.4.4), which builds the dispatcher in `serve`, hands it to the engine and closes it with the shutdown timeout. Until then `notifications[]` and `apps[].notify` are validated but `serve` sends nothing.
+
 - **Non-blocking.** The engine hands each notification to a dispatcher and carries on. The dispatcher checks it, picks the targets of its app plus the GitHub reporter, and puts it on each target's queue without any network I/O.
 - **Per-target queues.** Every target has its own queue of 64 notifications and its own worker, so a slow Slack never delays GitHub statuses, and each target receives events in the order they happened (`started` before `succeeded`). When a queue is full the new notification is dropped, logged at `warn` and counted.
-- **Retries.** Each delivery gets up to 4 attempts, 10 seconds each, with exponential backoff of about 1, 2 and 4 seconds (plus or minus 20%). A `Retry-After` header is honoured up to 30 seconds. Network errors, timeouts, `408`, `429`, `5xx` and secrets that cannot be read are retried; other `4xx` and `3xx` answers are not. Redirects are never followed, so signed payloads and secret URLs stay on the configured host.
+- **Retries.** Each delivery gets up to 4 attempts, 10 seconds each, with exponential backoff of about 1, 2 and 4 seconds (plus or minus 20%). A `Retry-After` header is honoured up to 30 seconds. Network errors, timeouts, `408`, `429`, `5xx`, GitHub rate limits and secrets that cannot be read are retried; other `4xx` and `3xx` answers are not. Redirects are never followed, so signed payloads and secret URLs stay on the configured host.
 - **Shutdown.** On shutdown the dispatcher stops accepting notifications and keeps delivering what is queued until the shutdown timeout; whatever is left then is dropped and counted.
 - **Not durable.** Queues live in memory. Notifications queued when a process crashes are lost, and with several replicas each sends the notifications for the deployments it works on. The deployment history in Postgres is the record to rely on.
 - **Observability.** Failures are logged at `warn` with the target name, type, event, app, deployment ID, number of attempts and the error, never the URL or secret. `doorstep_notifications_total{type, result}` counts `sent`, `failed` and `dropped` deliveries per target type; see [metrics.md](metrics.md).
@@ -167,13 +169,16 @@ Lock events are not reported to GitHub.
 - **Environment.** The GitHub environment is the app name. Model environments as separate apps (`blog-staging`, `blog-prod`) and each gets its own GitHub environment, even though they share a repository. GitHub creates an environment the first time a deployment names it.
 - **Deployment.** One GitHub deployment per doorstep deployment, for the full commit SHA, with task `deploy`, `auto_merge` off and no required status contexts (doorstep runs its own check gate). Its payload is `{"doorstep_deployment_id": 42, "kind": "deploy"}`, plus `rollback_of_id` for rollbacks.
 - **Statuses.** Statuses are posted with `auto_inactive`, so a successful deployment marks the previous one in that environment inactive, and with the deployment's doorstep link as `log_url` when `server.public_url` is set.
-- **Rollbacks.** A rollback gets its own GitHub deployment for the commit it re-pins, described as `Rollback of #41`. When it succeeds, that commit becomes the active deployment of the environment again, which is what is running.
+- **Rollbacks.** A rollback gets its own GitHub deployment, described as `Rollback of #41`. Its `ref` and `sha` are the full SHA of the rollback's own commit, which is the commit whose image it re-pins (the last good deployment's), not the commit of the deployment it reverts. The reverted deployment keeps its `failure` (or `inactive`, if it was cancelled) status. When the rollback succeeds, `auto_inactive` marks the earlier successful deployments of the environment inactive and the rollback becomes the active deployment, so the environment shows the re-pinned commit, which is what is running.
+- **Descriptions.** Status descriptions are short and fixed (`Deploying`, `Failed`, `Rollback failed`, `Superseded by #44`). GitHub shows them to everyone who can read the repository, which is everyone for a public one, so failure reasons, which can name internal hosts, are never posted there; follow `log_url` to doorstep for the details.
 - **Restarts and replicas.** doorstep does not store GitHub deployment IDs. It looks the deployment up by commit, environment and task and matches `doorstep_deployment_id` in its payload, creating it only when none matches, and remembers up to 1024 IDs in memory until the deployment ends. Any replica, before or after a restart, finds the same deployment.
 - **Skipped.** Deployments without a valid commit SHA or `owner/name` repository are not reported.
 
 To turn GitHub deployments off for one app, for example a repository whose `on: deployment` workflows should not run, set `apps[].source.deployments: false`.
 
 If the App lacks the permission, or is not installed on the repository, GitHub answers `403` or `404`. doorstep does not retry, logs one `cannot report deployments to github` warning per repository per hour with a hint, counts the failure and carries on deploying.
+
+A `403` that is a rate limit is not a permission problem. When GitHub sends `x-ratelimit-remaining: 0` (the primary limit), a `Retry-After` header or a message about a secondary rate limit, doorstep retries like any transient error: it waits for `Retry-After`, or until `x-ratelimit-reset` for the primary limit, up to 30 seconds, and otherwise backs off as usual. The same applies to `429`. If every attempt is rate limited, the failure is logged as an ordinary delivery failure, without the permission hint.
 
 Things to know about GitHub's side:
 

@@ -249,17 +249,34 @@ func notificationAttrs(w *worker, n core.Notification) []slog.Attr {
 }
 
 func clone(n core.Notification) core.Notification {
-	if n.Deployment != nil {
-		d := *n.Deployment
-		n.Deployment = &d
-	}
-	if n.RollbackOf != nil {
-		d := *n.RollbackOf
-		n.RollbackOf = &d
-	}
+	n.Deployment = cloneDeployment(n.Deployment)
+	n.RollbackOf = cloneDeployment(n.RollbackOf)
 	if n.Lock != nil {
 		l := *n.Lock
+		l.DeploymentID = clonePointer(l.DeploymentID)
+		l.ExpiresAt = clonePointer(l.ExpiresAt)
 		n.Lock = &l
 	}
 	return n
+}
+
+func cloneDeployment(d *core.Deployment) *core.Deployment {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.ParentID = clonePointer(d.ParentID)
+	c.RollbackOfID = clonePointer(d.RollbackOfID)
+	c.SupersededByID = clonePointer(d.SupersededByID)
+	c.StartedAt = clonePointer(d.StartedAt)
+	c.FinishedAt = clonePointer(d.FinishedAt)
+	return &c
+}
+
+func clonePointer[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

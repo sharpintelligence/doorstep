@@ -92,7 +92,7 @@ func (p Policy) try(ctx context.Context, delivery Delivery) error {
 }
 
 func (p Policy) delay(attempt int, err error) time.Duration {
-	if after, ok := retryAfter(err); ok {
+	if after, ok := retryAfter(err, time.Now()); ok {
 		return min(after, p.MaxDelay)
 	}
 	backoff := p.BaseDelay << (attempt - 1)

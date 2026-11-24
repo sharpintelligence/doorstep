@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -46,9 +47,23 @@ func HasMessage(err error, status int, fragment string) bool {
 }
 
 type APIError struct {
-	StatusCode int
-	Message    string
-	RequestID  string
+	StatusCode         int
+	Message            string
+	RequestID          string
+	RetryAfter         time.Duration
+	RateLimitExhausted bool
+	RateLimitReset     time.Time
+}
+
+func (e *APIError) RateLimited() bool {
+	switch e.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return e.RateLimitExhausted || e.RetryAfter > 0 || strings.Contains(strings.ToLower(e.Message), "rate limit")
+	default:
+		return false
+	}
 }
 
 func (e *APIError) Error() string {
@@ -67,6 +82,9 @@ func newAPIError(resp *http.Response, body io.Reader) *APIError {
 		StatusCode: resp.StatusCode,
 		RequestID:  resp.Header.Get("X-GitHub-Request-Id"),
 	}
+	apiErr.RetryAfter = parseRetryAfterSeconds(resp.Header.Get("Retry-After"))
+	apiErr.RateLimitExhausted = strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0"
+	apiErr.RateLimitReset = parseUnixTime(resp.Header.Get("X-RateLimit-Reset"))
 	var payload struct {
 		Message string `json:"message"`
 		Errors  []struct {
@@ -83,6 +101,22 @@ func newAPIError(resp *http.Response, body io.Reader) *APIError {
 		apiErr.Message = truncate(strings.TrimPrefix(strings.Join(parts, ": "), ": "), maxErrorMessageBytes)
 	}
 	return apiErr
+}
+
+func parseRetryAfterSeconds(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func parseUnixTime(value string) time.Time {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0).UTC()
 }
 
 func truncate(s string, limit int) string {

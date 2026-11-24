@@ -124,6 +124,28 @@ func TestPolicyDo(t *testing.T) {
 			wantCalls:  2,
 			wantSleeps: []time.Duration{time.Second},
 		},
+		{
+			name:       "github 429 honours retry after",
+			errs:       []error{&github.APIError{StatusCode: http.StatusTooManyRequests, RetryAfter: 5 * time.Second}},
+			random:     0.5,
+			wantCalls:  2,
+			wantSleeps: []time.Duration{5 * time.Second},
+		},
+		{
+			name:       "github primary rate limit waits for the reset",
+			errs:       []error{&github.APIError{StatusCode: http.StatusForbidden, RateLimitExhausted: true, RateLimitReset: time.Now().Add(time.Hour)}},
+			random:     0.5,
+			wantCalls:  2,
+			wantSleeps: []time.Duration{30 * time.Second},
+		},
+		{
+			name:       "github secondary rate limit is retried",
+			errs:       []error{&github.APIError{StatusCode: http.StatusForbidden, Message: "You have exceeded a secondary rate limit."}},
+			random:     0.5,
+			wantCalls:  2,
+			wantSleeps: []time.Duration{time.Second},
+		},
+		{name: "github 403 is permanent", errs: []error{&github.APIError{StatusCode: http.StatusForbidden, Message: "Resource not accessible by integration"}}, wantCalls: 1, wantErr: true},
 		{name: "github 422 is permanent", errs: []error{&github.APIError{StatusCode: http.StatusUnprocessableEntity}}, wantCalls: 1, wantErr: true},
 		{
 			name:       "attempt timeout is retried",
@@ -155,6 +177,35 @@ func TestPolicyDo(t *testing.T) {
 			}
 			if !slices.Equal(sleeps, tt.wantSleeps) {
 				t.Errorf("sleeps = %v, want %v", sleeps, tt.wantSleeps)
+			}
+		})
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		err    error
+		want   time.Duration
+		wantOK bool
+	}{
+		{name: "plain error", err: errors.New("boom")},
+		{name: "status error with retry after", err: &StatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: 3 * time.Second}, want: 3 * time.Second, wantOK: true},
+		{name: "status error without retry after", err: &StatusError{StatusCode: http.StatusServiceUnavailable}},
+		{name: "github retry after", err: fmt.Errorf("wrapped: %w", &github.APIError{StatusCode: http.StatusForbidden, RetryAfter: time.Minute}), want: time.Minute, wantOK: true},
+		{name: "github retry after wins over reset", err: &github.APIError{StatusCode: http.StatusForbidden, RetryAfter: 2 * time.Second, RateLimitExhausted: true, RateLimitReset: testTime.Add(time.Hour)}, want: 2 * time.Second, wantOK: true},
+		{name: "github rate limit reset", err: &github.APIError{StatusCode: http.StatusForbidden, RateLimitExhausted: true, RateLimitReset: testTime.Add(90 * time.Second)}, want: 90 * time.Second, wantOK: true},
+		{name: "github rate limit reset in the past", err: &github.APIError{StatusCode: http.StatusForbidden, RateLimitExhausted: true, RateLimitReset: testTime.Add(-time.Second)}},
+		{name: "github reset without exhaustion", err: &github.APIError{StatusCode: http.StatusForbidden, RateLimitReset: testTime.Add(time.Minute)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := retryAfter(tt.err, testTime)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("retryAfter() = %s, %t, want %s, %t", got, ok, tt.want, tt.wantOK)
 			}
 		})
 	}

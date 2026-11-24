@@ -492,3 +492,63 @@ func TestDispatcherWithoutSinks(t *testing.T) {
 	d.Notify(t.Context(), sampleNamed(t, "deploy-succeeded"))
 	closeDispatcher(t, d)
 }
+
+func TestCloneCopiesPointedToValues(t *testing.T) {
+	t.Parallel()
+
+	later := testTime.Add(time.Hour)
+	tests := []struct {
+		name    string
+		sample  string
+		mutate  func(*core.Notification)
+		changed func(core.Notification) bool
+	}{
+		{
+			name:    "deployment started at",
+			sample:  "deploy-started",
+			mutate:  func(n *core.Notification) { *n.Deployment.StartedAt = later },
+			changed: func(n core.Notification) bool { return n.Deployment.StartedAt.Equal(later) },
+		},
+		{
+			name:    "deployment finished at",
+			sample:  "deploy-succeeded",
+			mutate:  func(n *core.Notification) { *n.Deployment.FinishedAt = later },
+			changed: func(n core.Notification) bool { return n.Deployment.FinishedAt.Equal(later) },
+		},
+		{
+			name:    "rollback of id",
+			sample:  "deploy-rolled-back",
+			mutate:  func(n *core.Notification) { *n.Deployment.RollbackOfID = 99 },
+			changed: func(n core.Notification) bool { return *n.Deployment.RollbackOfID == 99 },
+		},
+		{
+			name:    "superseded by id",
+			sample:  "deploy-superseded",
+			mutate:  func(n *core.Notification) { *n.Deployment.SupersededByID = 99 },
+			changed: func(n core.Notification) bool { return *n.Deployment.SupersededByID == 99 },
+		},
+		{
+			name:    "reverted deployment",
+			sample:  "deploy-rolled-back",
+			mutate:  func(n *core.Notification) { n.RollbackOf.FailureReason = "changed" },
+			changed: func(n core.Notification) bool { return n.RollbackOf.FailureReason == "changed" },
+		},
+		{
+			name:    "lock expires at",
+			sample:  "lock-acquired",
+			mutate:  func(n *core.Notification) { *n.Lock.ExpiresAt = later.Add(time.Hour) },
+			changed: func(n core.Notification) bool { return n.Lock.ExpiresAt.Equal(later.Add(time.Hour)) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			original := sampleNamed(t, tt.sample)
+			c := clone(original)
+			tt.mutate(&original)
+			if tt.changed(c) {
+				t.Error("clone shares a value with the original notification")
+			}
+		})
+	}
+}

@@ -179,6 +179,8 @@ func (g *GitHub) deploymentID(ctx context.Context, client *github.Client, owner,
 
 func (g *GitHub) classify(ctx context.Context, repository string, err error) error {
 	switch {
+	case isRateLimited(err):
+		return err
 	case errors.Is(err, github.ErrNotInstalled), errors.Is(err, github.ErrInstallationSuspended),
 		hasAPIStatus(err, http.StatusForbidden), hasAPIStatus(err, http.StatusNotFound):
 		g.warnOnce(ctx, repository, err)
@@ -310,14 +312,10 @@ func statusDescription(n core.Notification) string {
 		}
 		return "Rolled back"
 	case core.NotificationDeployFailed:
-		text := "Failed"
 		if d.Kind == core.KindRollback {
-			text = "Rollback failed"
+			return "Rollback failed"
 		}
-		if d.FailureReason != "" {
-			text += ": " + d.FailureReason
-		}
-		return text
+		return "Failed"
 	case core.NotificationDeployCancelled:
 		return "Cancelled"
 	case core.NotificationDeploySuperseded:
