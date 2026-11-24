@@ -149,11 +149,11 @@ type Clock interface {
 
 ```go
 resolver := registry.New(registry.Options{Credentials: registry.FileCredentials{Path: path}, UserAgent: ua})
-digest, err := resolver.Resolve(ctx, "ghcr.io/owner/app", commitSHA)
+digest, err := resolver.ResolveCommit(ctx, "ghcr.io/owner/app", commitSHA)
 ```
 
 - Inputs are plain strings and the result is `registry.Digest` (`algorithm:hex`), so no go-containerregistry type leaks out. The engine bead adds a small adapter from `core.ImageRef` to `Resolve` and from `registry.Digest` to `core.Digest`.
-- The repository must not carry a tag or digest, and the tag must be a non-empty, valid OCI tag. Nothing defaults to `latest`. The resolver does not require a 40 character commit SHA: that convention belongs to intake and the engine, and `doorstep image resolve` accepts any tag.
+- The repository must not carry a tag or digest, and the tag must be a non-empty, valid OCI tag. Nothing defaults to `latest`. `ResolveCommit` encodes the convention that images are tagged with the full commit SHA: it rejects anything but 40 lowercase hex characters with `ErrInvalidReference` before contacting the registry, and is what the engine calls. `Resolve` accepts any tag, which `doorstep image resolve` uses.
 - It sends `HEAD /v2/<name>/manifests/<tag>` accepting OCI index, OCI manifest, Docker manifest list and Docker v2 manifest, and returns `Docker-Content-Digest`. A multi-architecture image therefore resolves to its index digest, which stays valid on every node architecture. HEAD is not counted against Docker Hub pull limits.
 - Only when HEAD fails without a registry verdict (no digest header, `405`, other unexpected `4xx`) does it fall back to `GET` and hash the manifest body.
 - Every call reads credentials, pings the registry, performs the auth handshake (anonymous, basic or bearer token exchange) and issues the request within `Options.Timeout` (default 30 s). There is no token or transport cache and no retry inside the adapter: resolves are low volume, the engine owns retry policy, and every step is idempotent. If polling volume ever demands it, go-containerregistry's `remote.Puller` can cache tokens per repository later.
@@ -162,14 +162,16 @@ Errors wrap a sentinel with `%w` when the registry gave a verdict:
 
 | Sentinel | Cause | What callers do |
 | --- | --- | --- |
-| `ErrNotFound` | `404` (`MANIFEST_UNKNOWN`, `NAME_UNKNOWN`) | the image is not pushed yet: keep waiting for CI |
+| `ErrNotFound` | `404` on the manifest request (`MANIFEST_UNKNOWN`, `NAME_UNKNOWN`). A `404` from the `/v2/` ping or the token realm means the host is not a registry or is misconfigured, and stays unclassified | the image is not pushed yet: keep waiting for CI |
 | `ErrDenied` | `401`/`403` after the auth handshake | surface it: usually missing or wrong credentials. GHCR and Docker Hub also answer this way for a private repository that does not exist yet, so the engine may keep waiting with a louder message; that policy belongs to the engine |
-| `ErrInvalidReference` | bad repository or tag | never retry |
+| `ErrInvalidReference` | bad repository, tag or commit SHA, rejected locally or by the registry with `400` `NAME_INVALID`/`TAG_INVALID` | never retry |
 | none | network errors, timeouts, `429`, `5xx`, malformed responses | transient: retry with backoff |
 
 Context cancellation and deadlines stay visible through `errors.Is(err, context.Canceled)` and `context.DeadlineExceeded`.
 
 Credentials come from a Docker `config.json` (the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret) parsed by a small parser in the package. Keys are `host[/path-prefix]` and the longest whole-segment prefix of `host/repository` wins, so each GitHub owner on `ghcr.io` can have its own token. `FileCredentials` re-reads the file on every lookup, so a rotated Secret is picked up without a restart. See [configuration.md](configuration.md#registry-credentials).
+
+`serve` loads the credentials file once at startup only to fail fast on a missing or malformed file; nothing in `serve` resolves images yet. The engine bead wires a `Resolver` into `serve` with `Credentials: registry.FileCredentials{Path: cfg.Registry.CredentialsFile}`, the same source `doorstep image resolve` uses, so rotation works at runtime.
 
 ## State machine and concurrency
 

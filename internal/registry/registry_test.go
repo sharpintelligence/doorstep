@@ -31,6 +31,8 @@ const (
 	errCodeDenied         = "DENIED"
 	errCodeUnauthorized   = "UNAUTHORIZED"
 	errCodeTooManyRequest = "TOOMANYREQUESTS"
+	errCodeTagInvalid     = "TAG_INVALID"
+	errCodeNameInvalid    = "NAME_INVALID"
 )
 
 type authMode int
@@ -56,6 +58,7 @@ type fakeConfig struct {
 	accounts        map[string]string
 	manifests       map[string]manifest
 	omitHeadDigest  bool
+	pingStatus      int
 	headStatus      int
 	manifestStatus  int
 	manifestErrCode string
@@ -138,6 +141,10 @@ func (f *fakeRegistry) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeRegistry) servePing(w http.ResponseWriter, r *http.Request) {
+	if f.cfg.pingStatus != 0 {
+		writeRegistryError(w, f.cfg.pingStatus, "")
+		return
+	}
 	switch f.cfg.auth {
 	case authNone:
 		w.WriteHeader(http.StatusOK)
@@ -688,6 +695,40 @@ func TestResolveErrors(t *testing.T) {
 			wantManifests: 1,
 		},
 		{
+			name:          "ping not found is not an unknown image",
+			cfg:           fakeConfig{pingStatus: http.StatusNotFound, manifests: map[string]manifest{"app:v1": dockerManifest}},
+			repo:          "app",
+			tag:           "v1",
+			wantNotIs:     []error{ErrNotFound, ErrDenied, ErrInvalidReference},
+			wantManifests: 0,
+		},
+		{
+			name:          "tag rejected by registry",
+			cfg:           fakeConfig{manifestStatus: http.StatusBadRequest, manifestErrCode: errCodeTagInvalid},
+			repo:          "app",
+			tag:           "v1",
+			wantIs:        ErrInvalidReference,
+			wantNotIs:     []error{ErrNotFound, ErrDenied},
+			wantManifests: 2,
+		},
+		{
+			name:          "name rejected by registry",
+			cfg:           fakeConfig{manifestStatus: http.StatusBadRequest, manifestErrCode: errCodeNameInvalid},
+			repo:          "app",
+			tag:           "v1",
+			wantIs:        ErrInvalidReference,
+			wantNotIs:     []error{ErrNotFound, ErrDenied},
+			wantManifests: 2,
+		},
+		{
+			name:          "bad request without a code is unclassified",
+			cfg:           fakeConfig{manifestStatus: http.StatusBadRequest},
+			repo:          "app",
+			tag:           "v1",
+			wantNotIs:     []error{ErrNotFound, ErrDenied, ErrInvalidReference},
+			wantManifests: 2,
+		},
+		{
 			name:          "rate limited is transient",
 			cfg:           fakeConfig{manifestStatus: http.StatusTooManyRequests, manifestErrCode: errCodeTooManyRequest},
 			repo:          "app",
@@ -803,6 +844,54 @@ func TestResolveInvalidReference(t *testing.T) {
 	t.Cleanup(func() {
 		if reqs := fake.recorded(); len(reqs) != 0 {
 			t.Errorf("invalid references reached the registry: %+v", reqs)
+		}
+	})
+}
+
+func TestResolveCommit(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeRegistry(t, fakeConfig{manifests: map[string]manifest{"app:" + commitSHA: ociIndex}})
+	tests := []struct {
+		name    string
+		sha     string
+		want    Digest
+		wantErr bool
+	}{
+		{name: "full sha", sha: commitSHA, want: Digest(ociIndex.digest())},
+		{name: "empty", sha: "", wantErr: true},
+		{name: "short sha", sha: commitSHA[:7], wantErr: true},
+		{name: "uppercase sha", sha: strings.ToUpper(commitSHA), wantErr: true},
+		{name: "41 characters", sha: commitSHA + "0", wantErr: true},
+		{name: "not hex", sha: strings.Repeat("g", 40), wantErr: true},
+		{name: "sha-256 object name", sha: strings.Repeat("a", 64), wantErr: true},
+		{name: "branch name", sha: "main", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := New(Options{}).ResolveCommit(t.Context(), fake.repo("app"), tt.sha)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidReference) {
+					t.Fatalf("ResolveCommit(%q) error = %v, want ErrInvalidReference", tt.sha, err)
+				}
+				if !strings.Contains(err.Error(), "40 character") {
+					t.Errorf("error %q does not explain the SHA requirement", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveCommit(%q): %v", tt.sha, err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveCommit(%q) = %s, want %s", tt.sha, got, tt.want)
+			}
+		})
+	}
+	t.Cleanup(func() {
+		if n := len(fake.manifestRequests()); n != 1 {
+			t.Errorf("manifest requests = %d, want 1 (invalid SHAs must not reach the registry)", n)
 		}
 	})
 }

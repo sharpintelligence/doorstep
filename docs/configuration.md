@@ -101,7 +101,7 @@ sha256:9b2c...
 - A multi-architecture image resolves to the digest of its index, not of one platform's manifest.
 - `--registry-credentials-file` (env `DOORSTEP_REGISTRY_CREDENTIALS_FILE`) selects the credentials file; without it the request is anonymous.
 
-On failure it exits with status 1 and prints the reason: `image not found` (the tag or repository does not exist yet), `registry denied access` (missing or wrong credentials; GHCR and Docker Hub also answer this way for a private repository that does not exist), `invalid image reference`, or a transport error.
+On failure it exits with status 1 and prints the reason: `image not found` (the tag or repository does not exist yet), `registry denied access` (missing or wrong credentials; GHCR and Docker Hub also answer this way for a private repository that does not exist), `invalid image reference` (rejected locally or by the registry), or another error such as a transport failure or a host that does not answer the registry API.
 
 ## Registry credentials
 
@@ -125,7 +125,7 @@ Each entry under `auths` provides one of:
 - `identitytoken`: an OAuth2 refresh token, as written by some cloud registry logins;
 - `registrytoken`: a bearer token sent to the registry as is.
 
-`auth` wins over `username`/`password` when both are present. Other fields (`email`, `credsStore`, `credHelpers`, `HttpHeaders`, ...) are ignored, so a file written by `docker login` works as long as the credentials are inline. Credential helpers and credential stores are never executed. An entry with no usable credential, invalid base64, or two keys that name the same registry make the whole file invalid.
+`auth` wins over `username`/`password` when both are present. Other fields (`email`, `credsStore`, `credHelpers`, `HttpHeaders`, ...) are ignored, so a file written by `docker login` works as long as the credentials are inline. Credential helpers and credential stores are never executed. An entry with no usable credential, invalid base64, an `auth` value with an empty username or password, or two keys that name the same registry make the whole file invalid.
 
 ### Kubernetes
 
@@ -156,7 +156,7 @@ The file is re-read on every resolve, so rotating the Secret takes effect withou
 
 ### Matching
 
-Keys are normalised before matching: the scheme, a trailing slash and a legacy `/v1/` or `/v2/` suffix are removed and the host is lowercased. `docker.io`, `index.docker.io` and `registry-1.docker.io` are the same registry.
+Keys are normalised before matching: the scheme and trailing slashes are removed, a legacy `/v1/` or `/v2/` path is removed when it is the whole path after the host (`https://index.docker.io/v1/` is `index.docker.io`, but `ghcr.io/acme/v2` stays a prefix for `ghcr.io/acme/v2/...` only), and the host is lowercased. `docker.io`, `index.docker.io` and `registry-1.docker.io` are the same registry.
 
 A key is a registry host with an optional repository path prefix. For an image `host/repository`, doorstep uses the entry with the longest key that matches whole path segments: with the example above, `ghcr.io/other-owner/app` uses the `ghcr.io/other-owner` entry and `ghcr.io/owner/app` uses `ghcr.io`, while `ghcr.io/other-owner-2/app` does not match `ghcr.io/other-owner`. This is how to use a different token per GitHub owner on GHCR. Wildcards are not supported. When no key matches, the request is anonymous, and credentials are never sent to a host they were not configured for.
 
@@ -165,6 +165,8 @@ For GHCR, use a token with the `read:packages` scope (a classic personal access 
 ### Transport
 
 Registries are reached over HTTPS. Plain HTTP is only attempted, as a fallback alongside HTTPS, for `127.0.0.1`, `::1`, `localhost:<port>`, `*.localhost` and IP addresses in RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), which covers an in-cluster registry addressed by IP. Every other host, including mDNS `.local` names and cluster DNS names, is HTTPS only, and there is no switch to allow plain HTTP elsewhere. A registry with a certificate from a private CA works once the CA is in the system trust store, for example by mounting the bundle and setting `SSL_CERT_FILE` (or `SSL_CERT_DIR`). Proxies are honoured through `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
+
+The plain HTTP fallback also carries credentials. When a credential matches one of those local or private hosts, the `Authorization` header (basic credentials, or the bearer token after a token exchange) is sent over HTTP whenever HTTPS fails, and anyone who can block port 443 on the path can force that and read the secret. Only configure credentials for such a registry when the network path to it is trusted, or serve it over HTTPS and address it by a host name outside the list above (such as a cluster DNS name), which is never contacted over plain HTTP.
 
 ## `doorstep version`
 

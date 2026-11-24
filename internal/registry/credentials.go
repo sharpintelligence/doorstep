@@ -219,8 +219,14 @@ func decodeAuth(encoded string) (string, string, error) {
 		return "", "", errors.New("auth is not valid base64")
 	}
 	user, password, ok := strings.Cut(string(decoded), ":")
-	if !ok || user == "" || password == "" {
+	if !ok {
 		return "", "", errors.New("auth must be base64 of username:password")
+	}
+	if user == "" {
+		return "", "", errors.New("auth has an empty username")
+	}
+	if password == "" {
+		return "", "", errors.New("auth has an empty password")
 	}
 	return user, password, nil
 }
@@ -230,10 +236,10 @@ func normalizeKey(raw string) (string, error) {
 	key = strings.TrimPrefix(key, "https://")
 	key = strings.TrimPrefix(key, "http://")
 	key = strings.TrimRight(key, "/")
-	key = strings.TrimSuffix(key, "/v1")
-	key = strings.TrimSuffix(key, "/v2")
-	key = strings.TrimRight(key, "/")
 	host, path, _ := strings.Cut(key, "/")
+	if path == "v1" || path == "v2" {
+		key, path = host, ""
+	}
 	if host == "" {
 		return "", errors.New("registry host must not be empty")
 	}

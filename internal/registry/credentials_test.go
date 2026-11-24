@@ -124,6 +124,21 @@ func TestParseDockerConfig(t *testing.T) {
 			wantErr: []string{`auths["ghcr.io"]`, "username:password"},
 		},
 		{
+			name:    "auth with empty password",
+			data:    `{"auths":{"ghcr.io":{"auth":"` + b64("robot:") + `"}}}`,
+			wantErr: []string{`auths["ghcr.io"]`, "empty password"},
+		},
+		{
+			name:    "auth with empty username",
+			data:    `{"auths":{"ghcr.io":{"auth":"` + b64(":s3cret") + `"}}}`,
+			wantErr: []string{`auths["ghcr.io"]`, "empty username"},
+		},
+		{
+			name: "path ending in v2 stays scoped",
+			data: `{"auths":{"ghcr.io/acme/v2":{"auth":"` + b64("a:b") + `"}}}`,
+			want: map[string]Credential{"ghcr.io/acme/v2": {Username: "a", Password: "b"}},
+		},
+		{
 			name:    "empty entry",
 			data:    `{"auths":{"ghcr.io":{}}}`,
 			wantErr: []string{`auths["ghcr.io"]`, "no usable credential"},
@@ -217,6 +232,7 @@ func TestCredentialsLookup(t *testing.T) {
 		"ghcr.io/owner-a":{"username":"owner-a","password":"p"},
 		"ghcr.io/owner-a/special":{"username":"special","password":"p"},
 		"ghcr.io/own":{"username":"own","password":"p"},
+		"ghcr.io/acme/v2":{"username":"acme-v2","password":"p"},
 		"docker.io":{"username":"hub","password":"p"},
 		"localhost:5000":{"username":"local","password":"p"}
 	}}`))
@@ -239,6 +255,8 @@ func TestCredentialsLookup(t *testing.T) {
 		{name: "segment boundary", host: "ghcr.io", repository: "owner/app", wantUser: "ghcr"},
 		{name: "partial segment does not match", host: "ghcr.io", repository: "owner-b/app", wantUser: "ghcr"},
 		{name: "prefix itself matches", host: "ghcr.io", repository: "own/app", wantUser: "own"},
+		{name: "path ending in v2 is scoped to that path", host: "ghcr.io", repository: "acme/v2/app", wantUser: "acme-v2"},
+		{name: "path ending in v2 does not cover siblings", host: "ghcr.io", repository: "acme/other", wantUser: "ghcr"},
 		{name: "index.docker.io", host: "index.docker.io", repository: "library/nginx", wantUser: "hub"},
 		{name: "docker.io alias", host: "docker.io", repository: "owner/app", wantUser: "hub"},
 		{name: "registry-1 alias", host: "registry-1.docker.io", repository: "owner/app", wantUser: "hub"},
@@ -432,7 +450,11 @@ func TestNormalizeKey(t *testing.T) {
 		{raw: "docker.io/owner", want: "index.docker.io/owner"},
 		{raw: "ghcr.io/owner-a", want: "ghcr.io/owner-a"},
 		{raw: "ghcr.io/owner-a/", want: "ghcr.io/owner-a"},
-		{raw: "ghcr.io/owner-a/v2", want: "ghcr.io/owner-a"},
+		{raw: "ghcr.io/v1", want: "ghcr.io"},
+		{raw: "https://ghcr.io/v2/", want: "ghcr.io"},
+		{raw: "ghcr.io/owner-a/v2", want: "ghcr.io/owner-a/v2"},
+		{raw: "ghcr.io/owner-a/v1/", want: "ghcr.io/owner-a/v1"},
+		{raw: "ghcr.io/v2/app", want: "ghcr.io/v2/app"},
 		{raw: "", wantErr: true},
 		{raw: "https://", wantErr: true},
 		{raw: "/owner", wantErr: true},

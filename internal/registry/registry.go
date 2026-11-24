@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -97,6 +99,13 @@ func (r *Resolver) Resolve(ctx context.Context, repository, tag string) (Digest,
 	return Digest(got.Digest.String()), nil
 }
 
+func (r *Resolver) ResolveCommit(ctx context.Context, repository, sha string) (Digest, error) {
+	if err := validateCommitSHA(sha); err != nil {
+		return "", fmt.Errorf("resolve %s:%s: %w: %w", repository, sha, ErrInvalidReference, err)
+	}
+	return r.Resolve(ctx, repository, sha)
+}
+
 func (r *Resolver) authenticator(repo name.Repository) (authn.Authenticator, error) {
 	if r.credentials == nil {
 		return authn.Anonymous, nil
@@ -154,12 +163,30 @@ func classify(ctx context.Context, ref name.Tag, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 		err = fmt.Errorf("%w: %w", ctxErr, err)
 	}
-	status, _ := statusCode(err)
-	switch status {
-	case http.StatusNotFound:
+	var terr *transport.Error
+	if !errors.As(err, &terr) {
+		return fmt.Errorf("resolve %s: %w", ref.Name(), err)
+	}
+	switch {
+	case terr.StatusCode == http.StatusNotFound && isManifestRequest(terr.Request):
 		return fmt.Errorf("resolve %s: %w: %w", ref.Name(), ErrNotFound, err)
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case terr.StatusCode == http.StatusUnauthorized, terr.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("resolve %s: %w: %w", ref.Name(), ErrDenied, err)
+	case terr.StatusCode == http.StatusBadRequest && hasErrorCode(terr, transport.NameInvalidErrorCode, transport.TagInvalidErrorCode):
+		return fmt.Errorf("resolve %s: %w: %w", ref.Name(), ErrInvalidReference, err)
 	}
 	return fmt.Errorf("resolve %s: %w", ref.Name(), err)
+}
+
+func isManifestRequest(req *http.Request) bool {
+	return req != nil && req.URL != nil && strings.Contains(req.URL.Path, "/manifests/")
+}
+
+func hasErrorCode(terr *transport.Error, codes ...transport.ErrorCode) bool {
+	for _, d := range terr.Errors {
+		if slices.Contains(codes, d.Code) {
+			return true
+		}
+	}
+	return false
 }
