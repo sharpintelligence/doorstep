@@ -333,35 +333,64 @@ func TestDeploymentIsRestricted(t *testing.T) {
 	}
 }
 
-func TestClusterRoleIsReadOnlyApplications(t *testing.T) {
+func TestClusterRolesAreReadOnly(t *testing.T) {
 	t.Parallel()
 
-	role := findDocument(t, "base/rbac.yaml", "ClusterRole", "doorstep-applications-reader")
-	rules := role.lookup(t, "rules").([]any)
-	if len(rules) != 1 {
-		t.Fatalf("got %d rules, want 1", len(rules))
+	tests := []struct {
+		file string
+		name string
+		rule map[string][]string
+	}{
+		{
+			file: "base/rbac.yaml",
+			name: "doorstep-applications-reader",
+			rule: map[string][]string{"apiGroups": {"argoproj.io"}, "resources": {"applications"}, "verbs": {"get", "list", "watch"}},
+		},
+		{
+			file: "components/job-gate/rbac.yaml",
+			name: "doorstep-jobs-reader",
+			rule: map[string][]string{"apiGroups": {"batch"}, "resources": {"jobs"}, "verbs": {"get"}},
+		},
 	}
-	rule := rules[0].(map[string]any)
-	want := map[string][]string{
-		"apiGroups": {"argoproj.io"},
-		"resources": {"applications"},
-		"verbs":     {"get", "list", "watch"},
-	}
-	if len(rule) != len(want) {
-		t.Errorf("rule has keys %v, want only %v", rule, want)
-	}
-	for key, values := range want {
-		if got := namesFromStrings(rule[key]); !slices.Equal(got, values) {
-			t.Errorf("%s = %v, want %v", key, got, values)
-		}
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := len(readDocuments(t, tt.file)); got != 2 {
+				t.Errorf("%s has %d documents, want a ClusterRole and its binding", tt.file, got)
+			}
+			role := findDocument(t, tt.file, "ClusterRole", tt.name)
+			rules := role.lookup(t, "rules").([]any)
+			if len(rules) != 1 {
+				t.Fatalf("got %d rules, want 1", len(rules))
+			}
+			rule := rules[0].(map[string]any)
+			if len(rule) != len(tt.rule) {
+				t.Errorf("rule has keys %v, want only %v", rule, tt.rule)
+			}
+			for key, values := range tt.rule {
+				if got := namesFromStrings(rule[key]); !slices.Equal(got, values) {
+					t.Errorf("%s = %v, want %v", key, got, values)
+				}
+			}
 
-	binding := findDocument(t, "base/rbac.yaml", "ClusterRoleBinding", "doorstep-applications-reader")
-	if got := binding.lookup(t, "roleRef", "name"); got != "doorstep-applications-reader" {
-		t.Errorf("binding roleRef = %v", got)
-	}
-	if got := binding.lookup(t, "subjects", 0, "name"); got != "doorstep" {
-		t.Errorf("binding subject = %v", got)
+			binding := findDocument(t, tt.file, "ClusterRoleBinding", tt.name)
+			if got := binding.lookup(t, "roleRef", "name"); got != tt.name {
+				t.Errorf("binding roleRef = %v", got)
+			}
+			if got := binding.lookup(t, "roleRef", "kind"); got != "ClusterRole" {
+				t.Errorf("binding roleRef kind = %v", got)
+			}
+			subjects := binding.lookup(t, "subjects").([]any)
+			if len(subjects) != 1 {
+				t.Fatalf("binding has %d subjects, want 1", len(subjects))
+			}
+			if got := binding.lookup(t, "subjects", 0, "kind"); got != "ServiceAccount" {
+				t.Errorf("binding subject kind = %v", got)
+			}
+			if got := binding.lookup(t, "subjects", 0, "name"); got != "doorstep" {
+				t.Errorf("binding subject = %v", got)
+			}
+		})
 	}
 }
 

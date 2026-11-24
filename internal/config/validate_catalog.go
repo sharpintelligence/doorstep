@@ -375,6 +375,11 @@ func validateGates(r reporter, g Gates, servers []string) {
 			} else {
 				forbidWebhookFields(r, field, gate)
 			}
+			if spec.requiresJob {
+				validateJobGate(r, field, gate)
+			} else {
+				forbidJobFields(r, field, gate)
+			}
 		}
 	}
 }

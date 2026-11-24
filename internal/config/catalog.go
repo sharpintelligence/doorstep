@@ -233,6 +233,7 @@ const (
 	GatePrometheus GateType = "prometheus"
 	GateExternal   GateType = "external"
 	GateBackup     GateType = "backup"
+	GateJob        GateType = "job"
 )
 
 type GateWhen string
@@ -280,6 +281,7 @@ type Gate struct {
 	Reporters        []string     `yaml:"reporters"`
 	When             GateWhen     `yaml:"when"`
 	Webhook          *GateWebhook `yaml:"webhook"`
+	Job              *JobGate     `yaml:"job"`
 }
 
 type GateWebhook struct {
@@ -334,6 +336,7 @@ type gateSpec struct {
 	prometheus          bool
 	allowsReporters     bool
 	webhook             bool
+	requiresJob         bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
@@ -346,6 +349,7 @@ func gateSpecs() map[GateType]gateSpec {
 		GatePrometheus: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: prometheusTimeout, prometheus: true},
 		GateExternal:   {allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultExternalGateTimeout), allowsRollbackOptIn: true, allowsReporters: true},
 		GateBackup:     {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultBackupTimeout), allowsRollbackOptIn: true, webhook: true},
+		GateJob:        {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute), requiresJob: true},
 	}
 }
 
@@ -484,6 +488,10 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 		if g.Webhook != nil {
 			webhook := *g.Webhook
 			g.Webhook = &webhook
+		}
+		if g.Job != nil {
+			job := *g.Job
+			g.Job = &job
 		}
 		g.Windows = slices.Clone(g.Windows)
 		for i := range g.Windows {

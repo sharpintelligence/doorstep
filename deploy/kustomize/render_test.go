@@ -130,14 +130,19 @@ func assertRenderedPod(t *testing.T, documents []document, wantEnv map[string]st
 	}
 }
 
-func assertBindingSubjectsNamespaced(t *testing.T, documents []document, namespace string) {
+func assertBindingSubjectsNamespaced(t *testing.T, documents []document, namespace string, want ...string) {
 	t.Helper()
 	bindings := renderedOfKind(documents, "ClusterRoleBinding")
-	if len(bindings) != 1 {
-		t.Fatalf("got %d bindings, want 1", len(bindings))
+	var names []string
+	for _, binding := range bindings {
+		names = append(names, binding.lookup(t, "metadata", "name").(string))
+		if got := binding.lookup(t, "subjects", 0, "namespace"); got != namespace {
+			t.Errorf("%s subject namespace = %v, want %s", names[len(names)-1], got, namespace)
+		}
 	}
-	if got := bindings[0].lookup(t, "subjects", 0, "namespace"); got != namespace {
-		t.Errorf("subject namespace = %v, want %s", got, namespace)
+	slices.Sort(names)
+	if !slices.Equal(names, want) {
+		t.Errorf("bindings = %v, want %v", names, want)
 	}
 }
 
@@ -157,8 +162,47 @@ func TestRenderedExamples(t *testing.T) {
 				"DOORSTEP_DATABASE_URL_FILE":         "/etc/doorstep/secrets/database-url",
 				"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "/etc/doorstep/registry/.dockerconfigjson",
 			})
-			assertBindingSubjectsNamespaced(t, documents, "doorstep")
+			assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader")
 		})
+	}
+}
+
+func writeOverlay(t *testing.T, overlay map[string]any) string {
+	t.Helper()
+	data, err := yaml.Marshal(overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(".", "render-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestJobGateComponentRenders(t *testing.T) {
+	t.Parallel()
+
+	dir := writeOverlay(t, map[string]any{
+		"apiVersion": "kustomize.config.k8s.io/v1beta1",
+		"kind":       "Kustomization",
+		"namespace":  "doorstep",
+		"resources":  []string{"../base"},
+		"components": []string{"../components/job-gate"},
+	})
+	documents := render(t, dir)
+	assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader", "doorstep-jobs-reader")
+	var roles []string
+	for _, role := range renderedOfKind(documents, "ClusterRole") {
+		roles = append(roles, role.lookup(t, "metadata", "name").(string))
+	}
+	slices.Sort(roles)
+	if want := []string{"doorstep-applications-reader", "doorstep-jobs-reader"}; !slices.Equal(roles, want) {
+		t.Errorf("cluster roles = %v, want %v", roles, want)
 	}
 }
 
@@ -195,20 +239,7 @@ func TestDocumentedCloudNativePGPatchRenders(t *testing.T) {
 		"resources":  []string{"../examples/homelab"},
 		"patches":    documented["patches"],
 	}
-	data, err := yaml.Marshal(overlay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.MkdirTemp(".", "render-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	documents := render(t, dir)
+	documents := render(t, writeOverlay(t, overlay))
 	assertRenderedPod(t, documents, map[string]string{
 		"DOORSTEP_CONFIG":                    "/etc/doorstep/config/config.yaml",
 		"DOORSTEP_DATABASE_URL_FILE":         "/etc/doorstep/database/database-url",

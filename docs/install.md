@@ -6,6 +6,7 @@ doorstep ships a [kustomize](https://kustomize.io) base under `deploy/kustomize`
 | --- | --- |
 | `deploy/kustomize/base` | The install base: ServiceAccount, RBAC, ConfigMap, Deployment and Service |
 | `deploy/kustomize/components/registry-credentials` | Optional component that mounts registry credentials |
+| `deploy/kustomize/components/job-gate` | Optional component that lets doorstep read validation Jobs for the [`job` gate](#validation-jobs) |
 | `deploy/kustomize/examples/homelab` | A complete example overlay with a namespace and an example configuration file |
 
 ## Prerequisites
@@ -204,6 +205,49 @@ subjects:
 
 The component `components/registry-credentials` mounts the Secret `doorstep-registry` (type `kubernetes.io/dockerconfigjson`) at `/etc/doorstep/registry` and sets `DOORSTEP_REGISTRY_CREDENTIALS_FILE`. It is optional because `serve` refuses to start when a credentials file is configured but unreadable; for public images, leave it out. Matching rules are in [configuration.md](configuration.md#registry-credentials).
 
+## Validation Jobs
+
+The [`job` gate](gates.md#job) reads the status of a validation Job that Argo CD runs as a PostSync hook. It needs `get` on `batch/v1` Jobs, which the base does not grant. The component `components/job-gate` adds it:
+
+| Object | Name | Purpose |
+| --- | --- | --- |
+| ClusterRole | `doorstep-jobs-reader` | `get` on `jobs.batch`, nothing else: no `list`, `watch`, Pods, pod logs or Secrets |
+| ClusterRoleBinding | `doorstep-jobs-reader` | Binds the ClusterRole to the `doorstep` ServiceAccount |
+
+```yaml kubernetes
+components:
+  - github.com/sharpintelligence/doorstep//deploy/kustomize/components/job-gate?ref=vX.Y.Z
+```
+
+Add it in the overlay that sets `namespace:`, so kustomize fills in the binding's subject namespace. doorstep still never creates, changes or deletes Jobs: Argo CD creates the hook from your GitOps repository ([ADR 0016](decisions/0016-validation-job-gate.md)). Without the grant, a `job` gate records the `403` as an evaluation error and fails at its timeout.
+
+A Job spec can carry inline environment values, so a cluster-wide read grant may be more than you want. To grant it only in the namespaces your `job` gates name, leave the component out and bind the ClusterRole with a RoleBinding in each of those namespaces, applied from a kustomization without an overlay-wide `namespace:`:
+
+```yaml kubernetes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: doorstep-jobs-reader
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: doorstep-jobs-reader
+  namespace: web-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: doorstep-jobs-reader
+subjects:
+  - kind: ServiceAccount
+    name: doorstep
+    namespace: doorstep
+```
+
 ## Exposing the HTTP port
 
 The Service has two ports. Route only `http` (8080) from an Ingress or Gateway; never route `metrics`.
@@ -250,7 +294,7 @@ spec:
 
 ## Security posture
 
-The pod meets the restricted Pod Security Standard: non-root user 65532, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped and a read-only root filesystem. The service writes nothing to disk, so there is no writable volume. The only Kubernetes permission is the read-only Applications grant above.
+The pod meets the restricted Pod Security Standard: non-root user 65532, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped and a read-only root filesystem. The service writes nothing to disk, so there is no writable volume. The only Kubernetes permissions are the read-only Applications grant above and, with the `job-gate` component, `get` on Jobs.
 
 ## Scaling
 

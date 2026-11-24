@@ -7,7 +7,7 @@ A gate is a check that decides whether a deployment may continue. Gates run in t
 
 Which gates an app runs, their names and their timeouts come from the configuration file ([configuration.md](configuration.md#gates)). Gate results are recorded data, not control flow ([ADR 0001](decisions/0001-go-and-core-design.md), decision 4): every evaluation leaves a row explaining the verdict.
 
-The code lives in `internal/gates`: the data model, the registry, the evaluator, the five [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`), the [`prometheus`](#prometheus) gate type, which reads Prometheus through the `internal/promquery` client, and the [`external`](#external) gate type with the service behind its API. Every gate result is mirrored to a [GitHub commit status](#github-commit-statuses) by `internal/notify`.
+The code lives in `internal/gates`: the data model, the registry, the evaluator, the six [built-in gate types](#built-in-gates) (`checks`, `lock`, `schedule`, `health`, `soak`, `job`), the [`prometheus`](#prometheus) gate type, which reads Prometheus through the `internal/promquery` client, and the [`external`](#external) gate type with the service behind its API. Every gate result is mirrored to a [GitHub commit status](#github-commit-statuses) by `internal/notify`.
 
 ## Data model
 
@@ -17,7 +17,7 @@ A gate result is the latest verdict of one named gate for one deployment, stored
 | --- | --- |
 | `DeploymentID` | the deployment; its commit is the deployment's commit, so a result is effectively *(commit, gate name, phase, details)*, and a rollback of the same commit gets its own results |
 | `Name` | gate name from the configuration, unique within the app across both phases |
-| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, `prometheus`, `external`, ...) |
+| `Type` | gate type from the configuration (`checks`, `lock`, `schedule`, `health`, `soak`, `prometheus`, `job`, `external`, ...) |
 | `Phase` | `before` or `after` (`core.GatePhase`) |
 | `Status` | `pending`, `passed`, `failed` or `skipped` |
 | `Message` | short human-readable explanation |
@@ -58,7 +58,7 @@ Results left behind by a gate that has since been removed from the configuration
 
 `Reevaluate` runs every gate of the phase regardless of its recorded result. It is the explicit retry path for the engine and operators: the engine calls it for the `after` phase when a rollback had to pin its digest again, so `health` judges the new pin commit instead of keeping the pass it recorded for the replaced one ([engine.md](engine.md#rollbacks)). A gate that goes from a verdict back to `pending` restarts its clock: `StartedAt` is reset and `FinishedAt` cleared.
 
-Each gate receives the deployment, the phase and its previously recorded result (`Request.Previous`), so a gate that needs state across polls and restarts (a soak start time, a launched Job name) keeps it in its evidence rather than in its own table.
+Each gate receives the deployment, the phase and its previously recorded result (`Request.Previous`), so a gate that needs state across polls and restarts (a soak start time, the start of a degradation) keeps it in its evidence rather than in its own table.
 
 ### Deferred gates
 
@@ -66,7 +66,7 @@ A gate type registered with `Definition.Deferred` (today only `backup`) waits it
 
 ### Timeouts
 
-A gate's `timeout` from the configuration (default `30m` for `checks` and `backup`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days; an `external` gate times out after `24h` unless it sets its own. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
+A gate's `timeout` from the configuration (default `30m` for `checks` and `backup`, `10m` for `health` and `job`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days; an `external` gate times out after `24h` unless it sets its own. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
 
 ### Errors
 
@@ -90,14 +90,15 @@ A rollback re-pins a digest that already passed CI and soak, but it still waits 
 | `health` | after | `argocd` | runs | `10m` | the Argo CD Application |
 | `soak` | after | `soak` | skipped | `duration` + `10m` | the Argo CD Application |
 | `prometheus` | after | `metrics` | skipped | `initial_delay` + `success_threshold` × `interval` + `10m` | a Prometheus server |
+| `job` | after | `job` | skipped | `10m` | one Kubernetes `batch/v1` Job, a user-declared Argo CD PostSync hook |
 | `external` | either | `external` | skipped unless `apply_to_rollbacks: true` | `24h` | reports posted through the API |
 | `backup` | before (deferred) | `backup` | skipped unless `apply_to_rollbacks: true` | `30m` | an operator-owned webhook |
 
-The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak`, `prometheus`, `external` and `backup` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
+The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak`, `prometheus`, `job`, `external` and `backup` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
 
 ### Wiring
 
-The composition root (`serve`) registers the five built-in types with one call, the `prometheus` and `external` types with two more, and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates`, the Prometheus registrar and `registerExternalGateFromDeps`), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
+The composition root (`serve`) registers the five built-in types with one call, the `prometheus`, `job` and `external` types with further calls, and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates`, the Prometheus registrar, `registerJobGateFromDeps`, `registerExternalGateFromDeps` and `registerBackupGateFromDeps`), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
 
 ```go
 registry := gates.NewRegistry()
@@ -108,6 +109,7 @@ err := gates.RegisterBuiltins(registry, gates.Builtins{
 	Applications: argoApplications,                        // adapter over the argocd package
 })
 err = registerPrometheusGate(registry, catalog, secretSource{lookupEnv: lookupEnv, readFile: config.ReadSecretFile})
+err = registerJobGate(registry, kubeClient, argoApplications) // internal/cli/jobs.go, only when a gate has type job
 err = gates.RegisterExternal(registry, st)                // *store.Store reads gate_reports
 plans, err := registry.Plans(catalog)
 ```
@@ -126,8 +128,9 @@ The ports are small interfaces in `internal/gates`:
 | `ApplicationReader` | `Application(ctx, namespace, name) (gates.Application, error)` | `cli.argoApplications`: finds the app configured for that Application and reads it with `(*argocd.Watcher).Status`, mapping not found to `gates.ErrApplicationNotFound` |
 | `MetricsQuerier` | `Query(ctx, expr, at) (promquery.Result, error)` and `QueryRange(ctx, expr, from, to, step) (promquery.Result, error)` | `*promquery.Client`, one per `prometheus` server |
 | `ExternalReports` | `GetGateReport(ctx, deploymentID, gate) (core.GateReport, error)` | `*store.Store` |
+| `JobReader` | `Job(ctx, namespace, name) (gates.Job, error)` | `cli.jobReader`, an adapter over `internal/jobs` (one `GET` of a `batch/v1` Job through `internal/kube`) |
 
-`gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
+`gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports, and the start of its latest operation (`status.operationState.startedAt`, zero when there is none); the phase and start time describe `status.operationState` as Argo CD reports it, whichever revision that operation synced; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
 
 The `backup` type needs an HTTP client, a secret reader and a signer, which `gates` may not take from `notify` itself. It is registered separately so `RegisterBuiltins` keeps its signature. `internal/cli` has the helper the composition root calls next to `RegisterBuiltins`:
 
@@ -139,6 +142,8 @@ err := registerBackupGate(registry, lookupEnv, userAgent(), time.Now)
 //	Sign:       notify.Sign,
 // })
 ```
+
+The `job` type is registered separately with `gates.RegisterJobGate(registry, gates.JobGateDeps{Jobs: reader, Applications: argoApplications})`, both required, so `gates.Builtins` gains no required field. `gates.Job` carries the Job's UID, creation time, whether it is being deleted, its annotations, `suspend`, `backoffLimit`, the active, succeeded and failed pod counts, start and completion times, and whether its `Complete` or `Failed` condition is `True` (with the `Failed` condition's reason and message); the adapter returns an error wrapping `gates.ErrJobNotFound` when the Job does not exist. If `serve` does not register the type, a configuration using `type: job` fails at startup with `unknown gate type "job"`, never a silently passing gate.
 
 ### checks
 
@@ -289,6 +294,103 @@ When the baseline window has no data (a new app or a new metric), `baseline.no_d
 **Client.** `internal/promquery` is a small standard library client: `POST` form requests to `<url>/api/v1/query` and `<url>/api/v1/query_range` (long queries fit, and a path prefix in `url` is kept), a 10 second timeout per request, a 1 MiB response limit, `User-Agent: doorstep/<version>`, no redirects (so the `Authorization` header never reaches another host), and the bearer token or password read from its secret on every request, so a rotated token takes effect without a restart. Prometheus, Thanos, Mimir and VictoriaMetrics serve this API.
 
 State lives in the evidence of the `pending` result and is carried only from a `pending` previous result, so `Reevaluate` starts over, and so does a change of server or query. Evidence: `{"server", "query", "query_sha256", "condition", "interval", "success_threshold", "failure_threshold", "started_at", "last_attempt_at", "consecutive_successes", "consecutive_failures", "consecutive_no_data", "last_error", "baseline": {"status": "ok" | "missing", "direction", "value", "limit", "from", "to", "points"}, "samples": [{"at", "value", "outcome": "success" | "failure" | "no_data"}]}`. Values are strings (`"0.004"`, `"+Inf"`), because JSON numbers cannot hold NaN or infinities; `samples` keeps the last 10. `query` holds the configured query cut to 1024 bytes for display, and `query_sha256` the SHA-256 of the whole query, which is what detects a changed query; the server URL and credentials never appear in evidence or messages.
+
+### job
+
+Runs your own validation (smoke tests, API checks, browser tests) as a Kubernetes Job after the deploy and uses its exit status as the verdict. doorstep never creates the Job: you declare it in the app's GitOps manifests as an Argo CD [PostSync hook](https://argo-cd.readthedocs.io/en/stable/user-guide/resource_hooks/) with a fixed name, Argo CD creates and reruns it on every sync, and doorstep reads its status with one `GET` per evaluation ([ADR 0016](decisions/0016-validation-job-gate.md)). The Job spec is reviewed in git like every other manifest, and Argo CD remains the only thing that applies manifests to the cluster.
+
+```yaml
+gates:
+  after:
+    - type: health
+    - type: job
+      name: smoke
+      timeout: 10m
+      job:
+        namespace: web-prod
+        name: web-smoke-test
+        logs_url: https://argocd.example.com/applications/{argocd_namespace}/{argocd_application}?resource=&node=batch%2FJob%2F{namespace}%2F{job}%2F0&tab=logs
+```
+
+The Job lives next to the app's other manifests, in the Application's destination namespace:
+
+```yaml kubernetes
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: web-smoke-test
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: ghcr.io/example-org/web-smoke@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          args: ["--base-url", "http://web.web-prod.svc"]
+```
+
+Argo CD runs PostSync hooks once every resource of the sync is synced and healthy, and keeps the sync operation `Running` until they finish. The engine's syncing step waits for the operation to end. That alone does not prove the Job present ran for this deploy: a sync that fails in its Sync phase after applying the changes, or a selective sync (which runs no hooks), leaves the previous deploy's Job in place. So the gate reads the Application as well and only judges a Job created at or after the start of the Application's latest operation (`status.operationState.startedAt`); see [Freshness](#freshness). The verdict, in order:
+
+| Job | Verdict | Message |
+| --- | --- | --- |
+| Application not found | `pending` | `Argo CD Application <ns>/<name> not found` |
+| being deleted (`deletionTimestamp` set: Argo CD is replacing it) | `pending` | `Job <ns>/<name> is being replaced; waiting for Argo CD to recreate it` |
+| not an Argo CD PostSync hook | `failed` | `Job <ns>/<name> is not an Argo CD PostSync hook, so it does not rerun on each deploy` |
+| the Application reports no operation | `pending` | `Argo CD reports no sync operation for Application <ns>/<name>, so Job <ns>/<name> cannot be tied to this deploy` |
+| not found or older than the latest operation, which ended `Failed` or `Error` | `failed` | `the latest Argo CD sync of Application <ns>/<name> ended Failed before Job <ns>/<name> ran for it` |
+| not found | `pending` | `Job <ns>/<name> not found; waiting for Argo CD to create it` |
+| older than the latest operation, otherwise | `pending` | `Job <ns>/<name> was created at <time>, before the latest Argo CD sync started at <time>; waiting for Argo CD to rerun it` |
+| condition `Complete=True` | `passed` | `Job <ns>/<name> succeeded in <runtime>` (the runtime is left out when a timestamp is missing) |
+| condition `Failed=True` | `failed` | `Job <ns>/<name> failed: <reason>: <message>`, for example `BackoffLimitExceeded` or `DeadlineExceeded` |
+| suspended | `pending` | `Job <ns>/<name> is suspended` |
+| otherwise (created, running, retrying) | `pending` | `Job <ns>/<name> is running: 1 active, 2 failed of backoff limit 6` |
+
+Only the terminal conditions of a fresh Job decide. Retries belong to the Job's `backoffLimit`, so failed pods within the limit keep the gate `pending`. A Job that is missing, suspended or still running when the gate's `timeout` (default `10m`) runs out fails the gate. Errors reading the Application or the Job other than not found, including `401` and `403` when the RBAC component is missing, are evaluation errors ([Errors](#errors)): visible, `pending`, and bounded by the timeout.
+
+A Job counts as a PostSync hook when its `argocd.argoproj.io/hook` annotation lists `PostSync` (comma-separated, so `PostSync,SyncFail` qualifies), or, when that annotation is absent or empty, when its `helm.sh/hook` annotation lists `post-install` or `post-upgrade`, which Argo CD maps to PostSync. A plain Job is not rerun by a sync, so it is rejected at once rather than left to the freshness check.
+
+#### Freshness
+
+A Job is fresh when its `creationTimestamp` is at or after the `startedAt` of the Application's latest operation, whichever revision that operation synced. Every full sync, automated or manual, runs PostSync hooks and, with `BeforeHookCreation`, recreates the Job after the operation started, so a fresh Job is the one the latest sync ran. A Job older than the latest operation was left over by an earlier sync: the latest one failed before its PostSync phase, was a selective sync, or is still running. When that operation ended `Failed` or `Error` the hook will not run for it and the gate fails; otherwise it stays `pending` until Argo CD reruns the hook or the timeout fails it.
+
+- An unchanged pin still works: Argo CD does not start a new operation for a commit that changes nothing in the Application, so the latest operation is the one whose hook produced the Job.
+- Both timestamps are set in the cluster (the API server's creation time and the Argo CD controller's operation start), never by doorstep, and they are compared at whole seconds, so a Job created in the second its sync started is fresh.
+- A failed PostSync hook ends the operation `Failed` too, but its Job is fresh, so the gate fails with the Job's own reason. A fresh success passes even when another hook failed the operation; the `health` gate judges the workload.
+- The deployment's own start time is not compared: it is a Postgres reading, and an unchanged pin has no newer Job.
+
+**Requirements on the Job.**
+
+- A fixed `metadata.name` (no `generateName`) equal to `job.name`, in the namespace `job.namespace`. `argocd.namespace` is where the Application lives, not the workload, which is why the namespace is explicit.
+- The default `BeforeHookCreation` delete policy, so every sync deletes the previous run and creates a fresh one. Do not use `HookSucceeded` or `HookFailed`, and do not set a short `ttlSecondsAfterFinished`: a Job removed before doorstep reads it leaves the gate `pending` until the timeout fails it.
+- Retries through `backoffLimit`, and a bound through `activeDeadlineSeconds`. The first terminal failure is sticky, as for every gate.
+- `argocd.sync_timeout` must cover the rollout plus the Job's runtime, because Argo CD keeps the operation `Running` while PostSync hooks run and the syncing step waits for it ([argocd.md](argocd.md#timeouts)). The gate's own `timeout` then only covers a Job that is missing, being replaced or still running after the sync ended.
+
+Hook Jobs do not count towards the Application's health, so a failed validation does not leave the Application `Degraded`, and the rollback that follows is judged on the workload alone.
+
+**Logs.** doorstep reads no Pods and no pod logs. `job.logs_url` is an optional, recommended link template whose rendered value is stored as `logs_url` in the evidence, which the API returns with the gate result; there is no UI, notification or GitHub mirror rendering yet, and they are expected to show it as a link. Its placeholders are replaced with path-escaped values before the first `?` or `#` of the template and query-escaped values after it, so `&`, `=`, `+` and `@` in a value cannot change the query. When a placeholder has no value, such as `{uid}` while the Job does not exist, no link is recorded rather than a broken one:
+
+| Placeholder | Value |
+| --- | --- |
+| `{app}` | the doorstep app name |
+| `{namespace}` | `job.namespace` |
+| `{job}` | `job.name` |
+| `{uid}` | the Job's UID (no link while the Job is not found) |
+| `{deployment}` | the deployment ID |
+| `{argocd_namespace}` | `argocd.namespace` |
+| `{argocd_application}` | `argocd.application` |
+
+Besides the Argo CD UI link above, Grafana with Loki works too: `https://grafana.example.com/explore?orgId=1&left=%7B%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bnamespace%3D%5C%22{namespace}%5C%22%2Cjob_name%3D%5C%22{job}%5C%22%7D%22%7D%5D%7D`. Literal braces must be percent-encoded (`%7B`, `%7D`); any other `{...}` is rejected by validation, as are schemes other than `http` and `https`, a missing host and credentials in the URL. Without a template there is no link.
+
+**Rollbacks.** The gate is registered with `SkipOnRollback`, so a rollback records it as `skipped for rollback` and does not read the Job: a rollback re-pins a digest that already passed its checks, and a flaky browser test must not fail recovery ([ADR 0001](decisions/0001-go-and-core-design.md), decision 5). Argo CD still runs the hook during the rollback's sync.
+
+**RBAC.** The gate needs `get` on `batch/v1` Jobs, which the base install does not grant. Add the `components/job-gate` component, or bind the same ClusterRole per namespace ([install.md](install.md#validation-jobs)).
+
+Evidence: `{"job", "found", "uid", "created_at", "hook", "state", "active", "succeeded", "failed", "backoff_limit", "started_at", "completed_at", "reason", "message", "application", "operation_phase", "operation_started_at", "logs_url"}`, where `state` is one of `no_application`, `terminating`, `not_a_hook`, `no_operation`, `sync_failed`, `not_found`, `stale`, `succeeded`, `failed`, `suspended` and `active`, and the pod counts are `0` when the Job was not found. The gate keeps no state between polls.
 
 ### external
 
@@ -471,7 +573,7 @@ The `doorstep/` context prefix is reserved ([ADR 0014](decisions/0014-external-g
 
 Evaluations are recorded in `doorstep_gate_evaluation_duration_seconds` ([metrics.md](metrics.md)):
 
-- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, `metrics` for `prometheus`, `external`, ...), never the configured name;
+- `gate` is the kind from the gate type's registration (`ci`, `lock`, `schedule`, `argocd`, `soak`, `metrics` for `prometheus`, `job`, `external`, ...), never the configured name;
 - `phase` is the deployment kind (`deploy` or `rollback`), not `before`/`after`;
 - one `passed` or `failed` observation when a gate reaches that verdict, with the time from `StartedAt` to `FinishedAt` plus the wall time of the call that produced the verdict (`StartedAt` is stamped after the first call returns, so a gate that decides on its first evaluation records the duration of that call, not 0; a timeout counts as `failed`);
 - one `error` observation per evaluation error, with the wall time of that call;
