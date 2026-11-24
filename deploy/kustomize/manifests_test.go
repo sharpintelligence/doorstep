@@ -252,6 +252,7 @@ func TestDeploymentIsRestricted(t *testing.T) {
 		{"max unavailable", []any{"spec", "strategy", "rollingUpdate", "maxUnavailable"}, 0},
 		{"run as non root", with(podSpec, "securityContext", "runAsNonRoot"), true},
 		{"run as user", with(podSpec, "securityContext", "runAsUser"), 65532},
+		{"run as group", with(podSpec, "securityContext", "runAsGroup"), 65532},
 		{"fs group", with(podSpec, "securityContext", "fsGroup"), 65532},
 		{"seccomp", with(podSpec, "securityContext", "seccompProfile", "type"), "RuntimeDefault"},
 		{"privilege escalation", with(containerSpec, "securityContext", "allowPrivilegeEscalation"), false},

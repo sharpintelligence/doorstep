@@ -19,14 +19,14 @@ doorstep ships a [kustomize](https://kustomize.io) base under `deploy/kustomize`
 
 | Object | Name | Purpose |
 | --- | --- | --- |
-| ServiceAccount | `doorstep` | Identity for the pod; the token is mounted into the pod only because the Argo CD adapter needs the Kubernetes API |
+| ServiceAccount | `doorstep` | Identity for the pod; the token is mounted into the pod for the upcoming Argo CD adapter, which needs the Kubernetes API; nothing uses it yet |
 | ClusterRole | `doorstep-applications-reader` | `get`, `list` and `watch` on `applications.argoproj.io`, nothing else |
 | ClusterRoleBinding | `doorstep-applications-reader` | Binds the ClusterRole to the ServiceAccount |
 | ConfigMap | `doorstep-config-<hash>` | The configuration file, generated from `config.yaml` |
 | Deployment | `doorstep` | One replica running `doorstep serve` |
 | Service | `doorstep` | ClusterIP with port `http` (8080) and port `metrics` (9090) |
 
-It deliberately does not create a Namespace, any Secret, Postgres, an Ingress, a NetworkPolicy or a ServiceMonitor. The base sets no `namespace`, so it installs into whichever namespace your overlay chooses.
+It deliberately does not create a Namespace, any Secret, Postgres, an Ingress, a NetworkPolicy or a ServiceMonitor. The base sets no `namespace`, so use it only from an overlay that sets `namespace:`; the ClusterRoleBinding subject needs a namespace, which kustomize fills in from the overlay, and the API server rejects the binding without one.
 
 ## Quick start
 
@@ -81,7 +81,7 @@ All keys live in the Secret `doorstep`. Nothing in the base generates or contain
 
 Other notification secrets follow the same pattern: add a key to the Secret and reference `/etc/doorstep/secrets/<key>` from its `*_file` setting. The key for the GitHub webhook secret will be documented when the webhook handler lands.
 
-Because the files are re-read on use, rotating a Secret needs no restart.
+Notification secrets and registry credentials are re-read when used, so rotating them needs no restart. The database URL and the GitHub App private key are read once at startup: after changing either, restart the Deployment with `kubectl -n doorstep rollout restart deployment/doorstep`.
 
 ## Pinning the image
 
@@ -113,7 +113,7 @@ doorstep config validate --config config.yaml
 
 ## Postgres
 
-The base only consumes a connection URL from the Secret key `database-url`. It does not run Postgres. The URL looks like `postgres://doorstep:<password>@<host>:5432/doorstep?sslmode=verify-full`; use `verify-full` with `sslrootcert` across untrusted networks. See [configuration.md](configuration.md#database) for the parameters and [database.md](database.md) for the privileges doorstep needs. Migrations need no Job: `serve` applies them before opening its listener, serialised by an advisory lock.
+The base only consumes a connection URL from the Secret key `database-url`. It does not run Postgres. The URL looks like `postgres://doorstep:<password>@<host>:5432/doorstep?sslmode=verify-full`; use `verify-full` with `sslrootcert` across untrusted networks. See [configuration.md](configuration.md#database) for the parameters and [database.md](database.md) for the privileges doorstep needs. Migrations need no Job: `serve` applies them before opening its listener, serialised by an advisory lock. The startup probe allows 300 seconds (150 attempts, 2 seconds apart) for connecting and migrating; raise `failureThreshold` in your overlay if a migration needs longer.
 
 If an operator already generates the credentials, point the volume at its Secret instead. For a CloudNativePG cluster named `pg`, whose `pg-app` Secret has the URL under `uri`:
 
@@ -123,38 +123,42 @@ patches:
       kind: Deployment
       name: doorstep
     patch: |-
-      - op: replace
-        path: /spec/template/spec/volumes/1
-        value:
-          name: secrets
-          secret:
-            secretName: doorstep
-            defaultMode: 0440
-            items:
-              - key: github-app-private-key.pem
-                path: github-app-private-key.pem
-              - key: slack-webhook-url
-                path: slack-webhook-url
-      - op: add
-        path: /spec/template/spec/volumes/-
-        value:
-          name: database
-          secret:
-            secretName: pg-app
-            defaultMode: 0440
-            items:
-              - key: uri
-                path: database-url
-      - op: add
-        path: /spec/template/spec/containers/0/volumeMounts/-
-        value:
-          name: database
-          mountPath: /etc/doorstep/database
-          readOnly: true
-      - op: replace
-        path: /spec/template/spec/containers/0/env/1/value
-        value: /etc/doorstep/database/database-url
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: doorstep
+      spec:
+        template:
+          spec:
+            containers:
+              - name: doorstep
+                env:
+                  - name: DOORSTEP_DATABASE_URL_FILE
+                    value: /etc/doorstep/database/database-url
+                volumeMounts:
+                  - name: database
+                    mountPath: /etc/doorstep/database
+                    readOnly: true
+            volumes:
+              - name: secrets
+                secret:
+                  secretName: doorstep
+                  defaultMode: 0440
+                  items:
+                    - key: github-app-private-key.pem
+                      path: github-app-private-key.pem
+                    - key: slack-webhook-url
+                      path: slack-webhook-url
+              - name: database
+                secret:
+                  secretName: pg-app
+                  defaultMode: 0440
+                  items:
+                    - key: uri
+                      path: database-url
 ```
+
+The patch matches the env entry and the volume by name, so it does not depend on the order in which components add entries.
 
 ## RBAC
 
@@ -250,4 +254,4 @@ Bump the `?ref=` of the base and component and the image digest together, then a
 
 ## Validating changes
 
-`just lint-manifests` renders the base and every example with `kustomize build` and checks the result with `kubeconform`; CI runs it. A Go test in `deploy/kustomize` additionally checks that the manifests stay consistent with the code, for example that environment variables are known settings and that the example configuration validates. See [development.md](development.md).
+`just lint-manifests` renders the base and every example with `kustomize build` and checks the result with `kubeconform`; CI runs it. A Go test in `deploy/kustomize` additionally renders the base and every example in-process and checks the result (unique volume names, the config volume pointing at the generated ConfigMap, namespaced binding subjects), and checks that the manifests stay consistent with the code, for example that environment variables are known settings and that the example configuration validates. See [development.md](development.md).
