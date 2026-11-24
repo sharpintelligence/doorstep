@@ -291,7 +291,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `gitops.branch` | `main` | Branch doorstep commits pins to, or opens pull requests against. |
 | `gitops.path` | repository root | Directory of the app inside the GitOps repository; relative, without `..`. |
 | `pin` | `kustomize` | How the digest is written; see [Pin strategies](#pin-strategies). |
-| `deploy.mode` | `commit` | `commit` pushes the pin straight to `gitops.branch`; `pull_request` opens a pull request with the pin instead. |
+| `deploy.mode` | `commit` | `commit` pushes the pin straight to `gitops.branch`; `pull_request` opens a pull request with the pin instead, which doorstep squash-merges itself once the GitOps repository's required checks pass. See [gitops.md](gitops.md#deploy-modes). |
 | `deploy.max_batch` | `10` | Most queued commits collapsed into one deploy, 1 to 100. When several merges are waiting, the newest of the first `max_batch` is deployed and the older ones are superseded; `1` deploys every commit. An urgent deploy still supersedes older queued deploys of older commits regardless of this limit. See [queue.md](queue.md#batching). |
 | `argocd.application` | the app name | Name of the Argo CD `Application` to watch; a DNS subdomain. Several apps may share one Application, for example when it runs several images. |
 | `argocd.namespace` | `argocd` | Namespace of that Application; a DNS label. |
@@ -328,6 +328,8 @@ There is no timeout while a commit waits for its checks; the `checks` gate's `ti
 | `pin.yaml.format` | `digest` | `digest` writes `sha256:...`, for Helm values with a separate digest field; `reference` writes `repository@sha256:...`, for an `image:` field in a plain manifest. |
 
 `pin.yaml.path` is a list of keys separated by `.`; segments must not be empty or start or end with whitespace, and a segment made only of digits is an index into a sequence. `image.digest` addresses `digest` under `image`, and `spec.template.spec.containers.0.image` addresses the image of the first container. Keys that contain a `.` cannot be addressed.
+
+The place being pinned must already exist in the GitOps repository: the `images` entry with that `name` (doorstep adds its `digest` key if missing, and leaves `newName` and `newTag` alone), or a string value at the YAML path (a placeholder such as `digest: ""` is enough). doorstep edits only that value and keeps the rest of the file byte for byte. [gitops.md](gitops.md) shows the edits, the commit trailers and the YAML forms doorstep refuses to edit.
 
 #### Gates
 

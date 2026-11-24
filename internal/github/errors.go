@@ -26,7 +26,16 @@ var (
 	ErrTooManyChecks         = errors.New("too many checks reported for the commit")
 	ErrInvalidBranch         = errors.New("invalid branch name")
 	ErrBranchNotFound        = errors.New("branch not found")
+	ErrInvalidPath           = errors.New("invalid repository path or ref")
+	ErrNotAFile              = errors.New("path is not a regular file")
+	ErrFileTooLarge          = errors.New("file is too large")
+	ErrRefNotFound           = errors.New("git ref not found")
+	ErrRefExists             = errors.New("git ref already exists")
 )
+
+func HasStatus(err error, status int) bool {
+	return hasStatus(err, status)
+}
 
 type APIError struct {
 	StatusCode int

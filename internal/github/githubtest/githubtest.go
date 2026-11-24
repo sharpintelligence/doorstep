@@ -59,6 +59,9 @@ type Server struct {
 	tokenCalls  atomic.Int64
 	checksCalls atomic.Int64
 	branchCalls atomic.Int64
+
+	fakeRepos     map[string]*Repo
+	fakeRepoRoute sync.Once
 }
 
 func NewServer(tb testing.TB) *Server {
