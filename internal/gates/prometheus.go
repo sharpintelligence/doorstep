@@ -2,10 +2,13 @@ package gates
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +19,10 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/promquery"
 )
 
-const maxPrometheusSamples = 10
+const (
+	maxPrometheusSamples = 10
+	clockSkewTolerance   = 5 * time.Second
+)
 
 const (
 	sampleSuccess = "success"
@@ -66,18 +72,21 @@ func (p Prometheus) newPrometheus(_ config.App, gate config.Gate) (Gate, error) 
 	if !ok {
 		return nil, fmt.Errorf("prometheus server %q is not configured", spec.Server)
 	}
-	return prometheusGate{spec: spec, querier: querier, now: p.Now}, nil
+	sum := sha256.Sum256([]byte(spec.Query))
+	return prometheusGate{spec: spec, queryHash: hex.EncodeToString(sum[:]), querier: querier, now: p.Now}, nil
 }
 
 type prometheusGate struct {
-	spec    config.PrometheusQuery
-	querier MetricsQuerier
-	now     func() time.Time
+	spec      config.PrometheusQuery
+	queryHash string
+	querier   MetricsQuerier
+	now       func() time.Time
 }
 
 type prometheusEvidence struct {
 	Server               string            `json:"server"`
 	Query                string            `json:"query"`
+	QuerySHA256          string            `json:"query_sha256"`
 	Condition            string            `json:"condition,omitempty"`
 	Interval             string            `json:"interval"`
 	SuccessThreshold     int               `json:"success_threshold"`
@@ -126,7 +135,7 @@ func (g prometheusGate) Evaluate(ctx context.Context, req Request) (Evaluation, 
 	now := g.now()
 	ev := pendingState[prometheusEvidence](req.Previous)
 	started, ok := parseTimestamp(ev.StartedAt)
-	if !ok || started.After(now) || ev.Server != g.spec.Server || ev.Query != clean(g.spec.Query) {
+	if !ok || started.After(now.Add(clockSkewTolerance)) || ev.Server != g.spec.Server || ev.QuerySHA256 != g.queryHash {
 		ev = prometheusEvidence{StartedAt: timestamp(now)}
 		started = now
 	}
@@ -135,7 +144,7 @@ func (g prometheusGate) Evaluate(ctx context.Context, req Request) (Evaluation, 
 	if first := started.Add(g.spec.InitialDelay); now.Before(first) {
 		return g.result(core.GatePending, "first sample at "+timestamp(first), ev)
 	}
-	if last, ok := parseTimestamp(ev.LastAttemptAt); ok && req.Previous != nil && !last.After(now) && now.Sub(last) < g.spec.Interval {
+	if last, ok := parseTimestamp(ev.LastAttemptAt); ok && req.Previous != nil && g.throttled(now.Sub(last)) {
 		return Evaluation{Status: core.GatePending, Message: req.Previous.Message, Evidence: req.Previous.Evidence}, nil
 	}
 	ev.LastAttemptAt = timestamp(now)
@@ -147,7 +156,7 @@ func (g prometheusGate) Evaluate(ctx context.Context, req Request) (Evaluation, 
 			return Evaluation{}, ctxErr
 		}
 		ev.LastError = clean("baseline query failed: " + err.Error())
-		return g.result(core.GatePending, ev.LastError, ev)
+		return g.result(queryErrorStatus(err), ev.LastError, ev)
 	}
 	if ev.Baseline != nil && ev.Baseline.Status == baselineMissing && g.spec.Baseline.NoData == config.BaselineNoDataFail {
 		return g.result(core.GateFailed, "no baseline data", ev)
@@ -159,16 +168,36 @@ func (g prometheusGate) Evaluate(ctx context.Context, req Request) (Evaluation, 
 			return Evaluation{}, ctxErr
 		}
 		ev.LastError = clean("query failed: " + err.Error())
-		return g.result(core.GatePending, g.withBaselineNote(ev.LastError, ev), ev)
+		return g.result(queryErrorStatus(err), g.withBaselineNote(ev.LastError, ev), ev)
 	}
 	g.record(&ev, now, s)
 	status, message := g.verdict(ev, s, baseline)
 	return g.result(status, g.withBaselineNote(message, ev), ev)
 }
 
+func (g prometheusGate) throttled(sinceLast time.Duration) bool {
+	return sinceLast > -clockSkewTolerance && sinceLast < g.spec.Interval
+}
+
+func queryErrorStatus(err error) core.GateStatus {
+	if rejectedQuery(err) {
+		return core.GateFailed
+	}
+	return core.GatePending
+}
+
+func rejectedQuery(err error) bool {
+	var promErr *promquery.Error
+	if !errors.As(err, &promErr) || promErr.Type != promquery.ErrorBadData {
+		return false
+	}
+	return promErr.Status == http.StatusBadRequest || promErr.Status == http.StatusUnprocessableEntity
+}
+
 func (g prometheusGate) describe(ev *prometheusEvidence) {
 	ev.Server = g.spec.Server
 	ev.Query = clean(g.spec.Query)
+	ev.QuerySHA256 = g.queryHash
 	ev.Condition = ""
 	if g.spec.Condition != nil {
 		ev.Condition = g.spec.Condition.String()

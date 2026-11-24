@@ -2,6 +2,8 @@ package gates_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -367,11 +369,35 @@ func TestPrometheusGateSampling(t *testing.T) {
 			},
 		},
 		{
-			name: "a bad query stays pending until the timeout",
+			name: "a query rejected as bad data fails at once",
 			gate: promGate(),
 			steps: []promStep{
-				{instant: []promReply{apiError(http.StatusBadRequest, "bad_data", "1:5: parse error")}, wantStatus: core.GatePending, wantMessage: "query failed: prometheus responded 400 Bad Request: bad_data: 1:5: parse error", wantQueries: 1},
-				{advance: time.Minute, instant: []promReply{apiError(http.StatusBadRequest, "bad_data", "1:5: parse error")}, wantStatus: core.GatePending, wantMessage: "parse error", wantQueries: 2},
+				{instant: []promReply{ok}, wantStatus: core.GatePending, wantMessage: "1/5", wantQueries: 1},
+				{advance: time.Minute, instant: []promReply{apiError(http.StatusBadRequest, "bad_data", "1:5: parse error")}, wantStatus: core.GateFailed, wantMessage: "query failed: prometheus responded 400 Bad Request: bad_data: 1:5: parse error", wantQueries: 2, wantFields: map[string]any{
+					"last_error": "query failed: prometheus responded 400 Bad Request: bad_data: 1:5: parse error",
+				}},
+			},
+		},
+		{
+			name: "bad data reported as unprocessable fails at once",
+			gate: promGate(),
+			steps: []promStep{
+				{instant: []promReply{apiError(http.StatusUnprocessableEntity, "bad_data", "invalid parameter")}, wantStatus: core.GateFailed, wantMessage: "prometheus responded 422 Unprocessable Entity: bad_data: invalid parameter", wantQueries: 1},
+			},
+		},
+		{
+			name: "an execution error stays pending",
+			gate: promGate(),
+			steps: []promStep{
+				{instant: []promReply{apiError(http.StatusUnprocessableEntity, "execution", "query timed out")}, wantStatus: core.GatePending, wantMessage: "query failed: prometheus responded 422 Unprocessable Entity: execution: query timed out", wantQueries: 1},
+			},
+		},
+		{
+			name: "bad data behind another status stays pending",
+			gate: promGate(),
+			steps: []promStep{
+				{instant: []promReply{apiError(http.StatusServiceUnavailable, "bad_data", "proxy")}, wantStatus: core.GatePending, wantMessage: "query failed", wantQueries: 1},
+				{advance: time.Minute, instant: []promReply{{status: http.StatusBadRequest, body: "bad request"}}, wantStatus: core.GatePending, wantMessage: "prometheus responded 400 Bad Request: bad request", wantQueries: 2},
 			},
 		},
 		{
@@ -507,6 +533,13 @@ func TestPrometheusGateBaseline(t *testing.T) {
 			},
 		},
 		{
+			name: "a rejected baseline query fails at once",
+			gate: baseline(config.Baseline{Ratio: 0.5}),
+			steps: []promStep{
+				{ranges: []promReply{apiError(http.StatusBadRequest, "bad_data", "1:5: parse error")}, wantStatus: core.GateFailed, wantMessage: "baseline query failed: prometheus responded 400 Bad Request: bad_data: 1:5: parse error", wantRanges: 1},
+			},
+		},
+		{
 			name: "baseline with several series is a query problem",
 			gate: baseline(config.Baseline{Ratio: 0.5}),
 			steps: []promStep{
@@ -549,48 +582,116 @@ func TestPrometheusGateBaseline(t *testing.T) {
 	}
 }
 
+func queryHash(q string) string {
+	sum := sha256.Sum256([]byte(q))
+	return hex.EncodeToString(sum[:])
+}
+
+func carriedEvidence(query, started, lastAttempt string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"server":"main","query":%q,"query_sha256":%q,"started_at":%q,"last_attempt_at":%q,"consecutive_successes":4,"samples":[]}`,
+		query, queryHash(query), started, lastAttempt))
+}
+
 func TestPrometheusGateStartsFresh(t *testing.T) {
 	t.Parallel()
 
-	clock := newClock()
-	fake, client := newFakeProm(t)
-	gate := buildPrometheusGate(t, client, clock, promGate())
-	d := promDeployment(clock)
-	recent := `{"server":"main","query":"sum(rate(errors[5m]))","started_at":"2026-11-23T11:00:00Z","last_attempt_at":"2026-11-23T12:00:00Z","consecutive_successes":4,"samples":[]}`
+	const query = "sum(rate(errors[5m]))"
+	long := strings.Repeat("x", 2000) + "a"
+	recent := carriedEvidence(query, "2026-11-23T11:00:00Z", "2026-11-23T11:58:00Z")
 	tests := []struct {
-		name     string
-		previous *core.GateResult
+		name        string
+		query       string
+		previous    *core.GateResult
+		wantFresh   bool
+		wantWaiting bool
 	}{
-		{name: "no previous result"},
-		{name: "previous verdict", previous: &core.GateResult{Status: core.GatePassed, Message: "old", Evidence: json.RawMessage(recent)}},
-		{name: "undecodable evidence", previous: &core.GateResult{Status: core.GatePending, Message: "old", Evidence: json.RawMessage(`{"started_at":5}`)}},
-		{name: "different query", previous: &core.GateResult{Status: core.GatePending, Message: "old", Evidence: json.RawMessage(strings.Replace(recent, "errors", "other", 1))}},
-		{name: "start in the future", previous: &core.GateResult{Status: core.GatePending, Message: "old", Evidence: json.RawMessage(strings.Replace(recent, "11:00:00", "13:00:00", 1))}},
+		{name: "no previous result", wantFresh: true},
+		{name: "previous verdict", previous: &core.GateResult{Status: core.GatePassed, Evidence: recent}, wantFresh: true},
+		{name: "undecodable evidence", previous: &core.GateResult{Status: core.GatePending, Evidence: json.RawMessage(`{"started_at":5}`)}, wantFresh: true},
+		{name: "different query", previous: &core.GateResult{Status: core.GatePending, Evidence: carriedEvidence("sum(rate(other[5m]))", "2026-11-23T11:00:00Z", "2026-11-23T11:58:00Z")}, wantFresh: true},
+		{name: "no query hash", previous: &core.GateResult{Status: core.GatePending, Evidence: json.RawMessage(strings.Replace(string(recent), queryHash(query), "", 1))}, wantFresh: true},
+		{
+			name:      "long query changed after the stored prefix",
+			query:     long,
+			previous:  &core.GateResult{Status: core.GatePending, Evidence: carriedEvidence(strings.Repeat("x", 2000)+"b", "2026-11-23T11:00:00Z", "2026-11-23T11:58:00Z")},
+			wantFresh: true,
+		},
+		{name: "start beyond the clock skew tolerance", previous: &core.GateResult{Status: core.GatePending, Evidence: carriedEvidence(query, "2026-11-23T12:00:06Z", "2026-11-23T11:58:00Z")}, wantFresh: true},
+		{name: "carried state", previous: &core.GateResult{Status: core.GatePending, Evidence: recent}},
+		{name: "carried state of a long query", query: long, previous: &core.GateResult{Status: core.GatePending, Evidence: carriedEvidence(long, "2026-11-23T11:00:00Z", "2026-11-23T11:58:00Z")}},
+		{name: "start within the clock skew tolerance", previous: &core.GateResult{Status: core.GatePending, Evidence: carriedEvidence(query, "2026-11-23T12:00:05Z", "2026-11-23T11:58:00Z")}, wantWaiting: true},
 	}
 	for _, tt := range tests {
-		fake.script([]promReply{vector("0")}, nil)
-		before, _ := fake.counts()
-		ev := evaluateGate(t, gate, d, tt.previous)
-		after, _ := fake.counts()
-		fields := evidenceMap(t, ev)
-		if after != before+1 || ev.Message != "1/5 samples passed; latest 0 (want < 0.05)" || fields["started_at"] != "2026-11-23T12:00:00Z" {
-			t.Errorf("%s: result = %s %s after %d requests", tt.name, ev.Message, ev.Evidence, after-before)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newClock()
+			fake, client := newFakeProm(t)
+			fake.script([]promReply{vector("0")}, nil)
+			gate := buildPrometheusGate(t, client, clock, promGate(func(g *config.Gate) {
+				if tt.query != "" {
+					g.Query = tt.query
+				}
+			}))
+			ev := evaluateGate(t, gate, promDeployment(clock), tt.previous)
+			queries, _ := fake.counts()
+			fields := evidenceMap(t, ev)
+			switch {
+			case tt.wantWaiting:
+				if queries != 0 || ev.Status != core.GatePending || ev.Message != "first sample at 2026-11-23T12:00:05Z" || fields["started_at"] != "2026-11-23T12:00:05Z" {
+					t.Errorf("result = %s %s %s after %d queries, want to wait for the carried start", ev.Status, ev.Message, ev.Evidence, queries)
+				}
+			case queries != 1:
+				t.Errorf("sent %d queries, want 1", queries)
+			case tt.wantFresh:
+				if ev.Status != core.GatePending || ev.Message != "1/5 samples passed; latest 0 (want < 0.05)" || fields["started_at"] != "2026-11-23T12:00:00Z" {
+					t.Errorf("result = %s %s %s, want a fresh start", ev.Status, ev.Message, ev.Evidence)
+				}
+			case ev.Status != core.GatePassed || fields["started_at"] == "2026-11-23T12:00:00Z":
+				t.Errorf("result = %s %s %s, want the carried streak to pass", ev.Status, ev.Message, ev.Evidence)
+			}
+			want := tt.query
+			if want == "" {
+				want = query
+			}
+			if fields["query_sha256"] != queryHash(want) {
+				t.Errorf("query_sha256 = %v, want the hash of the full query", fields["query_sha256"])
+			}
+		})
 	}
+}
 
-	pending := &core.GateResult{Status: core.GatePending, Message: "old", Evidence: json.RawMessage(strings.Replace(recent, "12:00:00", "11:58:00", 1))}
-	fake.script([]promReply{vector("0")}, nil)
-	ev := evaluateGate(t, gate, d, pending)
-	if ev.Status != core.GatePassed || evidenceMap(t, ev)["started_at"] != "2026-11-23T11:00:00Z" {
-		t.Errorf("carried state: %s %s %s", ev.Status, ev.Message, ev.Evidence)
+func TestPrometheusGateThrottleToleratesClockSkew(t *testing.T) {
+	t.Parallel()
+
+	const query = "sum(rate(errors[5m]))"
+	tests := []struct {
+		name        string
+		lastAttempt string
+		wantQueries int
+	}{
+		{name: "interval elapsed", lastAttempt: "2026-11-23T11:59:00Z", wantQueries: 1},
+		{name: "within the interval", lastAttempt: "2026-11-23T11:59:01Z", wantQueries: 0},
+		{name: "same second", lastAttempt: "2026-11-23T12:00:00Z", wantQueries: 0},
+		{name: "slightly ahead of this clock", lastAttempt: "2026-11-23T12:00:04Z", wantQueries: 0},
+		{name: "far ahead of this clock", lastAttempt: "2026-11-23T12:00:05Z", wantQueries: 1},
+		{name: "an hour ahead of this clock", lastAttempt: "2026-11-23T13:00:00Z", wantQueries: 1},
 	}
-
-	future := &core.GateResult{Status: core.GatePending, Message: "old", Evidence: json.RawMessage(strings.Replace(recent, "last_attempt_at\":\"2026-11-23T12", "last_attempt_at\":\"2026-11-23T13", 1))}
-	fake.script([]promReply{vector("0")}, nil)
-	before, _ := fake.counts()
-	evaluateGate(t, gate, d, future)
-	if after, _ := fake.counts(); after != before+1 {
-		t.Error("an attempt time in the future throttled the gate")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := newClock()
+			fake, client := newFakeProm(t)
+			fake.script([]promReply{vector("0")}, nil)
+			gate := buildPrometheusGate(t, client, clock, promGate())
+			previous := &core.GateResult{Status: core.GatePending, Message: "old", Evidence: carriedEvidence(query, "2026-11-23T11:00:00Z", tt.lastAttempt)}
+			ev := evaluateGate(t, gate, promDeployment(clock), previous)
+			if queries, _ := fake.counts(); queries != tt.wantQueries {
+				t.Errorf("sent %d queries, want %d", queries, tt.wantQueries)
+			}
+			if tt.wantQueries == 0 && (ev.Message != "old" || string(ev.Evidence) != string(previous.Evidence)) {
+				t.Errorf("throttled call changed the result: %s %s", ev.Message, ev.Evidence)
+			}
+		})
 	}
 }
 

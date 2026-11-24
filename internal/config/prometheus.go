@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ const (
 	DefaultPrometheusInterval         = time.Minute
 	MinPrometheusInterval             = 10 * time.Second
 	MaxPrometheusInterval             = time.Hour
+	MaxPrometheusInitialDelay         = 24 * time.Hour
 	DefaultPrometheusSuccessThreshold = 5
 	DefaultPrometheusFailureThreshold = 3
 	MaxPrometheusSuccessThreshold     = 1000
@@ -35,6 +37,7 @@ type PrometheusServer struct {
 	Username        string `yaml:"username"`
 	PasswordEnv     string `yaml:"password_env"`
 	PasswordFile    string `yaml:"password_file"`
+	AllowHTTPAuth   bool   `yaml:"allow_http_auth"`
 }
 
 func (s PrometheusServer) BearerToken() (SecretRef, bool) {
@@ -45,6 +48,16 @@ func (s PrometheusServer) BearerToken() (SecretRef, bool) {
 func (s PrometheusServer) Password() (SecretRef, bool) {
 	ref := SecretRef{Label: s.label("password"), Env: s.PasswordEnv, File: s.PasswordFile}
 	return ref, ref.Env != "" || ref.File != ""
+}
+
+func (s PrometheusServer) sendsCredentialsInCleartext() bool {
+	_, bearer := s.BearerToken()
+	_, password := s.Password()
+	if s.AllowHTTPAuth || (!bearer && !password && s.Username == "") {
+		return false
+	}
+	u, err := url.Parse(s.URL)
+	return err == nil && u.Scheme == "http" && !isLoopbackHost(u.Hostname())
 }
 
 func (s PrometheusServer) label(field string) string {
@@ -273,7 +286,8 @@ func prometheusTimeout(g Gate) time.Duration {
 	g = g.withPrometheusDefaults()
 	interval := min(max(g.Interval.Std(), 0), MaxPrometheusInterval)
 	samples := min(max(*g.SuccessThreshold, 0), MaxPrometheusSuccessThreshold)
-	return max(g.InitialDelay.Std(), 0) + time.Duration(samples)*interval + DefaultTimeoutAllowance
+	delay := min(max(g.InitialDelay.Std(), 0), MaxPrometheusInitialDelay)
+	return delay + time.Duration(samples)*interval + DefaultTimeoutAllowance
 }
 
 func prometheusMinimumTimeout(g Gate) time.Duration {
@@ -298,8 +312,10 @@ func validatePrometheusServer(r reporter, s PrometheusServer) {
 	r.check("name", validateName(s.Name))
 	if s.URL == "" {
 		r.addf("url", "is required")
-	} else {
-		r.check("url", validateURL(s.URL, "bearer_token_env, bearer_token_file or username with password_env or password_file"))
+	} else if err := validateURL(s.URL, "bearer_token_env, bearer_token_file or username with password_env or password_file"); err != nil {
+		r.check("url", err)
+	} else if s.sendsCredentialsInCleartext() {
+		r.addf("url", "plain http would send the credentials unencrypted; use https, or set allow_http_auth: true if the network path is trusted")
 	}
 	if s.BearerTokenEnv != "" && s.BearerTokenFile != "" {
 		r.addf("bearer_token_env, bearer_token_file", "set at most one")
@@ -361,8 +377,9 @@ func validatePrometheusGate(r reporter, field string, g Gate, servers []string) 
 	if !intervalOK {
 		r.addf(field+".interval", "%s is out of range (want %s to %s)", interval, MinPrometheusInterval, MaxPrometheusInterval)
 	}
-	if g.InitialDelay < 0 {
-		r.addf(field+".initial_delay", "must not be negative")
+	delayOK := g.InitialDelay >= 0 && g.InitialDelay.Std() <= MaxPrometheusInitialDelay
+	if !delayOK {
+		r.addf(field+".initial_delay", "%s is out of range (want 0s to %s)", g.InitialDelay, MaxPrometheusInitialDelay)
 	}
 	successOK := *g.SuccessThreshold >= 1 && *g.SuccessThreshold <= MaxPrometheusSuccessThreshold
 	if !successOK {
@@ -379,7 +396,7 @@ func validatePrometheusGate(r reporter, field string, g Gate, servers []string) 
 	if g.Baseline != nil {
 		validateBaseline(r, field+".baseline", *g.Baseline, interval, intervalOK)
 	}
-	if intervalOK && successOK && g.InitialDelay >= 0 && g.Timeout != nil && *g.Timeout > 0 {
+	if intervalOK && successOK && delayOK && g.Timeout != nil && *g.Timeout > 0 {
 		if minimum := prometheusMinimumTimeout(g); g.Timeout.Std() <= minimum {
 			r.addf(field+".timeout", "%s must be longer than initial_delay + (success_threshold - 1) x interval (%s)", g.Timeout, minimum)
 		}

@@ -9,7 +9,7 @@ import (
 
 func prometheusCatalog(servers ...PrometheusServer) Catalog {
 	if servers == nil {
-		servers = []PrometheusServer{{Name: "main", URL: "http://prometheus.monitoring.svc:9090", BearerTokenFile: "/var/run/secrets/prometheus-token"}}
+		servers = []PrometheusServer{{Name: "main", URL: "https://prometheus.monitoring.svc:9091", BearerTokenFile: "/var/run/secrets/prometheus-token"}}
 	}
 	return File{
 		Prometheus: servers,
@@ -65,6 +65,31 @@ func TestPrometheusValidate(t *testing.T) {
 		},
 		{name: "no auth", mutate: func(c *Catalog) { c.Prometheus[0].BearerTokenFile = "" }},
 		{name: "https with path prefix", mutate: func(c *Catalog) { c.Prometheus[0].URL = "https://mimir.example.com/prometheus" }},
+		{name: "http without credentials", mutate: func(c *Catalog) { c.Prometheus[0].URL = "http://prometheus:9090"; c.Prometheus[0].BearerTokenFile = "" }},
+		{name: "http with credentials to localhost", mutate: func(c *Catalog) { c.Prometheus[0].URL = "http://localhost:9090" }},
+		{name: "http with credentials to a loopback IP", mutate: func(c *Catalog) { c.Prometheus[0].URL = "http://[::1]:9090" }},
+		{
+			name: "http with credentials allowed explicitly",
+			mutate: func(c *Catalog) {
+				c.Prometheus[0].URL = "http://prometheus:9090"
+				c.Prometheus[0].AllowHTTPAuth = true
+			},
+		},
+		{
+			name:    "http with bearer token",
+			mutate:  func(c *Catalog) { c.Prometheus[0].URL = "http://prometheus:9090" },
+			wantErr: []string{"prometheus[0] (main): url: plain http would send the credentials unencrypted; use https, or set allow_http_auth: true if the network path is trusted"},
+		},
+		{
+			name: "http with basic auth",
+			mutate: func(c *Catalog) {
+				c.Prometheus[0].URL = "http://10.0.0.5:9090"
+				c.Prometheus[0].BearerTokenFile = ""
+				c.Prometheus[0].Username = "u"
+				c.Prometheus[0].PasswordEnv = "P"
+			},
+			wantErr: []string{"url: plain http would send the credentials unencrypted"},
+		},
 
 		{name: "server name required", mutate: func(c *Catalog) { c.Prometheus[0].Name = "" }, wantErr: []string{"prometheus[0]: name: is required"}},
 		{name: "server name not a DNS label", mutate: func(c *Catalog) { c.Prometheus[0].Name = "Main" }, wantErr: []string{"prometheus[0] (Main): name:", "DNS label"}},
@@ -134,7 +159,15 @@ func TestPrometheusValidate(t *testing.T) {
 		{name: "interval too short", mutate: func(c *Catalog) { promGate(c).Interval = durPtr(5 * time.Second) }, wantErr: []string{".interval: 5s is out of range (want 10s to 1h0m0s)"}},
 		{name: "interval too long", mutate: func(c *Catalog) { promGate(c).Interval = durPtr(2 * time.Hour) }, wantErr: []string{".interval: 2h0m0s is out of range"}},
 		{name: "interval at the bounds", mutate: func(c *Catalog) { promGate(c).Interval = durPtr(10 * time.Second) }},
-		{name: "negative initial delay", mutate: func(c *Catalog) { promGate(c).InitialDelay = Duration(-time.Second) }, wantErr: []string{".initial_delay: must not be negative"}},
+		{name: "negative initial delay", mutate: func(c *Catalog) { promGate(c).InitialDelay = Duration(-time.Second) }, wantErr: []string{".initial_delay: -1s is out of range (want 0s to 24h0m0s)"}},
+		{name: "initial delay too long", mutate: func(c *Catalog) { promGate(c).InitialDelay = Duration(25 * time.Hour) }, wantErr: []string{".initial_delay: 25h0m0s is out of range (want 0s to 24h0m0s)"}},
+		{
+			name: "initial delay at the bound",
+			mutate: func(c *Catalog) {
+				promGate(c).InitialDelay = Duration(24 * time.Hour)
+				promGate(c).Timeout = durPtr(25 * time.Hour)
+			},
+		},
 		{name: "success threshold zero", mutate: func(c *Catalog) { promGate(c).SuccessThreshold = intPtr(0) }, wantErr: []string{".success_threshold: 0 is out of range (want 1 to 1000)"}},
 		{name: "success threshold too high", mutate: func(c *Catalog) { promGate(c).SuccessThreshold = intPtr(1001) }, wantErr: []string{".success_threshold: 1001 is out of range"}},
 		{name: "failure threshold zero", mutate: func(c *Catalog) { promGate(c).FailureThreshold = intPtr(0) }, wantErr: []string{".failure_threshold: 0 is out of range (want 1 to 100)"}},
@@ -231,6 +264,19 @@ func TestPrometheusValidate(t *testing.T) {
 	}
 }
 
+func TestPrometheusHugeInitialDelayReportsOnlyTheDelay(t *testing.T) {
+	t.Parallel()
+
+	f := File{Prometheus: []PrometheusServer{{Name: "main", URL: "https://prometheus.example.com"}}, Apps: prometheusCatalog().Apps}
+	f.Apps[0].Gates.After[1].InitialDelay = Duration(math.MaxInt64 - time.Minute)
+	f.Apps[0].Gates.After[1].Timeout = nil
+	err := f.Catalog().Validate()
+	assertErrorContains(t, err, []string{".initial_delay: 2562047h46m16.854775807s is out of range (want 0s to 24h0m0s)"})
+	if strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error %q mentions a timeout that was never set", err)
+	}
+}
+
 func TestPrometheusDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -257,6 +303,8 @@ func TestPrometheusDefaults(t *testing.T) {
 		{name: "initial delay and thresholds", gate: Gate{InitialDelay: Duration(2 * time.Minute), SuccessThreshold: intPtr(3), Interval: durPtr(30 * time.Second)}, wantTimeout: 2*time.Minute + 90*time.Second + 10*time.Minute},
 		{name: "explicit timeout kept", gate: Gate{Timeout: durPtr(time.Hour)}, wantTimeout: time.Hour},
 		{name: "out of range values do not overflow", gate: Gate{SuccessThreshold: intPtr(math.MaxInt), Interval: durPtr(math.MaxInt64)}, wantTimeout: 1000*time.Hour + 10*time.Minute},
+		{name: "huge initial delay does not overflow", gate: Gate{InitialDelay: Duration(math.MaxInt64 - time.Minute)}, wantTimeout: 24*time.Hour + 5*time.Minute + 10*time.Minute},
+		{name: "negative initial delay is ignored", gate: Gate{InitialDelay: Duration(-time.Hour)}, wantTimeout: 15 * time.Minute},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -346,6 +394,7 @@ prometheus:
   - name: main
     url: http://prometheus-operated.monitoring.svc:9090
     bearer_token_file: /var/run/secrets/doorstep/prometheus-token
+    allow_http_auth: true
 apps:
   - name: api
     source: {repo: example-org/api}
@@ -377,6 +426,9 @@ apps:
 	c := file.Catalog()
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+	if !c.Prometheus[0].AllowHTTPAuth {
+		t.Error("allow_http_auth was not parsed")
 	}
 	q, err := c.Apps[0].Gates.After[0].PrometheusQuery()
 	if err != nil {
@@ -585,8 +637,8 @@ func TestPrometheusSecretRefs(t *testing.T) {
 	t.Parallel()
 
 	c := Catalog{Prometheus: []PrometheusServer{
-		{Name: "bearer", URL: "http://a", BearerTokenEnv: "PROM_TOKEN"},
-		{Name: "basic", URL: "http://b", Username: "u", PasswordFile: "/run/secrets/prom-password"},
+		{Name: "bearer", URL: "https://a", BearerTokenEnv: "PROM_TOKEN"},
+		{Name: "basic", URL: "https://b", Username: "u", PasswordFile: "/run/secrets/prom-password"},
 		{Name: "open", URL: "http://c"},
 	}}
 	refs := c.SecretRefs()

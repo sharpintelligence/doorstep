@@ -379,7 +379,7 @@ Named Prometheus servers that [`prometheus` gates](#prometheus-gates) query. Any
 ```yaml
 prometheus:
   - name: main
-    url: http://prometheus-operated.monitoring.svc:9090
+    url: https://prometheus.monitoring.svc:9091
     bearer_token_file: /var/run/secrets/doorstep/prometheus-token
 apps:
   - name: api
@@ -406,8 +406,9 @@ apps:
 | `bearer_token_env` / `bearer_token_file` | no, at most one | Environment variable or absolute file path holding a bearer token, sent as `Authorization: Bearer <token>`. A projected service account token file works, because the file is read on every request. |
 | `username` | with a password | User name for HTTP basic authentication; must not contain `:` or control characters. |
 | `password_env` / `password_file` | with `username`, exactly one | Environment variable or absolute file path holding the basic authentication password. |
+| `allow_http_auth` | no | `true` allows a bearer token or password over a plain `http` URL to a host other than loopback. Default `false`. |
 
-A server uses a bearer token, basic authentication or neither, never both. Credentials are bound to the server they are configured on: a gate names a server, never a URL, so a token can only ever be sent to its own `url`. Redirects are not followed. `http` is allowed because in-cluster Prometheus is usually plain HTTP; use `https` for anything that crosses a network you do not trust. `https` servers are verified against the system trust store; for a private certificate authority, mount its certificate and point `SSL_CERT_FILE` (or `SSL_CERT_DIR`) at it. See [Secrets](#secrets) for how credentials are read.
+A server uses a bearer token, basic authentication or neither, never both. Credentials are bound to the server they are configured on: a gate names a server, never a URL, so a token can only ever be sent to its own `url`. Redirects are not followed. `http` is allowed because in-cluster Prometheus is usually plain HTTP, but a server with credentials must use `https` unless its host is loopback (`localhost`, `127.0.0.0/8`, `::1`), because a token or password over plain HTTP can be read by anyone on the path. Set `allow_http_auth: true` to send them over `http` anyway when the network path is trusted, for example inside a service mesh that encrypts traffic between pods. `https` servers are verified against the system trust store; for a private certificate authority, mount its certificate and point `SSL_CERT_FILE` (or `SSL_CERT_DIR`) at it. See [Secrets](#secrets) for how credentials are read.
 
 ### `apps[]`
 
@@ -492,10 +493,10 @@ A `prometheus` gate samples a PromQL query after the deploy; [gates.md](gates.md
 | Key | Default | Description |
 | --- | --- | --- |
 | `server` | the only server | Name of a [`prometheus[]`](#prometheus) server. Required when more than one server is configured. |
-| `query` | required | PromQL expression that returns a scalar or a single series; aggregate with `sum`, `max` or `min`. At most 4096 bytes, valid UTF-8, no NUL. It is not checked until Prometheus runs it: a bad query keeps the gate pending with Prometheus's error. |
+| `query` | required | PromQL expression that returns a scalar or a single series; aggregate with `sum`, `max` or `min`. At most 4096 bytes, valid UTF-8, no NUL. It is not checked until Prometheus runs it: a query Prometheus rejects as `bad_data` fails the gate at once with Prometheus's error. |
 | `condition` | none | An operator (`<`, `<=`, `>`, `>=`, `==`, `!=`) and a finite number, such as `"< 0.05"`; always quote it, because YAML reads a leading `>` or `!` as syntax. |
 | `interval` | `1m` | Time between samples, `10s` to `1h`. |
-| `initial_delay` | `0s` | Wait before the first sample, measured from the gate's first evaluation; at least `0s`. |
+| `initial_delay` | `0s` | Wait before the first sample, measured from the gate's first evaluation; `0s` to `24h`. |
 | `success_threshold` | `5` | Consecutive successful samples that pass the gate, 1 to 1000. |
 | `failure_threshold` | `3` | Consecutive failing samples that fail the gate, 1 to 100. |
 | `no_data` | `pending` | What an empty result or NaN means: `pending` (count neither way) or `fail` (a failing sample). |
@@ -617,7 +618,7 @@ notifications:
 
 prometheus:
   - name: main
-    url: http://prometheus-operated.monitoring.svc:9090
+    url: https://prometheus.monitoring.svc:9091
     bearer_token_file: /var/run/secrets/doorstep/prometheus-token
 
 apps:

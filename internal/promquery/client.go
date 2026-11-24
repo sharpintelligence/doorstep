@@ -22,6 +22,8 @@ const (
 
 	maxExcerptBytes = 256
 	statusSuccess   = "success"
+
+	ErrorBadData = "bad_data"
 )
 
 var (
