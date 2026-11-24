@@ -1,4 +1,4 @@
-# 0008: Built-in gates and deploy schedules
+# 0011: Built-in gates and deploy schedules
 
 - Status: Proposed
 - Date: 2026-11-24

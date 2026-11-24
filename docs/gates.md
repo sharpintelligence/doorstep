@@ -173,7 +173,7 @@ Evidence: `{"evaluated_at", "active": [{"effect", "name", "cron", "timezone", "s
 
 Cron firings are wall-clock times in the window's time zone and follow `robfig/cron` across daylight saving changes: a firing inside the spring-forward gap is skipped that day, and a firing inside the fall-back overlap fires twice, once in each offset. In `America/New_York`, `30 2 * * *` does not fire on 2026-03-08, so an allow window at that time holds deploys an extra day and a deny window at that time does not apply that day; `30 1 * * *` fires at 05:30 and 06:30 UTC on 2026-11-01, opening two windows (one run of firings when `duration` covers the hour between them). Schedule windows outside 01:00-03:00 local time, or use a zone without daylight saving such as `UTC`, to avoid both.
 
-The semantics follow Argo CD sync windows (kind, schedule, duration, time zone), and expressions are parsed by the library Kubernetes CronJobs and Argo CD use (`robfig/cron`), restricted to five fields ([ADR 0008](decisions/0008-built-in-gates-and-deploy-schedules.md)). The parsing and window arithmetic live in `internal/windows`, which `config` also uses, so a configuration that validates cannot fail to build its gates at startup.
+The semantics follow Argo CD sync windows (kind, schedule, duration, time zone), and expressions are parsed by the library Kubernetes CronJobs and Argo CD use (`robfig/cron`), restricted to five fields ([ADR 0011](decisions/0011-built-in-gates-and-deploy-schedules.md)). The parsing and window arithmetic live in `internal/windows`, which `config` also uses, so a configuration that validates cannot fail to build its gates at startup.
 
 ### health
 
