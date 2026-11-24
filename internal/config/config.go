@@ -22,6 +22,10 @@ const (
 	EnvDatabaseURLFile   = "DOORSTEP_DATABASE_URL_FILE"
 
 	EnvRegistryCredentialsFile = "DOORSTEP_REGISTRY_CREDENTIALS_FILE"
+
+	EnvLockReminderInterval = "DOORSTEP_LOCK_REMINDER_INTERVAL"
+
+	MinLockReminderInterval = time.Minute
 )
 
 var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
@@ -32,6 +36,7 @@ type Config struct {
 	Database Database
 	GitHub   GitHub
 	Registry Registry
+	Locks    Locks
 }
 
 type Server struct {
@@ -55,6 +60,10 @@ type Registry struct {
 	CredentialsFile string
 }
 
+type Locks struct {
+	ReminderInterval time.Duration
+}
+
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -68,6 +77,7 @@ func Default() Config {
 			Format: logging.FormatJSON,
 		},
 		GitHub: defaultGitHub(),
+		Locks:  Locks{ReminderInterval: 24 * time.Hour},
 	}
 }
 
@@ -83,6 +93,7 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	errs = append(errs,
 		lookupDuration(lookup, EnvShutdownDelay, &cfg.Server.ShutdownDelay),
 		lookupDuration(lookup, EnvShutdownTimeout, &cfg.Server.ShutdownTimeout),
+		lookupDuration(lookup, EnvLockReminderInterval, &cfg.Locks.ReminderInterval),
 	)
 	if v, ok := lookup(EnvLogLevel); ok {
 		cfg.Log.Level = v
@@ -142,7 +153,7 @@ func (c Config) ValidateSettings() error {
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("shutdown timeout: must be positive, got %s", c.Server.ShutdownTimeout))
 	}
-	errs = append(errs, c.Log.Validate())
+	errs = append(errs, c.Log.Validate(), c.Locks.Validate())
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }
@@ -156,6 +167,16 @@ func (l Log) Validate() error {
 		errs = append(errs, fmt.Errorf("log format: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+func (l Locks) Validate() error {
+	switch {
+	case l.ReminderInterval < 0:
+		return fmt.Errorf("lock reminder interval: must not be negative, got %s", l.ReminderInterval)
+	case l.ReminderInterval > 0 && l.ReminderInterval < MinLockReminderInterval:
+		return fmt.Errorf("lock reminder interval: must be 0 (disabled) or at least %s, got %s", MinLockReminderInterval, l.ReminderInterval)
+	}
+	return nil
 }
 
 func (d Database) Validate() error {

@@ -81,6 +81,17 @@ func TestSchemaAcceptsEveryCoreValue(t *testing.T) {
 			t.Errorf("lock kind %s rejected: %v", k, err)
 		}
 	}
+	for _, a := range core.LockActions() {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO lock_events (app_id, action, owner) VALUES ($1, $2, 'ops')", appID, a); err != nil {
+			t.Errorf("lock action %s rejected: %v", a, err)
+		}
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO lock_events (action, owner) VALUES ($1, 'ops')", a); err != nil {
+			t.Errorf("global lock action %s rejected: %v", a, err)
+		}
+	}
+	if err := store.ExecSQL(t.Context(), st, "INSERT INTO locks (kind, owner) VALUES ('freeze', 'ops')"); err != nil {
+		t.Errorf("global freeze rejected: %v", err)
+	}
 	for _, e := range core.EventTypes() {
 		if err := store.ExecSQL(t.Context(), st, "INSERT INTO deployment_events (deployment_id, app_id, type) VALUES ($1, $2, $3)", deploymentID, appID, e); err != nil {
 			t.Errorf("event type %s rejected: %v", e, err)
@@ -147,6 +158,13 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 		{name: "queue entry for another app", sql: withOtherApp + "UPDATE queue_entries q SET app_id = other.id FROM other WHERE q.deployment_id = $1", constraint: "queue_entries_deployment_fkey"},
 		{name: "event for another app", sql: withOtherApp + "INSERT INTO deployment_events (deployment_id, app_id, type) SELECT $1, id, 'note' FROM other", constraint: "deployment_events_deployment_fkey"},
 		{name: "lock for another app", sql: withOtherApp + "INSERT INTO locks (app_id, kind, owner, deployment_id) SELECT id, 'deployment', 'w1', $1 FROM other", constraint: "locks_deployment_fkey"},
+		{name: "global deployment lock", sql: "INSERT INTO locks (kind, owner) VALUES ('deployment', 'ops')", constraint: "locks_global_check"},
+		{name: "global freeze naming a deployment", sql: "INSERT INTO locks (kind, owner, deployment_id) VALUES ('freeze', 'ops', $1)", constraint: "locks_global_check"},
+		{name: "second global freeze", sql: "WITH first AS (INSERT INTO locks (kind, owner) VALUES ('freeze', 'a') RETURNING id) INSERT INTO locks (kind, owner) SELECT 'freeze', 'b' FROM first", constraint: "locks_global_kind_key"},
+		{name: "lock expiring at creation", sql: "INSERT INTO locks (app_id, kind, owner, expires_at) VALUES ((SELECT app_id FROM deployments WHERE id = $1), 'freeze', 'ops', now())", constraint: "locks_expires_at_check"},
+		{name: "lock expired before creation", sql: "INSERT INTO locks (kind, owner, expires_at) VALUES ('freeze', 'ops', now() - interval '1 minute')", constraint: "locks_expires_at_check"},
+		{name: "unknown lock action", sql: "INSERT INTO lock_events (action, owner) VALUES ('stolen', 'ops')", constraint: "lock_events_action_check"},
+		{name: "lock event for unknown app", sql: "INSERT INTO lock_events (app_id, action, owner) VALUES (-1, 'locked', 'ops')", constraint: "lock_events_app_id_fkey"},
 		{name: "deployment moved to another app", sql: withOtherApp + "UPDATE deployments d SET app_id = other.id FROM other WHERE d.id = $1", constraint: "queue_entries_deployment_fkey"},
 	}
 	for _, tt := range tests {

@@ -589,6 +589,7 @@ func TestResolveServeConfig(t *testing.T) {
 		Database: config.Database{URLFile: "/run/secrets/database-url"},
 		GitHub:   config.Default().GitHub,
 		Registry: config.Registry{CredentialsFile: "/flag/config.json"},
+		Locks:    config.Default().Locks,
 	}
 	const fileSettings = `
 server:
@@ -607,6 +608,8 @@ github:
   api_url: https://ghe.example.com/api/v3
 registry:
   credentials_file: /file/config.json
+locks:
+  reminder_interval: 6h
 `
 	fileConfig := config.Config{
 		Server:   config.Server{ListenAddr: "127.0.0.1:6000", ShutdownDelay: 0, ShutdownTimeout: time.Minute},
@@ -614,6 +617,7 @@ registry:
 		Database: config.Database{URL: databaseURL},
 		GitHub:   config.GitHub{AppID: "42", PrivateKeyFile: "/file/key.pem", APIURL: "https://ghe.example.com/api/v3"},
 		Registry: config.Registry{CredentialsFile: "/file/config.json"},
+		Locks:    config.Locks{ReminderInterval: 6 * time.Hour},
 	}
 	oneAppCatalog := config.File{
 		Notifications: []config.Notification{{Name: "ops", Type: config.NotifySlack, WebhookURLEnv: "TEST_SLACK_URL"}},
@@ -736,11 +740,12 @@ registry:
 		{
 			name: "environment over file",
 			file: fileSettings,
-			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s"},
+			env:  map[string]string{config.EnvListenAddr: ":9000", config.EnvShutdownDelay: "2s", config.EnvLockReminderInterval: "0s"},
 			want: func(c *config.Config) {
 				*c = fileConfig
 				c.Server.ListenAddr = ":9000"
 				c.Server.ShutdownDelay = 2 * time.Second
+				c.Locks.ReminderInterval = 0
 			},
 		},
 		{
@@ -1186,6 +1191,12 @@ func TestRunServeMetrics(t *testing.T) {
 				if code != http.StatusNotFound {
 					t.Errorf("main GET /metrics = %d, want %d", code, http.StatusNotFound)
 				}
+				if code, body := get(t, "http://"+metricsAddr+"/api/v1/locks"); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"unauthorized"`) {
+					t.Errorf("metrics GET /api/v1/locks = %d %q, want 401 until API authentication is wired", code, body)
+				}
+			}
+			if code, body := get(t, "http://"+mainAddr+"/api/v1/locks"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("main GET /api/v1/locks = %d %q, want the API unmounted", code, body)
 			}
 
 			code, body := get(t, "http://"+metricsAddr+"/metrics")
@@ -1520,31 +1531,34 @@ func findMessage(entries []map[string]any, msg string) map[string]any {
 
 func waitForListening(t *testing.T, stderr *lockedBuffer, done <-chan int) string {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	entry := waitForLog(t, stderr, done, "listening")
+	addr, ok := entry["addr"].(string)
+	if !ok {
+		t.Fatalf("listening log has no addr: %v", entry)
+	}
+	build, ok := entry["build"].(map[string]any)
+	if !ok || build["version"] == "" {
+		t.Errorf("listening log has no build info: %v", entry)
+	}
+	return addr
+}
+
+func waitForLog(t *testing.T, stderr *lockedBuffer, done <-chan int, msg string) map[string]any {
+	t.Helper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if entry := findMessage(parseLogs(t, stderr.String()), msg); entry != nil {
+			return entry
+		}
 		select {
 		case code := <-done:
-			t.Fatalf("serve exited early with %d: %s", code, stderr.String())
-		default:
+			t.Fatalf("serve exited with %d before logging %q: %s", code, msg, stderr.String())
+		case <-t.Context().Done():
+			t.Fatalf("test ended before serve logged %q: %s", msg, stderr.String())
+		case <-ticker.C:
 		}
-		for _, entry := range parseLogs(t, stderr.String()) {
-			if entry["msg"] != "listening" {
-				continue
-			}
-			addr, ok := entry["addr"].(string)
-			if !ok {
-				t.Fatalf("listening log has no addr: %v", entry)
-			}
-			build, ok := entry["build"].(map[string]any)
-			if !ok || build["version"] == "" {
-				t.Errorf("listening log has no build info: %v", entry)
-			}
-			return addr
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("server never logged listening: %s", stderr.String())
-	return ""
 }
 
 func parseLogs(t *testing.T, out string) []map[string]any {
@@ -1567,27 +1581,12 @@ func hasMessage(entries []map[string]any, msg string) bool {
 
 func waitForLogAddr(t *testing.T, stderr *lockedBuffer, done <-chan int, msg string) string {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case code := <-done:
-			t.Fatalf("serve exited early with %d: %s", code, stderr.String())
-		default:
-		}
-		for _, entry := range parseLogs(t, stderr.String()) {
-			if entry["msg"] != msg {
-				continue
-			}
-			addr, ok := entry["addr"].(string)
-			if !ok {
-				t.Fatalf("%q log has no addr: %v", msg, entry)
-			}
-			return addr
-		}
-		time.Sleep(5 * time.Millisecond)
+	entry := waitForLog(t, stderr, done, msg)
+	addr, ok := entry["addr"].(string)
+	if !ok {
+		t.Fatalf("%q log has no addr: %v", msg, entry)
 	}
-	t.Fatalf("server never logged %q: %s", msg, stderr.String())
-	return ""
+	return addr
 }
 
 func TestRunServeMetricsBindFailureReleasesMainListener(t *testing.T) {

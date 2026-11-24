@@ -26,6 +26,8 @@ github:
   api_url: https://ghe.example.com/api/v3
 registry:
   credentials_file: /etc/doorstep/registry/.dockerconfigjson
+locks:
+  reminder_interval: 12h
 notifications:
   - name: ops
     type: slack
@@ -95,6 +97,7 @@ func TestParse(t *testing.T) {
 			APIURL:         strPtr("https://ghe.example.com/api/v3"),
 		},
 		Registry: FileRegistry{CredentialsFile: strPtr("/etc/doorstep/registry/.dockerconfigjson")},
+		Locks:    FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
 			{Name: "hook", Type: NotifyWebhook, URL: "https://hooks.example.com/doorstep", SecretFile: "/etc/doorstep/secrets/hook-secret"},
@@ -315,6 +318,11 @@ func TestFileApply(t *testing.T) {
 			want: func(c *Config) { c.GitHub.PrivateKey, c.GitHub.PrivateKeyFile = "", "/secrets/key.pem" },
 		},
 		{
+			name: "zero lock reminder interval is applied",
+			file: File{Locks: FileLocks{ReminderInterval: durPtr(0)}},
+			want: func(c *Config) { c.Locks.ReminderInterval = 0 },
+		},
+		{
 			name: "all settings",
 			file: File{
 				Server:   FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second)},
@@ -322,6 +330,7 @@ func TestFileApply(t *testing.T) {
 				Database: FileDatabase{URLFile: strPtr("/secrets/db")},
 				GitHub:   FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3")},
 				Registry: FileRegistry{CredentialsFile: strPtr("/secrets/config.json")},
+				Locks:    FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second}
@@ -329,6 +338,7 @@ func TestFileApply(t *testing.T) {
 				c.Database = Database{URLFile: "/secrets/db"}
 				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3"}
 				c.Registry = Registry{CredentialsFile: "/secrets/config.json"}
+				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
 			},
 		},
 		{

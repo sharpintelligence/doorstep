@@ -21,6 +21,7 @@ type File struct {
 	Database      FileDatabase   `yaml:"database"`
 	GitHub        FileGitHub     `yaml:"github"`
 	Registry      FileRegistry   `yaml:"registry"`
+	Locks         FileLocks      `yaml:"locks"`
 	Notifications []Notification `yaml:"notifications"`
 	Apps          []App          `yaml:"apps"`
 }
@@ -49,6 +50,10 @@ type FileGitHub struct {
 
 type FileRegistry struct {
 	CredentialsFile *string `yaml:"credentials_file"`
+}
+
+type FileLocks struct {
+	ReminderInterval *Duration `yaml:"reminder_interval"`
 }
 
 func Parse(r io.Reader) (File, error) {
@@ -115,6 +120,9 @@ func (f File) Apply(base Config) Config {
 	}
 	if f.Registry.CredentialsFile != nil {
 		cfg.Registry.CredentialsFile = *f.Registry.CredentialsFile
+	}
+	if f.Locks.ReminderInterval != nil {
+		cfg.Locks.ReminderInterval = f.Locks.ReminderInterval.Std()
 	}
 	return cfg
 }
