@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -104,7 +105,7 @@ func TestHandler(t *testing.T) {
 			wantCode: http.StatusServiceUnavailable,
 			wantBody: &healthResponse{
 				Status: "unavailable",
-				Checks: map[string]string{"db": "connection refused", "cache": "ok"},
+				Checks: map[string]string{"db": "fail", "cache": "ok"},
 			},
 		},
 		{
@@ -115,7 +116,15 @@ func TestHandler(t *testing.T) {
 			method:   http.MethodGet,
 			path:     "/readyz",
 			wantCode: http.StatusServiceUnavailable,
-			wantBody: &healthResponse{Status: "unavailable", Checks: map[string]string{"db": "check panicked: boom"}},
+			wantBody: &healthResponse{Status: "unavailable", Checks: map[string]string{"db": "fail"}},
+		},
+		{
+			name:     "readyz failure text matching the pass label",
+			checks:   map[string]Check{"db": failing("ok")},
+			method:   http.MethodGet,
+			path:     "/readyz",
+			wantCode: http.StatusServiceUnavailable,
+			wantBody: &healthResponse{Status: "unavailable", Checks: map[string]string{"db": "fail"}},
 		},
 		{
 			name:         "readyz while shutting down",
@@ -209,26 +218,150 @@ func TestNewDefaults(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		in   time.Duration
-		want time.Duration
+		name        string
+		timeout     time.Duration
+		delay       time.Duration
+		wantTimeout time.Duration
+		wantDelay   time.Duration
 	}{
-		{name: "zero uses default", in: 0, want: defaultShutdownTimeout},
-		{name: "negative uses default", in: -time.Second, want: defaultShutdownTimeout},
-		{name: "positive kept", in: time.Second, want: time.Second},
+		{name: "zero timeout uses default", wantTimeout: defaultShutdownTimeout},
+		{name: "negative timeout uses default", timeout: -time.Second, wantTimeout: defaultShutdownTimeout},
+		{name: "positive timeout kept", timeout: time.Second, wantTimeout: time.Second},
+		{name: "negative delay clamped to zero", delay: -time.Second, wantTimeout: defaultShutdownTimeout},
+		{name: "positive delay kept", delay: 3 * time.Second, wantTimeout: defaultShutdownTimeout, wantDelay: 3 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			s := New(Options{ShutdownTimeout: tt.in})
-			if s.shutdownTimeout != tt.want {
-				t.Errorf("shutdownTimeout = %s, want %s", s.shutdownTimeout, tt.want)
+			s := New(Options{ShutdownTimeout: tt.timeout, ShutdownDelay: tt.delay})
+			if s.shutdownTimeout != tt.wantTimeout {
+				t.Errorf("shutdownTimeout = %s, want %s", s.shutdownTimeout, tt.wantTimeout)
+			}
+			if s.shutdownDelay != tt.wantDelay {
+				t.Errorf("shutdownDelay = %s, want %s", s.shutdownDelay, tt.wantDelay)
 			}
 			if s.logger == nil {
 				t.Error("logger is nil")
 			}
 		})
+	}
+}
+
+func TestReadyzHidesCheckErrors(t *testing.T) {
+	t.Parallel()
+
+	const detail = "dial tcp db.internal:5432: connection refused"
+	var logs lockedBuffer
+	s := New(Options{
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Checks: map[string]Check{"db": failing(detail)},
+	})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+
+	if strings.Contains(rec.Body.String(), "db.internal") {
+		t.Errorf("response leaks check error: %q", rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), detail) {
+		t.Errorf("log %q does not contain check error", logs.String())
+	}
+}
+
+func TestReadinessCache(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		offsets   []time.Duration
+		wantCalls int
+	}{
+		{name: "single probe", offsets: []time.Duration{0}, wantCalls: 1},
+		{name: "probes within ttl reuse result", offsets: []time.Duration{0, 500 * time.Millisecond, 999 * time.Millisecond}, wantCalls: 1},
+		{name: "probe at ttl reruns checks", offsets: []time.Duration{0, checkCacheTTL}, wantCalls: 2},
+		{
+			name:      "each expiry reruns once",
+			offsets:   []time.Duration{0, 200 * time.Millisecond, 1500 * time.Millisecond, 2 * time.Second, 2600 * time.Millisecond},
+			wantCalls: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			s := New(Options{Checks: map[string]Check{"db": func(context.Context) error {
+				calls.Add(1)
+				return errors.New("down")
+			}}})
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var offset time.Duration
+			s.now = func() time.Time { return start.Add(offset) }
+
+			for _, offset = range tt.offsets {
+				rec := httptest.NewRecorder()
+				s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+				if rec.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status at %s = %d, want %d", offset, rec.Code, http.StatusServiceUnavailable)
+				}
+			}
+			if got := int(calls.Load()); got != tt.wantCalls {
+				t.Errorf("check calls = %d, want %d", got, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestReadinessConcurrentProbesShareOneRun(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	release := make(chan struct{})
+	s := New(Options{Checks: map[string]Check{"db": func(context.Context) error {
+		calls.Add(1)
+		<-release
+		return nil
+	}}})
+
+	const probes = 20
+	var wg sync.WaitGroup
+	codes := make(chan int, probes)
+	for range probes {
+		wg.Go(func() {
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
+			codes <- rec.Code
+		})
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	close(codes)
+
+	for code := range codes {
+		if code != http.StatusOK {
+			t.Errorf("status = %d, want %d", code, http.StatusOK)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("check calls = %d, want 1", got)
+	}
+}
+
+func TestReadinessSurvivesCancelledProbe(t *testing.T) {
+	t.Parallel()
+
+	s := New(Options{Checks: map[string]Check{"db": func(ctx context.Context) error { return ctx.Err() }}})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/readyz", http.NoBody))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
@@ -511,6 +644,58 @@ func TestRunGracefulShutdown(t *testing.T) {
 	if !s.shuttingDown.Load() {
 		t.Error("server not marked as shutting down")
 	}
+}
+
+func TestRunShutdownDelayReportsNotReady(t *testing.T) {
+	t.Parallel()
+
+	const delay = 2 * time.Second
+	ln := listen(t)
+	base := "http://" + ln.Addr().String()
+	s := New(Options{ShutdownDelay: delay, ShutdownTimeout: 5 * time.Second})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, ln) }()
+
+	assertProbe(t, base+"/readyz", http.StatusOK, statusOK)
+
+	cancelled := time.Now()
+	cancel()
+	for !s.shuttingDown.Load() {
+		time.Sleep(time.Millisecond)
+	}
+
+	assertProbe(t, base+"/readyz", http.StatusServiceUnavailable, statusShuttingDown)
+	assertProbe(t, base+"/healthz", http.StatusOK, statusOK)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the shutdown delay")
+	}
+	if elapsed := time.Since(cancelled); elapsed < delay {
+		t.Errorf("Run returned after %s, want at least %s", elapsed, delay)
+	}
+}
+
+func assertProbe(t *testing.T, url string, wantCode int, wantStatus string) {
+	t.Helper()
+	resp, err := get(t.Context(), url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	if resp.StatusCode != wantCode {
+		t.Errorf("GET %s = %d, want %d (body %q)", url, resp.StatusCode, wantCode, body)
+	}
+	assertHealthBody(t, body, healthResponse{Status: wantStatus})
 }
 
 func TestRunCompletesInFlightRequest(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 
 const (
 	flagListenAddr      = "listen-addr"
+	flagShutdownDelay   = "shutdown-delay"
 	flagShutdownTimeout = "shutdown-timeout"
 	flagLogLevel        = "log-level"
 	flagLogFormat       = "log-format"
@@ -41,6 +42,8 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&overrides.Server.ListenAddr, flagListenAddr, defaults.Server.ListenAddr,
 		"address to listen on as host:port (env "+config.EnvListenAddr+")")
+	flags.DurationVar(&overrides.Server.ShutdownDelay, flagShutdownDelay, defaults.Server.ShutdownDelay,
+		"time to keep serving while reporting not ready before draining on shutdown (env "+config.EnvShutdownDelay+")")
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
 		"time allowed for in-flight requests on shutdown (env "+config.EnvShutdownTimeout+")")
 	flags.StringVar(&overrides.Log.Level, flagLogLevel, defaults.Log.Level,
@@ -57,6 +60,9 @@ func resolveServeConfig(changed func(name string) bool, overrides config.Config,
 	}
 	if changed(flagListenAddr) {
 		cfg.Server.ListenAddr = overrides.Server.ListenAddr
+	}
+	if changed(flagShutdownDelay) {
+		cfg.Server.ShutdownDelay = overrides.Server.ShutdownDelay
 	}
 	if changed(flagShutdownTimeout) {
 		cfg.Server.ShutdownTimeout = overrides.Server.ShutdownTimeout
@@ -91,6 +97,7 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 
 	srv := server.New(server.Options{
 		Logger:          logger,
+		ShutdownDelay:   cfg.Server.ShutdownDelay,
 		ShutdownTimeout: cfg.Server.ShutdownTimeout,
 	})
 	if err := srv.Run(ctx, ln); err != nil {

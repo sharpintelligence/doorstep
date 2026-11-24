@@ -13,6 +13,7 @@ import (
 const (
 	EnvListenAddr      = "DOORSTEP_LISTEN_ADDR"
 	EnvShutdownTimeout = "DOORSTEP_SHUTDOWN_TIMEOUT"
+	EnvShutdownDelay   = "DOORSTEP_SHUTDOWN_DELAY"
 	EnvLogLevel        = "DOORSTEP_LOG_LEVEL"
 	EnvLogFormat       = "DOORSTEP_LOG_FORMAT"
 )
@@ -24,6 +25,7 @@ type Config struct {
 
 type Server struct {
 	ListenAddr      string
+	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
 }
 
@@ -36,6 +38,7 @@ func Default() Config {
 	return Config{
 		Server: Server{
 			ListenAddr:      ":8080",
+			ShutdownDelay:   5 * time.Second,
 			ShutdownTimeout: 15 * time.Second,
 		},
 		Log: Log{
@@ -51,14 +54,10 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup(EnvListenAddr); ok {
 		cfg.Server.ListenAddr = v
 	}
-	if v, ok := lookup(EnvShutdownTimeout); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", EnvShutdownTimeout, err))
-		} else {
-			cfg.Server.ShutdownTimeout = d
-		}
-	}
+	errs = append(errs,
+		lookupDuration(lookup, EnvShutdownDelay, &cfg.Server.ShutdownDelay),
+		lookupDuration(lookup, EnvShutdownTimeout, &cfg.Server.ShutdownTimeout),
+	)
 	if v, ok := lookup(EnvLogLevel); ok {
 		cfg.Log.Level = v
 	}
@@ -68,10 +67,26 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 	return cfg, errors.Join(errs...)
 }
 
+func lookupDuration(lookup func(string) (string, bool), key string, dst *time.Duration) error {
+	v, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = d
+	return nil
+}
+
 func (c Config) Validate() error {
 	var errs []error
 	if err := validateListenAddr(c.Server.ListenAddr); err != nil {
 		errs = append(errs, fmt.Errorf("listen address: %w", err))
+	}
+	if c.Server.ShutdownDelay < 0 {
+		errs = append(errs, fmt.Errorf("shutdown delay: must not be negative, got %s", c.Server.ShutdownDelay))
 	}
 	if c.Server.ShutdownTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("shutdown timeout: must be positive, got %s", c.Server.ShutdownTimeout))

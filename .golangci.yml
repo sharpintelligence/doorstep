@@ -30,8 +30,8 @@ linters:
     - usestdlibvars
   exclusions:
     rules:
-      - path: internal/cli/
-        text: "Function `newRootCommand->"
+      - path: ^internal/cli/cli\.go$
+        text: "^Function `newRootCommand->newServeCommand->newServeCommand\\$1` should pass the context parameter$"
         linters:
           - contextcheck
   settings:
@@ -53,6 +53,8 @@ linters:
               desc: use log/slog
     nolintlint:
       require-specific: true
+    sloglint:
+      context: scope
     revive:
       rules:
         - name: exported

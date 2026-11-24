@@ -199,14 +199,14 @@ One listener (default `:8080`) serves everything public:
 | Path | Purpose | Status |
 | --- | --- | --- |
 | `GET /healthz` | liveness: always `200 {"status":"ok"}` while the process serves | built |
-| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently); `200` when all pass, `503` with per-check results when any fails, `503 {"status":"shutting_down"}` once shutdown begins | built |
+| `GET /readyz` | readiness: runs registered named checks (2 s timeout each, concurrently, results cached for 1 s); `200` when all pass, `503` when any fails, with each check reported only as `ok` or `fail`; `503 {"status":"shutting_down"}` once shutdown begins | built |
 | `/api/v1/...` | JSON API | planned |
 | `/webhooks/github` | GitHub App webhooks | planned |
 | `/` | web UI | planned |
 
-Readiness checks are registered by name in `server.Options.Checks`; the store bead adds a Postgres ping. `/metrics` is served on its own optional listen address (metrics bead) so it is not exposed through the public ingress.
+Readiness checks are registered by name in `server.Options.Checks`; the store bead adds a Postgres ping. `/readyz` is unauthenticated, so check errors (which can name hosts, users or databases) are only logged, never returned. Concurrent probes share one run of the checks, and the result is reused for one second, so probe traffic cannot multiply load on dependencies. `/metrics` is served on its own optional listen address (metrics bead) so it is not exposed through the public ingress.
 
-On `SIGINT` or `SIGTERM` the server marks itself not ready, stops accepting connections and waits up to the shutdown timeout for in-flight requests before exiting.
+On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for the shutdown delay (default 5 s), so `/readyz` answers `503 {"status":"shutting_down"}` while load balancers and Kubernetes endpoints stop routing to it. It then stops accepting connections and waits up to the shutdown timeout for in-flight requests before exiting. A second signal during shutdown terminates the process immediately.
 
 ## Testing strategy
 

@@ -20,7 +20,7 @@ func TestDefault(t *testing.T) {
 	t.Parallel()
 
 	want := Config{
-		Server: Server{ListenAddr: ":8080", ShutdownTimeout: 15 * time.Second},
+		Server: Server{ListenAddr: ":8080", ShutdownDelay: 5 * time.Second, ShutdownTimeout: 15 * time.Second},
 		Log:    Log{Level: "info", Format: "json"},
 	}
 	got := Default()
@@ -57,6 +57,11 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Server.ShutdownTimeout = 90 * time.Second },
 		},
 		{
+			name: "shutdown delay",
+			env:  map[string]string{EnvShutdownDelay: "0s"},
+			want: func(c *Config) { c.Server.ShutdownDelay = 0 },
+		},
+		{
 			name: "log level",
 			env:  map[string]string{EnvLogLevel: "debug"},
 			want: func(c *Config) { c.Log.Level = "debug" },
@@ -75,12 +80,13 @@ func TestFromEnv(t *testing.T) {
 			name: "all variables",
 			env: map[string]string{
 				EnvListenAddr:      ":9090",
+				EnvShutdownDelay:   "2s",
 				EnvShutdownTimeout: "5s",
 				EnvLogLevel:        "warn",
 				EnvLogFormat:       "text",
 			},
 			want: func(c *Config) {
-				c.Server = Server{ListenAddr: ":9090", ShutdownTimeout: 5 * time.Second}
+				c.Server = Server{ListenAddr: ":9090", ShutdownDelay: 2 * time.Second, ShutdownTimeout: 5 * time.Second}
 				c.Log = Log{Level: "warn", Format: "text"}
 			},
 		},
@@ -91,6 +97,12 @@ func TestFromEnv(t *testing.T) {
 				c.Log.Level = "error"
 			},
 			wantErr: []string{EnvShutdownTimeout, `"soon"`},
+		},
+		{
+			name:    "every unparseable duration is reported",
+			env:     map[string]string{EnvShutdownDelay: "later", EnvShutdownTimeout: "soon"},
+			want:    func(*Config) {},
+			wantErr: []string{EnvShutdownDelay, `"later"`, EnvShutdownTimeout, `"soon"`},
 		},
 	}
 
@@ -138,6 +150,12 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *Config) { c.Server.ListenAddr = ":70000" },
 			wantErr: []string{"listen address", `port "70000"`},
 		},
+		{name: "zero shutdown delay", mutate: func(c *Config) { c.Server.ShutdownDelay = 0 }},
+		{
+			name:    "negative shutdown delay",
+			mutate:  func(c *Config) { c.Server.ShutdownDelay = -time.Second },
+			wantErr: []string{"shutdown delay: must not be negative, got -1s"},
+		},
 		{
 			name:    "zero shutdown timeout",
 			mutate:  func(c *Config) { c.Server.ShutdownTimeout = 0 },
@@ -163,10 +181,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "every error is reported",
 			mutate: func(c *Config) {
-				c.Server = Server{ListenAddr: "nope", ShutdownTimeout: 0}
+				c.Server = Server{ListenAddr: "nope", ShutdownDelay: -time.Second, ShutdownTimeout: 0}
 				c.Log = Log{Level: "loud", Format: "xml"}
 			},
-			wantErr: []string{"listen address", "shutdown timeout", "log level", "log format"},
+			wantErr: []string{"listen address", "shutdown delay", "shutdown timeout", "log level", "log format"},
 			wantIs:  []error{logging.ErrUnknownLevel, logging.ErrUnknownFormat},
 		},
 	}

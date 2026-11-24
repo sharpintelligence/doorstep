@@ -39,7 +39,7 @@ export DOORSTEP_TEST_DATABASE_URL='postgres://postgres:doorstep@localhost:5432/d
 just test
 ```
 
-Each test gets its own schema, so tests can run in parallel against one database.
+A helper that gives each test its own schema, so tests can run in parallel against one database, is planned (`internal/store/storetest`, added by the store bead) and not yet implemented.
 
 ## Continuous integration
 
@@ -49,7 +49,7 @@ Each test gets its own schema, so tests can run in parallel against one database
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
 3. runs `just check` and `just build`.
 
-A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` exported. Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions and Go modules.
+A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` exported. No code uses it yet: it is provisioned ahead of the store bead on purpose, so the CI environment for integration tests is settled before the first one lands. Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions and Go modules.
 
 ## Conventions
 

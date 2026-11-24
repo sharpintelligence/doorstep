@@ -24,7 +24,7 @@ test *args:
     go test -race -shuffle=on -count=1 {{args}} ./...
 
 build:
-    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/sharpintelligence/doorstep/internal/buildinfo.version={{version}}" -o bin/doorstep ./cmd/doorstep
+    CGO_ENABLED=0 go build -trimpath -ldflags {{quote("-s -w -X github.com/sharpintelligence/doorstep/internal/buildinfo.version=" + version)}} -o bin/doorstep ./cmd/doorstep
 
 run *args:
     go run ./cmd/doorstep serve {{args}}

@@ -17,6 +17,10 @@ import (
 const (
 	defaultShutdownTimeout = 15 * time.Second
 	checkTimeout           = 2 * time.Second
+	checkCacheTTL          = time.Second
+
+	checkPassed = "ok"
+	checkFailed = "fail"
 
 	statusOK           = "ok"
 	statusUnavailable  = "unavailable"
@@ -27,16 +31,28 @@ type Check func(context.Context) error
 
 type Options struct {
 	Logger          *slog.Logger
+	ShutdownDelay   time.Duration
 	ShutdownTimeout time.Duration
 	Checks          map[string]Check
 }
 
 type Server struct {
 	logger          *slog.Logger
+	shutdownDelay   time.Duration
 	shutdownTimeout time.Duration
 	checks          map[string]Check
+	now             func() time.Time
 	shuttingDown    atomic.Bool
 	handler         http.Handler
+
+	readinessMu   sync.Mutex
+	readinessAt   time.Time
+	lastReadiness readiness
+}
+
+type readiness struct {
+	ready  bool
+	checks map[string]string
 }
 
 type healthResponse struct {
@@ -47,8 +63,10 @@ type healthResponse struct {
 func New(opts Options) *Server {
 	s := &Server{
 		logger:          opts.Logger,
+		shutdownDelay:   max(opts.ShutdownDelay, 0),
 		shutdownTimeout: opts.ShutdownTimeout,
 		checks:          maps.Clone(opts.Checks),
+		now:             time.Now,
 	}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
@@ -93,7 +111,20 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	}
 
 	s.shuttingDown.Store(true)
-	s.logger.Info("shutting down", slog.Duration("timeout", s.shutdownTimeout))
+	s.logger.InfoContext(ctx, "shutting down",
+		slog.Duration("delay", s.shutdownDelay),
+		slog.Duration("timeout", s.shutdownTimeout),
+	)
+
+	if s.shutdownDelay > 0 {
+		delay := time.NewTimer(s.shutdownDelay)
+		defer delay.Stop()
+		select {
+		case <-delay.C:
+		case err := <-serveErr:
+			return fmt.Errorf("serve: %w", err)
+		}
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shutdownTimeout)
 	defer cancel()
@@ -116,37 +147,47 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := s.runChecks(r.Context())
-	resp := healthResponse{Status: statusOK, Checks: results}
-	code := http.StatusOK
-	for _, result := range results {
-		if result != statusOK {
-			resp.Status = statusUnavailable
-			code = http.StatusServiceUnavailable
-			break
-		}
+	result := s.readiness(r.Context())
+	if !result.ready {
+		writeJSON(w, http.StatusServiceUnavailable, healthResponse{Status: statusUnavailable, Checks: result.checks})
+		return
 	}
-	writeJSON(w, code, resp)
+	writeJSON(w, http.StatusOK, healthResponse{Status: statusOK, Checks: result.checks})
 }
 
-func (s *Server) runChecks(ctx context.Context) map[string]string {
-	results := make(map[string]string, len(s.checks))
+func (s *Server) readiness(ctx context.Context) readiness {
+	s.readinessMu.Lock()
+	defer s.readinessMu.Unlock()
+	if !s.readinessAt.IsZero() && s.now().Sub(s.readinessAt) < checkCacheTTL {
+		return s.lastReadiness
+	}
+	s.lastReadiness = s.runChecks(context.WithoutCancel(ctx))
+	s.readinessAt = s.now()
+	return s.lastReadiness
+}
+
+func (s *Server) runChecks(ctx context.Context) readiness {
+	result := readiness{ready: true, checks: make(map[string]string, len(s.checks))}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for name, check := range s.checks {
 		wg.Go(func() {
-			result := statusOK
-			if err := runCheck(ctx, check); err != nil {
-				result = err.Error()
+			err := runCheck(ctx, check)
+			if err != nil {
 				s.logger.WarnContext(ctx, "readiness check failed", slog.String("check", name), slog.Any("error", err))
 			}
 			mu.Lock()
-			results[name] = result
-			mu.Unlock()
+			defer mu.Unlock()
+			if err != nil {
+				result.ready = false
+				result.checks[name] = checkFailed
+				return
+			}
+			result.checks[name] = checkPassed
 		})
 	}
 	wg.Wait()
-	return results
+	return result
 }
 
 func runCheck(ctx context.Context, check Check) (err error) {

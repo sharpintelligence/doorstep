@@ -123,10 +123,11 @@ func TestRunErrors(t *testing.T) {
 		},
 		{
 			name: "invalid configuration reports every error",
-			args: []string{"serve", "--listen-addr", "nowhere", "--log-level", "loud", "--log-format", "xml", "--shutdown-timeout", "0s"},
+			args: []string{"serve", "--listen-addr", "nowhere", "--log-level", "loud", "--log-format", "xml", "--shutdown-delay", "-1s", "--shutdown-timeout", "0s"},
 			wantStderr: []string{
 				"doorstep: invalid configuration",
 				"listen address",
+				"shutdown delay",
 				"shutdown timeout",
 				"log level",
 				"log format",
@@ -178,7 +179,7 @@ func TestRunHelp(t *testing.T) {
 	if code := Run(t.Context(), []string{"serve", "--help"}, &stdout, &stderr, envFrom(nil)); code != 0 {
 		t.Fatalf("exit code = %d, stderr %q", code, stderr.String())
 	}
-	for _, want := range []string{"--listen-addr", "--log-level", "--log-format", "--shutdown-timeout", config.EnvListenAddr} {
+	for _, want := range []string{"--listen-addr", "--log-level", "--log-format", "--shutdown-delay", "--shutdown-timeout", config.EnvListenAddr, config.EnvShutdownDelay} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help %q does not mention %q", stdout.String(), want)
 		}
@@ -189,7 +190,7 @@ func TestResolveServeConfig(t *testing.T) {
 	t.Parallel()
 
 	flags := config.Config{
-		Server: config.Server{ListenAddr: "127.0.0.1:7000", ShutdownTimeout: 3 * time.Second},
+		Server: config.Server{ListenAddr: "127.0.0.1:7000", ShutdownDelay: time.Second, ShutdownTimeout: 3 * time.Second},
 		Log:    config.Log{Level: "error", Format: "text"},
 	}
 	tests := []struct {
@@ -206,18 +207,19 @@ func TestResolveServeConfig(t *testing.T) {
 			name: "environment over defaults",
 			env: map[string]string{
 				config.EnvListenAddr:      ":9000",
+				config.EnvShutdownDelay:   "0s",
 				config.EnvShutdownTimeout: "1s",
 				config.EnvLogLevel:        "debug",
 				config.EnvLogFormat:       "text",
 			},
 			want: func(c *config.Config) {
-				c.Server = config.Server{ListenAddr: ":9000", ShutdownTimeout: time.Second}
+				c.Server = config.Server{ListenAddr: ":9000", ShutdownDelay: 0, ShutdownTimeout: time.Second}
 				c.Log = config.Log{Level: "debug", Format: "text"}
 			},
 		},
 		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagShutdownTimeout, flagLogLevel, flagLogFormat},
+			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat},
 			want:    func(c *config.Config) { *c = flags },
 		},
 		{
@@ -277,20 +279,21 @@ func TestRunServe(t *testing.T) {
 	}{
 		{
 			name: "flags",
-			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug"},
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
 		},
 		{
 			name: "environment",
 			args: []string{"serve"},
-			env:  map[string]string{config.EnvListenAddr: "127.0.0.1:0", config.EnvLogLevel: "debug"},
+			env:  map[string]string{config.EnvListenAddr: "127.0.0.1:0", config.EnvLogLevel: "debug", config.EnvShutdownDelay: "0s"},
 		},
 		{
 			name: "flag beats environment",
 			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-format", "json"},
 			env: map[string]string{
-				config.EnvListenAddr: "invalid",
-				config.EnvLogFormat:  "text",
-				config.EnvLogLevel:   "debug",
+				config.EnvShutdownDelay: "10ms",
+				config.EnvListenAddr:    "invalid",
+				config.EnvLogFormat:     "text",
+				config.EnvLogLevel:      "debug",
 			},
 		},
 	}
