@@ -332,6 +332,14 @@ func validateGates(r reporter, g Gates) {
 			if !spec.requiresDuration && gate.Duration != 0 {
 				r.addf(field+".duration", "not allowed for type %s", gate.Type)
 			}
+			if spec.requiresDuration && spec.allowsTimeout && gate.Duration > 0 && gate.Timeout != nil && *gate.Timeout > 0 && *gate.Timeout <= gate.Duration {
+				r.addf(field+".timeout", "%s must be longer than duration %s", gate.Timeout, gate.Duration)
+			}
+			if spec.requiresWindows {
+				validateScheduleGate(r, field, gate)
+			} else {
+				forbidScheduleFields(r, field, gate)
+			}
 		}
 	}
 }

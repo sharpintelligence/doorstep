@@ -16,6 +16,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0008](0008-kubernetes-rest-client.md) | A small Kubernetes REST client, one get and watch per wait | Accepted | 2026-11-24 |
 | [0009](0009-blocks-in-postgres-mirrored-to-git.md) | Blocks live in Postgres and are mirrored to git | Accepted | 2026-11-24 |
 | [0010](0010-webhooks-and-polling-safety-net.md) | Webhooks plus a polling safety net | Accepted | 2026-11-24 |
+| [0011](0011-built-in-gates-and-deploy-schedules.md) | Built-in gates and deploy schedules | Proposed | 2026-11-24 |
 
 ## When to write one
 

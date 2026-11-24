@@ -75,17 +75,18 @@ func (r GateResult) label() string {
 type GateKind string
 
 const (
-	GateKindCI      GateKind = "ci"
-	GateKindLock    GateKind = "lock"
-	GateKindArgoCD  GateKind = "argocd"
-	GateKindSoak    GateKind = "soak"
-	GateKindMetrics GateKind = "metrics"
-	GateKindManual  GateKind = "manual"
+	GateKindCI       GateKind = "ci"
+	GateKindLock     GateKind = "lock"
+	GateKindArgoCD   GateKind = "argocd"
+	GateKindSoak     GateKind = "soak"
+	GateKindMetrics  GateKind = "metrics"
+	GateKindManual   GateKind = "manual"
+	GateKindSchedule GateKind = "schedule"
 )
 
 func (k GateKind) label() string {
 	switch k {
-	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual:
+	case GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule:
 		return string(k)
 	default:
 		return unknownLabel
@@ -191,7 +192,7 @@ var (
 	allReasons  = []RollbackReason{RollbackReasonGateFailed, RollbackReasonSyncFailed, RollbackReasonManual}
 	allPhases   = []Phase{PhaseDeploy, PhaseRollback}
 	allResults  = []GateResult{GateResultPassed, GateResultFailed, GateResultError}
-	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual}
+	allGates    = []GateKind{GateKindCI, GateKindLock, GateKindArgoCD, GateKindSoak, GateKindMetrics, GateKindManual, GateKindSchedule}
 
 	allNotificationTypes   = []NotificationType{NotificationSlack, NotificationWebhook, NotificationGitHub}
 	allNotificationResults = []NotificationResult{NotificationSent, NotificationFailed, NotificationDropped}

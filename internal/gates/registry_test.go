@@ -133,7 +133,7 @@ apps:
 			app: "api",
 			after: []want{
 				{name: "health", typ: config.GateHealth, kind: metrics.GateKindArgoCD, phase: core.GatePhaseAfter, timeout: 3 * time.Minute},
-				{name: "bake", typ: config.GateSoak, kind: metrics.GateKindSoak, phase: core.GatePhaseAfter, skipOnRollback: true},
+				{name: "bake", typ: config.GateSoak, kind: metrics.GateKindSoak, phase: core.GatePhaseAfter, timeout: 25 * time.Minute, skipOnRollback: true},
 			},
 		},
 	}

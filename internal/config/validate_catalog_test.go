@@ -38,6 +38,18 @@ func validCatalog() Catalog {
 	}.Catalog()
 }
 
+func scheduleGate() Gate {
+	return Gate{
+		Type:     GateSchedule,
+		Name:     "windows",
+		Timezone: "Europe/London",
+		Windows: []Window{
+			{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour), Name: "business hours", Timezone: "Europe/London"},
+			{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York"},
+		},
+	}
+}
+
 func TestCatalogValidate(t *testing.T) {
 	t.Parallel()
 
@@ -614,7 +626,7 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name:    "gate type required",
 			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Type = "" },
-			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, health, soak)"},
+			wantErr: []string{"apps[0] (blog): gates.before[0].type: is required (want checks, health, lock, schedule, soak)"},
 		},
 		{
 			name:    "gate type unknown",
@@ -653,9 +665,9 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"gates.before[0].timeout: must be positive"},
 		},
 		{
-			name:    "soak gate zero timeout not allowed",
+			name:    "soak gate zero timeout",
 			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(0) },
-			wantErr: []string{"apps[1] (api): gates.after[1].timeout: not allowed for type soak"},
+			wantErr: []string{"apps[1] (api): gates.after[1].timeout: must be positive"},
 		},
 		{
 			name:    "gate timeout negative",
@@ -663,9 +675,207 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"gates.after[0].timeout: must be positive"},
 		},
 		{
-			name:    "soak gate timeout not allowed",
+			name:    "soak gate timeout shorter than duration",
 			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(time.Minute) },
-			wantErr: []string{"apps[1] (api): gates.after[1].timeout: not allowed for type soak"},
+			wantErr: []string{"apps[1] (api): gates.after[1].timeout: 1m0s must be longer than duration 10m0s"},
+		},
+		{
+			name:    "soak gate timeout equal to duration",
+			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(10 * time.Minute) },
+			wantErr: []string{"gates.after[1].timeout: 10m0s must be longer than duration 10m0s"},
+		},
+		{
+			name:    "soak gate explicit timeout",
+			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(time.Hour) },
+			wantErr: nil,
+		},
+		{
+			name:    "soak gate timeout missing",
+			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = nil },
+			wantErr: []string{"gates.after[1].timeout: must be positive"},
+		},
+		{
+			name: "lock gate",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateLock, Name: "freeze"})
+			},
+			wantErr: nil,
+		},
+		{
+			name: "lock gate after deploy",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateLock, Name: "freeze"})
+			},
+			wantErr: []string{"gates.after[1].type: lock gates run only in gates.before"},
+		},
+		{
+			name: "lock gate rejects timeout and duration",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateLock, Name: "freeze", Timeout: durPtr(time.Hour), Duration: Duration(time.Minute)})
+			},
+			wantErr: []string{"gates.before[1].timeout: not allowed for type lock", "gates.before[1].duration: not allowed for type lock"},
+		},
+		{
+			name: "lock gate rejects schedule fields",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{
+					Type: GateLock, Name: "freeze", Timezone: "UTC", ApplyToRollbacks: true,
+					Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}},
+				})
+			},
+			wantErr: []string{
+				"gates.before[1].windows: not allowed for type lock",
+				"gates.before[1].timezone: not allowed for type lock",
+				"gates.before[1].apply_to_rollbacks: not allowed for type lock",
+			},
+		},
+		{
+			name: "checks gate rejects an empty window list",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.Before[0].Windows = []Window{}
+			},
+			wantErr: []string{"gates.before[0].windows: not allowed for type checks"},
+		},
+		{
+			name: "soak gate rejects schedule fields",
+			mutate: func(c *Catalog) {
+				c.Apps[1].Gates.After[1].Timezone = "Europe/London"
+			},
+			wantErr: []string{"gates.after[1].timezone: not allowed for type soak"},
+		},
+		{
+			name:    "schedule gate",
+			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, scheduleGate()) },
+			wantErr: nil,
+		},
+		{
+			name: "schedule gate after deploy",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, scheduleGate())
+			},
+			wantErr: []string{"gates.after[1].type: schedule gates run only in gates.before"},
+		},
+		{
+			name: "schedule gate rejects timeout and duration",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Timeout, g.Duration = durPtr(time.Hour), Duration(time.Hour)
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].timeout: not allowed for type schedule", "gates.before[1].duration: not allowed for type schedule"},
+		},
+		{
+			name: "schedule gate needs windows",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows = nil
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].windows: at least one window is required for type schedule"},
+		},
+		{
+			name: "schedule gate with too many windows",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows = slices.Repeat(g.Windows[:1], MaxScheduleWindows+1)
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].windows: has 101 windows, more than the limit of 100"},
+		},
+		{
+			name: "schedule gate bad time zone",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Timezone = "Mars/Base"
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{`gates.before[1].timezone: invalid time zone: "Mars/Base" is not an IANA time zone name`},
+		},
+		{
+			name: "schedule gate Local time zone",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Timezone = "Local"
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].timezone: invalid time zone: Local depends on the host"},
+		},
+		{
+			name: "schedule window errors are reported per field",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows = append(g.Windows, Window{Effect: "block", Cron: "0 0 17 * * 5", Duration: Duration(-time.Hour), Timezone: "Nowhere", Name: "bad\tname"})
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{
+				`gates.before[1].windows[2].effect: unknown effect "block" (want allow or deny)`,
+				`gates.before[1].windows[2].cron: invalid cron expression: "0 0 17 * * 5"`,
+				"gates.before[1].windows[2].duration: invalid window duration: -1h0m0s must be positive",
+				`gates.before[1].windows[2].timezone: invalid time zone: "Nowhere"`,
+				"gates.before[1].windows[2].name: must not contain control characters",
+			},
+		},
+		{
+			name: "schedule window required fields",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows = []Window{{}}
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{
+				"gates.before[1].windows[0].effect: is required (want allow or deny)",
+				"gates.before[1].windows[0].cron: invalid cron expression: is empty",
+				"gates.before[1].windows[0].duration: invalid window duration: 0s must be positive",
+			},
+		},
+		{
+			name: "schedule window rejects descriptors and time zone prefixes",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows[0].Cron = "@daily"
+				g.Windows[1].Cron = "CRON_TZ=Europe/London 0 9 * * 1-5"
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{
+				`gates.before[1].windows[0].cron: invalid cron expression: "@daily"`,
+				"gates.before[1].windows[1].cron: invalid cron expression:", "must not set a time zone; use the timezone field",
+			},
+		},
+		{
+			name: "schedule window too long",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows[0].Duration = Duration(367 * 24 * time.Hour)
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].windows[0].duration: invalid window duration: 8808h0m0s is longer than 366 days"},
+		},
+		{
+			name: "schedule window name too long",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows[0].Name = strings.Repeat("é", MaxWindowNameLength+1)
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].windows[0].name: must be at most 100 characters"},
+		},
+		{
+			name: "schedule window name at length limit",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows[0].Name = strings.Repeat("é", MaxWindowNameLength)
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: nil,
+		},
+		{
+			name: "schedule window name invalid UTF-8",
+			mutate: func(c *Catalog) {
+				g := scheduleGate()
+				g.Windows[0].Name = "\xff"
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, g)
+			},
+			wantErr: []string{"gates.before[1].windows[0].name: must be valid UTF-8"},
 		},
 		{
 			name:    "soak gate duration required",
