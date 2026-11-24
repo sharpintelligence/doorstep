@@ -9,24 +9,24 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0001](0001-go-and-core-design.md) | Go, and doorstep's core design | Accepted | 2026-11-23 |
 | [0002](0002-rollback-is-a-new-deployment.md) | A rollback is a new deployment | Accepted | 2026-11-23 |
 | [0003](0003-queue-batching-and-urgent.md) | Queue batching and urgent deploys | Accepted | 2026-11-23 |
-| [0004](0004-freeze-locks.md) | Freeze locks stop new deploys, not recovery | Proposed | 2026-11-23 |
+| [0004](0004-freeze-locks.md) | Freeze locks stop new deploys, not recovery | Accepted | 2026-11-23 |
 | [0005](0005-pin-commits-and-trailers.md) | Pin commits, byte-preserving edits and trailers | Accepted | 2026-11-23 |
 | [0006](0006-notifications-are-best-effort.md) | Notifications are best effort | Accepted | 2026-11-23 |
 | [0007](0007-authentication-and-roles.md) | Authentication and roles | Accepted | 2026-11-24 |
 | [0008](0008-kubernetes-rest-client.md) | A small Kubernetes REST client, one get and watch per wait | Accepted | 2026-11-24 |
 | [0009](0009-blocks-in-postgres-mirrored-to-git.md) | Blocks live in Postgres and are mirrored to git | Accepted | 2026-11-24 |
 | [0010](0010-webhooks-and-polling-safety-net.md) | Webhooks plus a polling safety net | Accepted | 2026-11-24 |
-| [0011](0011-built-in-gates-and-deploy-schedules.md) | Built-in gates and deploy schedules | Proposed | 2026-11-24 |
-| [0012](0012-deployment-engine.md) | The deployment engine | Proposed | 2026-11-24 |
-| [0013](0013-prometheus-query-gate.md) | Prometheus query gate | Proposed | 2026-11-24 |
-| [0014](0014-external-gates-and-commit-status-mirror.md) | External gates and the commit status mirror | Proposed | 2026-11-24 |
-| [0015](0015-migration-aware-releases.md) | Migration-aware releases | Proposed | 2026-11-24 |
-| [0016](0016-validation-job-gate.md) | The validation Job gate reads a PostSync hook | Proposed | 2026-11-24 |
-| [0017](0017-retry-before-rollback.md) | Retry before rollback | Proposed | 2026-11-24 |
-| [0018](0018-server-rendered-web-ui.md) | Server-rendered web UI | Proposed | 2026-11-24 |
-| [0019](0019-manual-deploys-and-cancellation.md) | Manual deploys and cancellation | Proposed | 2026-11-24 |
-| [0020](0020-automatic-rollback.md) | Automatic rollback | Proposed | 2026-11-24 |
-| [0021](0021-mvp-acceptance-evidence.md) | MVP acceptance evidence | Proposed | 2026-11-24 |
+| [0011](0011-built-in-gates-and-deploy-schedules.md) | Built-in gates and deploy schedules | Accepted | 2026-11-24 |
+| [0012](0012-deployment-engine.md) | The deployment engine | Accepted | 2026-11-24 |
+| [0013](0013-prometheus-query-gate.md) | Prometheus query gate | Accepted | 2026-11-24 |
+| [0014](0014-external-gates-and-commit-status-mirror.md) | External gates and the commit status mirror | Accepted | 2026-11-24 |
+| [0015](0015-migration-aware-releases.md) | Migration-aware releases | Accepted | 2026-11-24 |
+| [0016](0016-validation-job-gate.md) | The validation Job gate reads a PostSync hook | Accepted | 2026-11-24 |
+| [0017](0017-retry-before-rollback.md) | Retry before rollback | Accepted | 2026-11-24 |
+| [0018](0018-server-rendered-web-ui.md) | Server-rendered web UI | Accepted | 2026-11-24 |
+| [0019](0019-manual-deploys-and-cancellation.md) | Manual deploys and cancellation | Accepted | 2026-11-24 |
+| [0020](0020-automatic-rollback.md) | Automatic rollback | Accepted | 2026-11-24 |
+| [0021](0021-mvp-acceptance-evidence.md) | MVP acceptance evidence | Accepted | 2026-11-24 |
 
 ## When to write one
 

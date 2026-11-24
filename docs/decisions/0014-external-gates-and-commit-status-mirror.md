@@ -1,6 +1,6 @@
 # 0014: External gates and the commit status mirror
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

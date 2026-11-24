@@ -1,6 +1,6 @@
 # 0021: MVP acceptance evidence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

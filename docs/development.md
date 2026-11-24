@@ -1,10 +1,13 @@
 # Development
 
+This is the detailed guide; [CONTRIBUTING.md](../CONTRIBUTING.md) is the short entry point for contributors.
+
 ## Toolchain
 
 Tool versions are pinned in `mise.toml` (Go, golangci-lint, just, actionlint, git-cliff, kustomize, kubeconform) and locked with checksums in `mise.lock`. CI uses the same files, so local and CI runs match.
 
 ```sh
+mise trust ./mise.toml
 mise install
 ```
 
@@ -35,6 +38,8 @@ Recipes live in the `justfile`; `just` with no arguments lists them.
 Run `just check` before pushing.
 
 The manifests under `deploy/kustomize` are also covered by a hermetic Go test (`deploy/kustomize/manifests_test.go`, part of `just test`). It needs no kustomize binary or network and checks that environment variables are settings known to `internal/config`, that ports match the defaults, that the security context, RBAC and digest pinning have not been weakened, and that every `config.yaml` there validates. When a change renames a setting or alters a default, it fails until the manifests follow.
+
+The documentation has a hermetic test too (`docs/docs_test.go`, part of `just test`). It checks that every relative link and anchor in the Markdown files resolves, that the README links every document, that the decision index matches each record's status, and that `docs/configuration.md` mentions every `DOORSTEP_*` variable, configuration file key and command-line flag defined in `internal/config` and `internal/cli`.
 
 ## Integration tests
 
