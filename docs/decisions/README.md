@@ -13,6 +13,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0005](0005-pin-commits-and-trailers.md) | Pin commits, byte-preserving edits and trailers | Accepted | 2026-11-23 |
 | [0006](0006-notifications-are-best-effort.md) | Notifications are best effort | Accepted | 2026-11-23 |
 | [0007](0007-authentication-and-roles.md) | Authentication and roles | Accepted | 2026-11-24 |
+| [0008](0008-kubernetes-rest-client.md) | A small Kubernetes REST client, one get and watch per wait | Accepted | 2026-11-24 |
 
 ## When to write one
 

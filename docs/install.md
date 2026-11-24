@@ -19,7 +19,7 @@ doorstep ships a [kustomize](https://kustomize.io) base under `deploy/kustomize`
 
 | Object | Name | Purpose |
 | --- | --- | --- |
-| ServiceAccount | `doorstep` | Identity for the pod; the token is mounted into the pod for the upcoming Argo CD adapter, which needs the Kubernetes API; nothing uses it yet |
+| ServiceAccount | `doorstep` | Identity for the pod; its token is mounted into the pod and used to read Argo CD Applications through the Kubernetes API ([argocd.md](argocd.md#in-the-cluster)) |
 | ClusterRole | `doorstep-applications-reader` | `get`, `list` and `watch` on `applications.argoproj.io`, nothing else |
 | ClusterRoleBinding | `doorstep-applications-reader` | Binds the ClusterRole to the ServiceAccount |
 | ConfigMap | `doorstep-config-<hash>` | The configuration file, generated from `config.yaml` |
@@ -162,9 +162,11 @@ The patch matches the env entry and the volume by name, so it does not depend on
 
 ## RBAC
 
-The base grants `get`, `list` and `watch` on `applications.argoproj.io` through a ClusterRole and ClusterRoleBinding, because each app names its own Argo CD namespace (`argocd.namespace`) and Argo CD can host Applications in any namespace. doorstep never patches or syncs Applications, and the grant includes no Secrets.
+The base grants `get`, `list` and `watch` on `applications.argoproj.io` through a ClusterRole and ClusterRoleBinding, because each app names its own Argo CD namespace (`argocd.namespace`) and Argo CD can host Applications in any namespace. doorstep uses `get` on one Application and `watch` on the Applications of its namespace filtered by name; it never lists across namespaces, never patches or syncs Applications, and the grant includes no Secrets. Without `watch`, doorstep still works but falls back to reading the Application every 30 seconds.
 
-To restrict doorstep to one namespace, delete the ClusterRoleBinding in your overlay and bind the same ClusterRole with a RoleBinding in the Argo CD namespace.
+doorstep reads the mounted ServiceAccount token (`/var/run/secrets/kubernetes.io/serviceaccount/token`) for every request, so bound token rotation needs no restart. After installing, `kubectl exec deploy/doorstep -- doorstep argocd status <app> --config /etc/doorstep/config.yaml` checks the permissions and connection; see [argocd.md](argocd.md#doorstep-argocd-status).
+
+To restrict doorstep to one namespace, which keeps working because doorstep only reads Applications in the namespaces its apps name, delete the ClusterRoleBinding in your overlay and bind the same ClusterRole with a RoleBinding in the Argo CD namespace.
 
 ```yaml kubernetes
 patches:

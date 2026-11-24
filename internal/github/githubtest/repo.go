@@ -254,6 +254,7 @@ func (s *Server) routeFakeRepos() {
 		"DELETE /repos/{owner}/{repo}/git/refs/{ref...}":         (*Repo).handleDeleteRef,
 		"PATCH /repos/{owner}/{repo}/git/refs/{ref...}":          (*Repo).handleUpdateRef,
 		"GET /repos/{owner}/{repo}/commits":                      (*Repo).handleListCommits,
+		"GET /repos/{owner}/{repo}/compare/{basehead}":           (*Repo).handleCompare,
 		"GET /repos/{owner}/{repo}/pulls":                        (*Repo).handleListPulls,
 		"POST /repos/{owner}/{repo}/pulls":                       (*Repo).handleCreatePull,
 		"GET /repos/{owner}/{repo}/pulls/{number}":               (*Repo).handleGetPull,
@@ -516,6 +517,40 @@ func (r *Repo) handleListCommits(w http.ResponseWriter, req *http.Request) {
 		out = append(out, map[string]any{"sha": c.sha, "commit": map[string]string{"message": c.message}})
 	}
 	WriteJSON(w, http.StatusOK, out)
+}
+
+func (r *Repo) handleCompare(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	baseRef, headRef, ok := strings.Cut(req.PathValue("basehead"), "...")
+	base, baseOK := r.resolveLocked(baseRef)
+	head, headOK := r.resolveLocked(headRef)
+	if !ok || !baseOK || !headOK {
+		WriteError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	mergeBase := r.mergeBaseLocked(base.sha, head.sha)
+	if mergeBase == nil {
+		WriteError(w, http.StatusNotFound, "No common ancestor between "+baseRef+" and "+headRef+".")
+		return
+	}
+	var status string
+	switch {
+	case base.sha == head.sha:
+		status = "identical"
+	case mergeBase.sha == base.sha:
+		status = "ahead"
+	case mergeBase.sha == head.sha:
+		status = "behind"
+	default:
+		status = "diverged"
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"status":            status,
+		"ahead_by":          len(r.ancestorsLocked(head)) - len(r.ancestorsLocked(mergeBase)),
+		"behind_by":         len(r.ancestorsLocked(base)) - len(r.ancestorsLocked(mergeBase)),
+		"merge_base_commit": map[string]string{"sha": mergeBase.sha},
+	})
 }
 
 func (r *Repo) handleListPulls(w http.ResponseWriter, req *http.Request) {

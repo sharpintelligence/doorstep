@@ -7,7 +7,7 @@ A gate is a check that decides whether a deployment may continue. Gates run in t
 
 Which gates an app runs, their names and their timeouts come from the configuration file ([configuration.md](configuration.md#gates)). Gate results are recorded data, not control flow ([ADR 0001](decisions/0001-go-and-core-design.md), decision 4): every evaluation leaves a row explaining the verdict.
 
-The code lives in `internal/gates`. Gate implementations (`checks`, `health`, `soak`) are added by later work; this package provides the data model, the registry and the evaluator they plug into.
+The code lives in `internal/gates`. Gate implementations (`checks`, `health`, `soak`) are added by later work; this package provides the data model, the registry and the evaluator they plug into. The `health` gate can evaluate its condition without blocking through `(*argocd.Watcher).Check(ctx, target, revision)`, which applies the same "synced to a revision containing the pin and healthy" rule as the deploy's sync wait and returns a `core.SyncStatus` with failure reason and unhealthy resources for evidence ([argocd.md](argocd.md)).
 
 ## Data model
 

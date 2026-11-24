@@ -238,6 +238,9 @@ func validateApp(r reporter, a App, notifications map[string]bool) {
 	} else if !isDNSLabel(a.ArgoCD.Namespace) {
 		r.addf("argocd.namespace", "%q must be a DNS label", a.ArgoCD.Namespace)
 	}
+	if a.ArgoCD.SyncTimeout != nil && *a.ArgoCD.SyncTimeout <= 0 {
+		r.addf("argocd.sync_timeout", "must be positive")
+	}
 
 	validateGates(r, a.Gates)
 

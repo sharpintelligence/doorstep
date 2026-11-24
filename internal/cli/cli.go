@@ -42,6 +42,7 @@ func newRootCommand(stdout, stderr io.Writer, lookupEnv LookupEnv) *cobra.Comman
 		newUnlockCommand(lookupEnv),
 		newLocksCommand(lookupEnv),
 		newNotifyCommand(lookupEnv),
+		newArgoCDCommand(lookupEnv),
 	)
 	return root
 }

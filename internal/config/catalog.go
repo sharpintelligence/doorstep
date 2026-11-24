@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	DefaultBranch          = "main"
-	DefaultArgoCDNamespace = "argocd"
-	DefaultMaxBatch        = 10
-	MaxMaxBatch            = 100
+	DefaultBranch            = "main"
+	DefaultArgoCDNamespace   = "argocd"
+	DefaultArgoCDSyncTimeout = 10 * time.Minute
+	DefaultMaxBatch          = 10
+	MaxMaxBatch              = 100
 )
 
 type Catalog struct {
@@ -166,8 +167,16 @@ func (d Deploy) BatchLimit() int {
 }
 
 type ArgoCD struct {
-	Application string `yaml:"application"`
-	Namespace   string `yaml:"namespace"`
+	Application string    `yaml:"application"`
+	Namespace   string    `yaml:"namespace"`
+	SyncTimeout *Duration `yaml:"sync_timeout"`
+}
+
+func (a ArgoCD) Timeout() time.Duration {
+	if a.SyncTimeout == nil {
+		return DefaultArgoCDSyncTimeout
+	}
+	return a.SyncTimeout.Std()
 }
 
 type GateType string
@@ -269,6 +278,7 @@ func (a App) withDefaults() App {
 	a.Deploy.MaxBatch = &maxBatch
 	a.ArgoCD.Application = orDefault(a.ArgoCD.Application, a.Name)
 	a.ArgoCD.Namespace = orDefault(a.ArgoCD.Namespace, DefaultArgoCDNamespace)
+	a.ArgoCD.SyncTimeout = new(Duration(a.ArgoCD.Timeout()))
 	a.Gates = a.Gates.withDefaults()
 	a.Notify = slices.Clone(a.Notify)
 	return a

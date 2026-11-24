@@ -29,6 +29,9 @@ registry:
   credentials_file: /etc/doorstep/registry/.dockerconfigjson
 locks:
   reminder_interval: 12h
+kubernetes:
+  kubeconfig: /etc/doorstep/kube/config
+  context: homelab
 notifications:
   - name: ops
     type: slack
@@ -61,6 +64,7 @@ apps:
     argocd:
       application: blog-prod
       namespace: gitops
+      sync_timeout: 15m
     gates:
       before:
         - type: checks
@@ -100,8 +104,9 @@ func TestParse(t *testing.T) {
 			PrivateKeyFile: strPtr("/etc/doorstep/secrets/github-app.pem"),
 			APIURL:         strPtr("https://ghe.example.com/api/v3"),
 		},
-		Registry: FileRegistry{CredentialsFile: strPtr("/etc/doorstep/registry/.dockerconfigjson")},
-		Locks:    FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
+		Registry:   FileRegistry{CredentialsFile: strPtr("/etc/doorstep/registry/.dockerconfigjson")},
+		Locks:      FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
+		Kubernetes: FileKubernetes{Kubeconfig: strPtr("/etc/doorstep/kube/config"), Context: strPtr("homelab")},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
 			{
@@ -116,7 +121,7 @@ func TestParse(t *testing.T) {
 			GitOps: GitOps{Repo: "example-org/homelab", Branch: "deploy", Path: "apps/blog/"},
 			Pin:    Pin{YAML: &YAMLPin{File: "values.yaml", Path: "image.digest"}},
 			Deploy: Deploy{Mode: DeployPullRequest, MaxBatch: intPtr(5)},
-			ArgoCD: ArgoCD{Application: "blog-prod", Namespace: "gitops"},
+			ArgoCD: ArgoCD{Application: "blog-prod", Namespace: "gitops", SyncTimeout: durPtr(15 * time.Minute)},
 			Gates: Gates{
 				Before: []Gate{{Type: GateChecks, Timeout: durPtr(45 * time.Minute)}},
 				After: []Gate{
@@ -337,12 +342,13 @@ func TestFileApply(t *testing.T) {
 		{
 			name: "all settings",
 			file: File{
-				Server:   FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second), PublicURL: strPtr("https://deploy.example.com")},
-				Log:      FileLog{Level: strPtr("warn"), Format: strPtr("text")},
-				Database: FileDatabase{URLFile: strPtr("/secrets/db")},
-				GitHub:   FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3")},
-				Registry: FileRegistry{CredentialsFile: strPtr("/secrets/config.json")},
-				Locks:    FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
+				Server:     FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second), PublicURL: strPtr("https://deploy.example.com")},
+				Log:        FileLog{Level: strPtr("warn"), Format: strPtr("text")},
+				Database:   FileDatabase{URLFile: strPtr("/secrets/db")},
+				GitHub:     FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3")},
+				Registry:   FileRegistry{CredentialsFile: strPtr("/secrets/config.json")},
+				Locks:      FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
+				Kubernetes: FileKubernetes{Kubeconfig: strPtr("/kube/config"), Context: strPtr("lab")},
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second, PublicURL: "https://deploy.example.com"}
@@ -351,6 +357,7 @@ func TestFileApply(t *testing.T) {
 				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3"}
 				c.Registry = Registry{CredentialsFile: "/secrets/config.json"}
 				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
+				c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "lab"}
 			},
 		},
 		{
@@ -403,7 +410,7 @@ func defaultedApp() App {
 		GitOps: GitOps{Repo: "example-user/homelab", Branch: "main", Path: "apps/blog"},
 		Pin:    Pin{Kustomize: &KustomizePin{Image: "ghcr.io/example-user/blog"}},
 		Deploy: Deploy{Mode: DeployCommit, MaxBatch: intPtr(DefaultMaxBatch)},
-		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd"},
+		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd", SyncTimeout: durPtr(DefaultArgoCDSyncTimeout)},
 		Gates: Gates{
 			Before: []Gate{{Type: GateChecks, Name: "checks", Timeout: durPtr(30 * time.Minute)}},
 			After:  []Gate{{Type: GateHealth, Name: "health", Timeout: durPtr(10 * time.Minute)}},
@@ -492,9 +499,18 @@ func TestFileCatalogDefaults(t *testing.T) {
 			want:   func(a *App) { a.Deploy.MaxBatch = intPtr(0) },
 		},
 		{
-			name:   "argocd overrides kept",
-			mutate: func(a *App) { a.ArgoCD = ArgoCD{Application: "web", Namespace: "gitops"} },
-			want:   func(a *App) { a.ArgoCD = ArgoCD{Application: "web", Namespace: "gitops"} },
+			name: "argocd overrides kept",
+			mutate: func(a *App) {
+				a.ArgoCD = ArgoCD{Application: "web", Namespace: "gitops", SyncTimeout: durPtr(time.Minute)}
+			},
+			want: func(a *App) {
+				a.ArgoCD = ArgoCD{Application: "web", Namespace: "gitops", SyncTimeout: durPtr(time.Minute)}
+			},
+		},
+		{
+			name:   "invalid sync timeout kept for validation",
+			mutate: func(a *App) { a.ArgoCD.SyncTimeout = durPtr(-time.Minute) },
+			want:   func(a *App) { a.ArgoCD.SyncTimeout = durPtr(-time.Minute) },
 		},
 		{
 			name:   "only after gates given keeps default before gates",
@@ -579,6 +595,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Gates.After = []Gate{{Type: GateHealth}}
 	app.Notify = []string{"ops"}
 	app.Source.Deployments = new(true)
+	app.ArgoCD.SyncTimeout = durPtr(time.Minute)
 	file := File{
 		Apps:          []App{app},
 		Notifications: []Notification{{Name: "ops", Type: NotifySlack, WebhookURLEnv: "X", Events: []string{"deploy.failed"}}},
@@ -593,11 +610,12 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	catalog.Notifications[0].Name = "changed"
 	catalog.Notifications[0].Events[0] = "changed"
 	*catalog.Apps[0].Source.Deployments = false
+	*catalog.Apps[0].ArgoCD.SyncTimeout = 0
 
 	original := file.Apps[0]
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
 		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
-		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments {
+		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments || *original.ArgoCD.SyncTimeout != Duration(time.Minute) {
 		t.Errorf("Catalog() shares memory with the file: %+v", file)
 	}
 }
@@ -637,6 +655,27 @@ func TestParseEmptyEventsIsRejected(t *testing.T) {
 			err = f.Catalog().Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestArgoCDTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   ArgoCD
+		want time.Duration
+	}{
+		{name: "default", in: ArgoCD{}, want: DefaultArgoCDSyncTimeout},
+		{name: "explicit", in: ArgoCD{SyncTimeout: durPtr(3 * time.Minute)}, want: 3 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.in.Timeout(); got != tt.want {
+				t.Fatalf("Timeout() = %s, want %s", got, tt.want)
 			}
 		})
 	}
