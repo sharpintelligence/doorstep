@@ -233,12 +233,12 @@ func TestNewWebServesTheStore(t *testing.T) {
 		mux.Handle(pattern, h)
 	}
 	principal := auth.Principal{Actor: core.Actor{Kind: core.ActorUser, ID: "oidc:alice", Name: "alice"}, Role: core.RoleViewer, Method: auth.MethodSession}
-	for _, path := range []string{"/", "/apps/blog", "/locks", "/audit"} {
+	for path, want := range map[string]string{"/": `href="/apps/blog"`, "/apps/blog": "Deployments of blog", "/locks": "No app is locked", "/audit": `<option value="blog">`} {
 		req := httptest.NewRequestWithContext(auth.WithPrincipal(t.Context(), principal), http.MethodGet, path, http.NoBody)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "blog") {
-			t.Fatalf("GET %s = %d:\n%s", path, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("GET %s = %d without %q:\n%s", path, rec.Code, want, rec.Body.String())
 		}
 	}
 	if !strings.Contains(routesBody(t, mux, principal, "/apps/blog"), "https://github.com/example-user/blog/commit/aaaaaaaa") {
