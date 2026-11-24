@@ -34,7 +34,7 @@ Proving it against real systems needs a GitHub App installed on an organization,
 | A rollback through the API restores the previous version | `POST /api/v1/apps/{app}/rollback` calls `(*rollback.Service).Rollback`, which queues a rollback deployment and blocks the replaced digest; the engine re-pins the previous digest and mirrors the block as a `Doorstep-Block` trailer ([ADR 0002](0002-rollback-is-a-new-deployment.md), [ADR 0009](0009-blocks-in-postgres-mirrored-to-git.md)) | `TestEngineDeploysAndRollsBack`, `internal/api/rollback_test.go`, `internal/rollback/service_test.go` |
 | A rollback through the CLI restores the previous version | `doorstep rollback` (`internal/cli/rollback.go`) posts to the same endpoint; `doorstep blocks` lists the block | `TestMVPDeploysAMergedPullRequestAndRollsBack` (rollback succeeds, `kind`, `rollback_of_id`, digests, `requested_by` of the token, `Doorstep-Rollback-Of` and `Doorstep-Block` trailers, block recorded in git, a `rolled back` Slack message), `internal/cli/rollback_api_test.go` |
 
-The audit found no broken wiring on the MVP path. It found production API that only tests used, which was removed or moved into test files.
+The audit found no broken wiring on the MVP path. It found one defect visible to users: every notification headline named the app with its implicit environment (`blog (default): deploy #42 succeeded`), because apps configured without environments run in the `default` environment; headlines now name only the app unless the environment is a real one (`TestDescribeTarget` in `internal/notify`). It also found production API that only tests used, which was removed or moved into test files.
 
 ## Options considered
 
