@@ -100,6 +100,11 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Database = Database{URL: testDatabaseURL, URLFile: "/run/secrets/db"} },
 		},
 		{
+			name: "registry credentials file",
+			env:  map[string]string{EnvRegistryCredentialsFile: "/etc/doorstep/registry/.dockerconfigjson"},
+			want: func(c *Config) { c.Registry.CredentialsFile = "/etc/doorstep/registry/.dockerconfigjson" },
+		},
+		{
 			name: "all variables",
 			env: map[string]string{
 				EnvListenAddr:      ":9090",
@@ -108,11 +113,14 @@ func TestFromEnv(t *testing.T) {
 				EnvLogLevel:        "warn",
 				EnvLogFormat:       "text",
 				EnvDatabaseURL:     testDatabaseURL,
+
+				EnvRegistryCredentialsFile: "/creds.json",
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: ":9090", ShutdownDelay: 2 * time.Second, ShutdownTimeout: 5 * time.Second}
 				c.Log = Log{Level: "warn", Format: "text"}
 				c.Database.URL = testDatabaseURL
+				c.Registry = Registry{CredentialsFile: "/creds.json"}
 			},
 		},
 		{

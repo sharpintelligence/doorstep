@@ -63,7 +63,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
 | `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, authenticates extra handlers with installation tokens | built |
 | `internal/intake` | turns GitHub webhooks, registry polls, API and CLI requests into queued deployments | planned |
-| `internal/registry` | OCI tag to digest resolution | planned |
+| `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, committed through the GitHub API | planned |
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API | planned |
 | `internal/gates` | health, metrics and soak gates | planned |
@@ -143,6 +143,36 @@ type Clock interface {
 
 `PinWriter` has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). Both preserve comments and formatting through the yaml v3 `Node` API.
 
+## Registry resolution
+
+`internal/registry` turns a repository and tag into an immutable digest:
+
+```go
+resolver := registry.New(registry.Options{Credentials: registry.FileCredentials{Path: path}, UserAgent: ua})
+digest, err := resolver.ResolveCommit(ctx, "ghcr.io/owner/app", commitSHA)
+```
+
+- Inputs are plain strings and the result is `registry.Digest` (`algorithm:hex`), so no go-containerregistry type leaks out. The engine bead adds a small adapter from `core.ImageRef` to `Resolve` and from `registry.Digest` to `core.Digest`.
+- The repository must not carry a tag or digest, and the tag must be a non-empty, valid OCI tag. Nothing defaults to `latest`. `ResolveCommit` encodes the convention that images are tagged with the full commit SHA: it rejects anything but 40 lowercase hex characters with `ErrInvalidReference` before contacting the registry, and is what the engine calls. `Resolve` accepts any tag, which `doorstep image resolve` uses.
+- It sends `HEAD /v2/<name>/manifests/<tag>` accepting OCI index, OCI manifest, Docker manifest list and Docker v2 manifest, and returns `Docker-Content-Digest`. A multi-architecture image therefore resolves to its index digest, which stays valid on every node architecture. HEAD is not counted against Docker Hub pull limits.
+- Only when HEAD fails without a registry verdict (no digest header, `405`, other unexpected `4xx`) does it fall back to `GET` and hash the manifest body.
+- Every call reads credentials, pings the registry, performs the auth handshake (anonymous, basic or bearer token exchange) and issues the request within `Options.Timeout` (default 30 s). There is no token or transport cache and no retry inside the adapter: resolves are low volume, the engine owns retry policy, and every step is idempotent. If polling volume ever demands it, go-containerregistry's `remote.Puller` can cache tokens per repository later.
+
+Errors wrap a sentinel with `%w` when the registry gave a verdict:
+
+| Sentinel | Cause | What callers do |
+| --- | --- | --- |
+| `ErrNotFound` | `404` on the manifest request (`MANIFEST_UNKNOWN`, `NAME_UNKNOWN`). A `404` from the `/v2/` ping or the token realm means the host is not a registry or is misconfigured, and stays unclassified | the image is not pushed yet: keep waiting for CI |
+| `ErrDenied` | `401`/`403` after the auth handshake | surface it: usually missing or wrong credentials. GHCR and Docker Hub also answer this way for a private repository that does not exist yet, so the engine may keep waiting with a louder message; that policy belongs to the engine |
+| `ErrInvalidReference` | bad repository, tag or commit SHA, rejected locally or by the registry with `400` `NAME_INVALID`/`TAG_INVALID` | never retry |
+| none | network errors, timeouts, `429`, `5xx`, malformed responses | transient: retry with backoff |
+
+Context cancellation and deadlines stay visible through `errors.Is(err, context.Canceled)` and `context.DeadlineExceeded`.
+
+Credentials come from a Docker `config.json` (the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret) parsed by a small parser in the package. Keys are `host[/path-prefix]` and the longest whole-segment prefix of `host/repository` wins, so each GitHub owner on `ghcr.io` can have its own token. `FileCredentials` re-reads the file on every lookup, so a rotated Secret is picked up without a restart. See [configuration.md](configuration.md#registry-credentials).
+
+`serve` loads the credentials file once at startup only to fail fast on a missing or malformed file; nothing in `serve` resolves images yet. The engine bead wires a `Resolver` into `serve` with `Credentials: registry.FileCredentials{Path: cfg.Registry.CredentialsFile}`, the same source `doorstep image resolve` uses, so rotation works at runtime.
+
 ## State machine and concurrency
 
 Deployment state is persisted in Postgres:
@@ -180,7 +210,7 @@ Postgres is the only stateful dependency. Running more than one replica is safe.
 | Migrations | `github.com/pressly/goose/v3` Provider over `embed.FS` | forward-only SQL, no global state, session lock for concurrent starts; run by `doorstep migrate` and at `serve` startup |
 | Config file | `go.yaml.in/yaml/v3` with `KnownFields(true)` | YAML is native to Kubernetes users; strict decoding catches typos; the Node API also serves comment-preserving GitOps edits |
 | Kubernetes | `k8s.io/client-go` dynamic client and informer on `argoproj.io/v1alpha1` `Application` | avoids importing the argo-cd module and its dependency graph; only a few status fields are needed |
-| Registry | `github.com/google/go-containerregistry` | `remote.Head` for tag to digest with proper registry auth |
+| Registry | `github.com/google/go-containerregistry` (`name`, `authn`, `v1/remote`, `remote/transport`) | `remote.Head` for tag to digest with proper registry auth: challenge parsing, token exchange, anonymous/basic/identity tokens and redirect handling are not hand-rolled. Its `DefaultKeychain` is not used. |
 | GitHub | hand-written REST client on `net/http`; RS256 JWT with `crypto/rsa`; HMAC with `crypto/hmac` | about six endpoints; small, auditable code instead of a large SDK |
 | Metrics | `github.com/prometheus/client_golang` with a private registry | standard exposition, no global registry |
 | Web UI | `html/template` and htmx vendored through `embed` | no CDN, no JavaScript build step, works offline |
@@ -218,6 +248,7 @@ Setup, permissions and the least-privilege model are described in [github-app.md
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed.
 - Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications.
 - Only image digests are pinned, never mutable tags.
+- Registry credentials are read only from the one explicitly configured file: no `$HOME/.docker`, no `DOCKER_CONFIG`, and credential helpers or stores are never executed. Credentials are sent only to the registry (and token realm) they match, are redacted when a `Credential` is formatted or logged, and errors never include file contents.
 - Secrets never appear inline in configuration: they come from environment variables or `*_file` paths (mounted Kubernetes Secrets).
 - The HTTP server sets read-header, read, write and idle timeouts and a header size limit; panics are recovered and logged.
 - CI pins every action by full commit SHA, runs with a read-only token and does not persist checkout credentials. Dependabot keeps pins and Go modules current.

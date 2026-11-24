@@ -226,6 +226,21 @@ func TestRunErrors(t *testing.T) {
 			forbidStderr: []string{password, "postgres://"},
 		},
 		{
+			name:       "missing registry credentials file",
+			args:       []string{"serve", "--listen-addr", "127.0.0.1:0", "--registry-credentials-file", "/nonexistent/doorstep/config.json"},
+			env:        map[string]string{config.EnvDatabaseURL: "postgres://doorstep@localhost/doorstep"},
+			wantStderr: []string{"doorstep: registry credentials: read registry credentials file", "/nonexistent/doorstep/config.json"},
+		},
+		{
+			name: "malformed registry credentials file from environment",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0"},
+			env: map[string]string{
+				config.EnvDatabaseURL:             "postgres://doorstep@localhost/doorstep",
+				config.EnvRegistryCredentialsFile: "testdata/malformed-dockerconfig.json",
+			},
+			wantStderr: []string{"doorstep: registry credentials: parse registry credentials file", "no usable credential"},
+		},
+		{
 			name: "incomplete github configuration",
 			args: []string{"serve"},
 			env: map[string]string{
@@ -333,6 +348,7 @@ func TestResolveServeConfig(t *testing.T) {
 		Log:      config.Log{Level: "error", Format: "text"},
 		Database: config.Database{URLFile: "/run/secrets/database-url"},
 		GitHub:   config.Default().GitHub,
+		Registry: config.Registry{CredentialsFile: "/flag/config.json"},
 	}
 	tests := []struct {
 		name    string
@@ -359,8 +375,19 @@ func TestResolveServeConfig(t *testing.T) {
 			},
 		},
 		{
+			name:    "registry credentials flag over environment",
+			env:     map[string]string{config.EnvRegistryCredentialsFile: "/env/config.json"},
+			changed: []string{flagRegistryAuthFile},
+			want:    func(c *config.Config) { c.Registry.CredentialsFile = flags.Registry.CredentialsFile },
+		},
+		{
+			name: "registry credentials file from environment",
+			env:  map[string]string{config.EnvRegistryCredentialsFile: "/env/config.json"},
+			want: func(c *config.Config) { c.Registry.CredentialsFile = "/env/config.json" },
+		},
+		{
 			name:    "flags over defaults",
-			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile},
+			changed: []string{flagListenAddr, flagShutdownDelay, flagShutdownTimeout, flagLogLevel, flagLogFormat, flagDatabaseURLFile, flagRegistryAuthFile},
 			want:    func(c *config.Config) { *c = flags },
 		},
 		{
@@ -442,12 +469,26 @@ func TestRunServe(t *testing.T) {
 		env      map[string]string
 		database databaseSource
 		wantLogs []string
+
+		wantCredentialEntries float64
 	}{
 		{
 			name:     "flags",
 			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
 			database: databaseFileFlag,
 			wantLogs: []string{"github app not configured"},
+		},
+		{
+			name:                  "registry credentials from flag",
+			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s", "--registry-credentials-file", "testdata/dockerconfig.json"},
+			database:              databaseFileFlag,
+			wantCredentialEntries: 2,
+		},
+		{
+			name:                  "registry credentials from environment",
+			args:                  []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
+			env:                   map[string]string{config.EnvRegistryCredentialsFile: "testdata/dockerconfig.json"},
+			wantCredentialEntries: 2,
 		},
 		{
 			name:     "database URL file from environment",
@@ -514,6 +555,10 @@ func TestRunServe(t *testing.T) {
 			logs := parseLogs(t, stderr.String())
 			if strings.Contains(stderr.String(), "PRIVATE KEY") {
 				t.Errorf("logs leak the private key: %s", stderr.String())
+			}
+			assertCredentialsLog(t, logs, tt.wantCredentialEntries)
+			if strings.Contains(stderr.String(), "s3cret") {
+				t.Errorf("logs leak registry credentials: %s", stderr.String())
 			}
 			for _, msg := range append([]string{"database ready", "listening", "request", "shutting down", "stopped"}, tt.wantLogs...) {
 				if !hasMessage(logs, msg) {
@@ -672,6 +717,25 @@ func assertLines(t *testing.T, out string, patterns ...string) {
 		if !regexp.MustCompile(pattern).MatchString(lines[i]) {
 			t.Errorf("line %d %q does not match %s", i, lines[i], pattern)
 		}
+	}
+}
+
+func assertCredentialsLog(t *testing.T, logs []map[string]any, wantEntries float64) {
+	t.Helper()
+	for _, entry := range logs {
+		if entry["msg"] != "registry credentials loaded" {
+			continue
+		}
+		if wantEntries == 0 {
+			t.Errorf("unexpected credentials log %v", entry)
+		}
+		if entry["entries"] != wantEntries {
+			t.Errorf("credentials log entries = %v, want %v", entry["entries"], wantEntries)
+		}
+		return
+	}
+	if wantEntries != 0 {
+		t.Errorf("logs missing %q", "registry credentials loaded")
 	}
 }
 

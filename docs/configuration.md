@@ -22,6 +22,7 @@ An environment variable that is set but empty counts as set, and is then validat
 | `--log-format` | `DOORSTEP_LOG_FORMAT` | `json` | `json` or `text`. Logs are written to stderr. |
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
+| `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
 
 Example:
 
@@ -82,10 +83,95 @@ GitHub access is optional as a group: with none of these set, `doorstep serve` r
 
 The key is read and parsed when `serve` starts; a missing, unreadable or malformed key stops startup. Key values are redacted wherever configuration is printed or logged.
 
+## `doorstep image resolve`
+
+```sh
+doorstep image resolve <repository> <tag> [--registry-credentials-file PATH]
+```
+
+Resolves a tag to the digest it currently points at and prints it on stdout, using the same registry client and credentials as the server. Use it to check that doorstep can reach a registry and that its credentials work before wiring up an application:
+
+```sh
+$ doorstep image resolve ghcr.io/owner/app 0123456789abcdef0123456789abcdef01234567
+sha256:9b2c...
+```
+
+- `<repository>` is a repository without a tag or digest: `nginx`, `owner/app` (both Docker Hub), `ghcr.io/owner/app`, `registry.example.com:5000/team/app`. Docker Hub names are normalised the usual way (`nginx` is `index.docker.io/library/nginx`).
+- `<tag>` is required and must be a valid OCI tag; nothing ever defaults to `latest`. doorstep images are tagged with the full commit SHA, but any tag works here.
+- A multi-architecture image resolves to the digest of its index, not of one platform's manifest.
+- `--registry-credentials-file` (env `DOORSTEP_REGISTRY_CREDENTIALS_FILE`) selects the credentials file; without it the request is anonymous.
+
+On failure it exits with status 1 and prints the reason: `image not found` (the tag or repository does not exist yet), `registry denied access` (missing or wrong credentials; GHCR and Docker Hub also answer this way for a private repository that does not exist), `invalid image reference` (rejected locally or by the registry), or another error such as a transport failure or a host that does not answer the registry API.
+
+## Registry credentials
+
+doorstep resolves image tags to digests through the OCI distribution API. Registries that allow anonymous pulls need no configuration. For private images, point `DOORSTEP_REGISTRY_CREDENTIALS_FILE` (or `--registry-credentials-file`) at a Docker `config.json` file:
+
+```json
+{
+  "auths": {
+    "ghcr.io": { "auth": "cm9ib3Q6Z2hwX2V4YW1wbGU=" },
+    "ghcr.io/other-owner": { "username": "other-bot", "password": "ghp_other" },
+    "https://index.docker.io/v1/": { "username": "me", "password": "dckr_pat_example" },
+    "registry.example.com:5000": { "registrytoken": "a-bearer-token" }
+  }
+}
+```
+
+Each entry under `auths` provides one of:
+
+- `auth`: base64 of `username:password` (the password may contain colons);
+- `username` and `password`;
+- `identitytoken`: an OAuth2 refresh token, as written by some cloud registry logins;
+- `registrytoken`: a bearer token sent to the registry as is.
+
+`auth` wins over `username`/`password` when both are present. Other fields (`email`, `credsStore`, `credHelpers`, `HttpHeaders`, ...) are ignored, so a file written by `docker login` works as long as the credentials are inline. Credential helpers and credential stores are never executed. An entry with no usable credential, invalid base64, an `auth` value with an empty username or password, or two keys that name the same registry make the whole file invalid.
+
+### Kubernetes
+
+The file has the same shape as the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret, so the Secret you already use as an `imagePullSecret` works:
+
+```sh
+kubectl create secret docker-registry doorstep-registry \
+  --docker-server=ghcr.io --docker-username=robot --docker-password="$GHCR_TOKEN"
+```
+
+```yaml
+containers:
+  - name: doorstep
+    env:
+      - name: DOORSTEP_REGISTRY_CREDENTIALS_FILE
+        value: /etc/doorstep/registry/.dockerconfigjson
+    volumeMounts:
+      - name: registry-credentials
+        mountPath: /etc/doorstep/registry
+        readOnly: true
+volumes:
+  - name: registry-credentials
+    secret:
+      secretName: doorstep-registry
+```
+
+The file is re-read on every resolve, so rotating the Secret takes effect without restarting doorstep. `serve` also reads it once at startup and logs the number of entries (never their contents).
+
+### Matching
+
+Keys are normalised before matching: the scheme and trailing slashes are removed, a legacy `/v1/` or `/v2/` path is removed when it is the whole path after the host (`https://index.docker.io/v1/` is `index.docker.io`, but `ghcr.io/acme/v2` stays a prefix for `ghcr.io/acme/v2/...` only), and the host is lowercased. `docker.io`, `index.docker.io` and `registry-1.docker.io` are the same registry.
+
+A key is a registry host with an optional repository path prefix. For an image `host/repository`, doorstep uses the entry with the longest key that matches whole path segments: with the example above, `ghcr.io/other-owner/app` uses the `ghcr.io/other-owner` entry and `ghcr.io/owner/app` uses `ghcr.io`, while `ghcr.io/other-owner-2/app` does not match `ghcr.io/other-owner`. This is how to use a different token per GitHub owner on GHCR. Wildcards are not supported. When no key matches, the request is anonymous, and credentials are never sent to a host they were not configured for.
+
+For GHCR, use a token with the `read:packages` scope (a classic personal access token or a GitHub App installation token with package read access).
+
+### Transport
+
+Registries are reached over HTTPS. Plain HTTP is only attempted, as a fallback alongside HTTPS, for `127.0.0.1`, `::1`, `localhost:<port>`, `*.localhost` and IP addresses in RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), which covers an in-cluster registry addressed by IP. Every other host, including mDNS `.local` names and cluster DNS names, is HTTPS only, and there is no switch to allow plain HTTP elsewhere. A registry with a certificate from a private CA works once the CA is in the system trust store, for example by mounting the bundle and setting `SSL_CERT_FILE` (or `SSL_CERT_DIR`). Proxies are honoured through `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
+
+The plain HTTP fallback also carries credentials. When a credential matches one of those local or private hosts, the `Authorization` header (basic credentials, or the bearer token after a token exchange) is sent over HTTP whenever HTTPS fails, and anyone who can block port 443 on the path can force that and read the secret. Only configure credentials for such a registry when the network path to it is trusted, or serve it over HTTPS and address it by a host name outside the list above (such as a cluster DNS name), which is never contacted over plain HTTP.
+
 ## `doorstep version`
 
 Prints the release version, VCS commit, commit time and Go version. `--json` prints the same as a JSON object. The release version is set at build time (`DOORSTEP_VERSION=v1.2.3 just build`) and is `dev` otherwise.
 
 ## Secrets
 
-Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, notification tokens) are never written inline in the configuration file. Each one is read from an environment variable or from a `*_file` setting that points at a file, which maps directly to a mounted Kubernetes Secret. Settings for those secrets arrive with the features that need them.
+Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file. Each one is read from an environment variable or from a `*_file` setting that points at a file, which maps directly to a mounted Kubernetes Secret. Settings for those secrets arrive with the features that need them.

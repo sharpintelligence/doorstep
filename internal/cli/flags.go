@@ -18,6 +18,8 @@ const (
 	flagLogLevel        = "log-level"
 	flagLogFormat       = "log-format"
 	flagDatabaseURLFile = "database-url-file"
+
+	flagRegistryAuthFile = "registry-credentials-file"
 )
 
 func bindLogFlags(flags *pflag.FlagSet, overrides *config.Config) {
