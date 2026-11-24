@@ -5,3 +5,8 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Build and test output
+/bin/
+coverage.out
+*.test
