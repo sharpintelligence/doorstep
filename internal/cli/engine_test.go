@@ -99,6 +99,15 @@ type fakeGitOps struct {
 	err      error
 	requests []gitops.Request
 	abandons []gitops.Request
+	pinned   gitops.Pinned
+	current  []gitops.Target
+}
+
+func (f *fakeGitOps) Current(_ context.Context, t gitops.Target) (gitops.Pinned, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.current = append(f.current, t)
+	return f.pinned, f.err
 }
 
 func (f *fakeGitOps) Pin(_ context.Context, req gitops.Request) (gitops.Result, error) {
@@ -168,6 +177,47 @@ func TestPinWriter(t *testing.T) {
 	fake.err = gitops.ErrBranchProtected
 	if _, err := p.Pin(t.Context(), req); !errors.Is(err, engine.ErrPermanent) || !errors.Is(err, gitops.ErrBranchProtected) {
 		t.Errorf("Pin() error = %v, want ErrPermanent wrapping ErrBranchProtected", err)
+	}
+}
+
+func TestPinWriterCurrent(t *testing.T) {
+	t.Parallel()
+
+	target := gitops.Target{App: "blog", Owner: "example-user", Repo: "homelab", Branch: "main", Dir: "apps/blog", ImageRepository: "ghcr.io/example-user/blog", Kustomize: &gitops.KustomizeImage{Name: "ghcr.io/example-user/blog"}, Mode: gitops.ModeCommit}
+	tests := []struct {
+		name          string
+		app           string
+		pinned        gitops.Pinned
+		err           error
+		want          core.Digest
+		wantPermanent bool
+		wantCalls     int
+	}{
+		{name: "pinned digest", app: "blog", pinned: gitops.Pinned{Digest: adapterDigest, Value: string(adapterDigest)}, want: adapterDigest, wantCalls: 1},
+		{name: "not a digest", app: "blog", pinned: gitops.Pinned{Value: "v1.2.3"}, wantCalls: 1},
+		{name: "pin file gone", app: "blog", err: gitops.ErrPinNotFound, wantPermanent: true, wantCalls: 1},
+		{name: "transient", app: "blog", err: &github.APIError{StatusCode: 502}, wantCalls: 1},
+		{name: "unknown app", app: "other", wantPermanent: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeGitOps{pinned: tt.pinned, err: tt.err}
+			p := pinWriter{writer: fake, targets: map[core.Target]gitops.Target{core.AppTarget("blog"): target}}
+			got, err := p.Current(t.Context(), core.Deployment{ID: 7, Target: core.AppTarget(tt.app)})
+			if (err != nil) != (tt.err != nil || tt.wantPermanent) {
+				t.Fatalf("Current() error = %v", err)
+			}
+			if errors.Is(err, engine.ErrPermanent) != tt.wantPermanent {
+				t.Errorf("Current() error = %v, want permanent %v", err, tt.wantPermanent)
+			}
+			if got != tt.want {
+				t.Errorf("Current() = %q, want %q", got, tt.want)
+			}
+			if len(fake.current) != tt.wantCalls || (tt.wantCalls > 0 && !reflect.DeepEqual(fake.current[0], target)) {
+				t.Errorf("gitops Current calls = %+v", fake.current)
+			}
+		})
 	}
 }
 

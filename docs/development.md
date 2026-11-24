@@ -124,9 +124,11 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 2. installs the tools from `mise.toml`/`mise.lock` with `jdx/mise-action`;
 3. runs `just check` and `just build`.
 
-A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Two more jobs run beside it:
+A `postgres:18-alpine` service (pinned by digest) runs alongside the job with `DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE=true` exported, so every Postgres integration test runs and a missing database fails the job. Further jobs run beside it:
 
+- `lint-manifests` runs `just lint-manifests`.
 - `govulncheck` runs `just vuln`, using the mise-pinned Go.
+- `migration-trailer`, on pull requests only, fails when the pull request changes `internal/store/migrations` and none of its commit messages has a `Doorstep-Migration: true` line ([database.md](database.md#compatibility-across-one-release)). The repository squash-merges with the pull request's commit messages, so that line reaches the commit on `main`.
 - `image` builds the `Dockerfile` for `linux/amd64` and `linux/arm64` without pushing, with the same `build-push-action` inputs as the release workflow (including the commit and commit time build arguments). It then loads a `linux/amd64` build and asserts that `doorstep version` reports the version, commit SHA and commit time, so a renamed link-time variable fails CI. Cross-compilation keeps it cheap, and it catches Dockerfile and workflow breakage before the first tag.
 
 Actions are pinned by full commit SHA, the workflow token is read-only, and superseded pull request runs are cancelled. Dependabot (`.github/dependabot.yml`) proposes weekly grouped updates for actions, Go modules and Docker base images. Releases are described in [releasing.md](releasing.md).

@@ -287,6 +287,7 @@ type fakePins struct {
 	pins     []engine.PinRequest
 	abandons []engine.PinRequest
 	pinFn    func(ctx context.Context, n int, req engine.PinRequest) (engine.PinResult, error)
+	current  func(d core.Deployment) (core.Digest, error)
 }
 
 func (p *fakePins) Pin(ctx context.Context, req engine.PinRequest) (engine.PinResult, error) {
@@ -306,6 +307,16 @@ func (p *fakePins) Abandon(_ context.Context, req engine.PinRequest) error {
 	defer p.mu.Unlock()
 	p.abandons = append(p.abandons, req)
 	return nil
+}
+
+func (p *fakePins) Current(_ context.Context, d core.Deployment) (core.Digest, error) {
+	p.mu.Lock()
+	fn := p.current
+	p.mu.Unlock()
+	if fn != nil {
+		return fn(d)
+	}
+	return d.Digest, nil
 }
 
 func (p *fakePins) pinRequests() []engine.PinRequest {

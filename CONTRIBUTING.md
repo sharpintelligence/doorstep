@@ -49,7 +49,7 @@ doorstep deploys its own upgrades, and the previous release must keep running ag
 - Follows expand/contract: a release adds and dual-writes, and only the next release may remove what the previous one no longer uses.
 - Puts anything that removes or narrows schema in a file named `NNNNN_contract_<description>.sql` that raises the compatibility floor. A test in `just check` rejects destructive statements anywhere else.
 - Goes through the review checklist in [docs/database.md](docs/database.md#compatibility-across-one-release).
-- Carries a `Doorstep-Migration: true` line in its squash-merge commit message, so the self-hosted install flags the release as containing migrations.
+- Carries a `Doorstep-Migration: true` line in its squash-merge commit message, so the self-hosted install flags the release as containing migrations. Squash merges keep the pull request's commit messages, so put the line in one of your commits; the `migration-trailer` CI job fails the pull request otherwise. Keep the line if you edit the squash message when merging.
 
 ## Decisions
 
@@ -68,7 +68,7 @@ Maintainers track work in [beads](https://github.com/gastownhall/beads) (`bd`), 
 - One focused change per pull request, with an imperative subject line.
 - `just check` passes locally.
 - New behaviour has tests, and docs are updated.
-- CI passes: check, lint-manifests, govulncheck and image.
+- CI passes: check, lint-manifests, govulncheck, image and migration-trailer.
 - New dependencies come with a justification.
 - Pull requests are squash merged.
 

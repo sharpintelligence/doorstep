@@ -46,18 +46,29 @@ A contract migration is named `NNNNN_contract_<description>.sql` and raises the 
 UPDATE schema_compatibility SET min_binary_schema = 14;
 ```
 
-Find that version with `git ls-tree --name-only <previous tag> internal/store/migrations/ | tail -1`. The previous release can still start; anything older now refuses to, which is the point. The supported downgrade is exactly one release; the floor is a guard set by hand, not an exact release counter.
+Find that version with `git ls-tree --name-only <previous tag> internal/store/migrations/ | tail -1`. The previous release can still start; anything older now refuses to, which is the point. The supported downgrade is exactly one release; the floor is a guard set by hand, not an exact release counter. It is only a lower bound: between contract steps, a binary several expand-only releases behind still starts in compatibility mode. That is not refused, but it is not supported or tested either.
 
-`TestEmbeddedMigrationsFollowCompatibilityPolicy` in `internal/store` enforces the mechanical part without a database, for every migration after `00011` (the earlier ones predate the policy and are grandfathered): a file whose `Up` section contains `DROP TABLE`, `DROP COLUMN`, `RENAME`, `ALTER COLUMN ... TYPE`, `SET NOT NULL`, or `ADD COLUMN ... NOT NULL` without `DEFAULT` must be a contract file; a contract file must update the floor; and a floor must be at least `12`, at least the floor set by earlier files, and below the file's own version. Comments and string literals are ignored. Replacing a `CHECK` constraint is not flagged, because that is how enumeration values are added.
+`TestEmbeddedMigrationsFollowCompatibilityPolicy` in `internal/store` enforces the mechanical part without a database, for every migration after `00011` (the earlier ones predate the policy and are grandfathered): a file whose `Up` section contains any of the following must be a contract file; a contract file must update the floor; and a floor must be at least `12`, at least the floor set by earlier files, and below the file's own version. Comments and string literals are ignored.
+
+| Flagged | Examples |
+| --- | --- |
+| any `DROP` of an object | `DROP TABLE`, `DROP COLUMN` (with or without the `COLUMN` keyword), `DROP TYPE`, `DROP VIEW`, `DROP MATERIALIZED VIEW`, `DROP FUNCTION`, `DROP PROCEDURE`, `DROP SCHEMA`, `DROP SEQUENCE`, `DROP INDEX`, `DROP TRIGGER`, `DROP DOMAIN`, `DROP EXTENSION`, `DROP POLICY` |
+| dropping column properties | `ALTER ... DROP DEFAULT`, `ALTER ... DROP IDENTITY` |
+| `DROP CONSTRAINT` | unless the same file adds a `CHECK` constraint with the same name |
+| renames and type changes | `RENAME`, `ALTER COLUMN ... TYPE`, `ALTER ... SET DATA TYPE` |
+| new restrictions on existing rows and writes | `SET NOT NULL`, `ADD COLUMN ... NOT NULL` without `DEFAULT` or `GENERATED`, `ADD [CONSTRAINT name] UNIQUE`, `PRIMARY KEY`, `FOREIGN KEY` or `EXCLUDE` |
+| deleting data | `TRUNCATE` |
+
+Not flagged: `DROP NOT NULL` and `DROP EXPRESSION`, which widen; constraints declared inside `CREATE TABLE`, which only affect the new table; and replacing a `CHECK` constraint under the same name, because that is how enumeration values are added. The test cannot tell whether such a replacement adds or removes values, so narrowing an enumeration is caught only by review, like the rest of the checklist below.
 
 Review every migration for what a pattern cannot see:
 
-- **Enumeration `CHECK` constraints.** Adding a value is an expand step, but the previous release must not crash when it reads a row with the new value (for example an unknown state in a `switch` or a strict decoder). Removing a value is a contract step.
+- **Enumeration `CHECK` constraints.** Adding a value is an expand step, but the previous release must not crash when it reads a row with the new value (for example an unknown state in a `switch` or a strict decoder). Removing a value is a contract step; put it in a contract file even though the test does not require it.
 - **Values old readers cannot parse.** New JSON shapes in `jsonb` columns, new formats in text columns and new meanings for existing values must be readable by the previous release, or written only once nothing older runs.
-- **Indexes behind `ON CONFLICT`.** Dropping or changing a unique index or constraint that an `INSERT ... ON CONFLICT` of the previous release names breaks it, even though the statement looks like an expand.
+- **Indexes behind `ON CONFLICT`.** Dropping or changing a unique index or constraint that an `INSERT ... ON CONFLICT` of the previous release names breaks it. The test flags `DROP INDEX` and `DROP CONSTRAINT`, but not `CREATE UNIQUE INDEX` on an existing table, which can make the previous release's writes fail.
 - **`NOT NULL` and defaults.** A new required column needs a default the previous release's inserts can rely on; a default that differs from what the previous release writes changes its behaviour.
 - **Backfills.** Large `UPDATE`s run inside the migration's transaction and hold locks while the old pod keeps serving; batch them or move them to a later release.
-- **The trailer.** The pull request's squash-merge commit message carries `Doorstep-Migration: true`, so the self-hosted install flags the release ([self-hosting.md](self-hosting.md#configuration)).
+- **The trailer.** The pull request's squash-merge commit message carries `Doorstep-Migration: true`, so the self-hosted install flags the release ([self-hosting.md](self-hosting.md#configuration)). The repository squash-merges with the pull request's commit messages, so a `Doorstep-Migration: true` line in any of its commits is enough; the `migration-trailer` CI job fails a pull request that changes `internal/store/migrations` without one.
 
 ## Schema
 

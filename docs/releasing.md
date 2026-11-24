@@ -21,6 +21,8 @@ Tags with a hyphen (`v0.2.0-rc.1`) become GitHub prereleases. Do not re-use or m
 
 If the release contains a contract migration (`internal/store/migrations/NNNNN_contract_*.sql`), check that it raises the compatibility floor to the newest migration of the previous release tag, `git ls-tree --name-only <previous tag> internal/store/migrations/ | tail -1` ([database.md](database.md#compatibility-across-one-release)).
 
+The first release that contains migration `00012_schema_compatibility.sql` cannot be reverted onto the binary before it: compatibility mode ships in that release, so the previous binary refuses the migrated schema, and an old pod that restarts during the rollout crashloops until the new one is ready. Say so in its release notes, and tell self-hosted installs to take a database backup first, because restoring it is the only way back ([self-hosting.md](self-hosting.md#safeguards)). One-release compatibility applies from the release after it.
+
 ## The release branch
 
 The `release` branch is what a self-hosted doorstep follows ([self-hosting.md](self-hosting.md)). It only ever points at commits that have a release image, because doorstep deploys `:<commit SHA>` for the head of the branch it follows and only tagged commits have images. After the release workflow has pushed the images, fast-forward it to the tagged commit:
@@ -34,7 +36,7 @@ The push is a fast-forward because every tag is on `main` and `release` only eve
 
 ## Dogfooding
 
-Not applicable until a self-hosted install of doorstep exists. Once one does, every final release is deployed to it through doorstep before it is tagged:
+Not applicable until a self-hosted install of doorstep exists. Once one does, every final release is deployed to it through doorstep before it is tagged. This is a manual checklist; nothing in CI or the release workflow enforces it yet:
 
 1. Tag the candidate commit `vX.Y.Z-rc.N` and push the tag.
 2. Wait for the release workflow to finish, so `ghcr.io/sharpintelligence/doorstep:<commit SHA>` exists and is signed.

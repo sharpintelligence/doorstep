@@ -261,6 +261,14 @@ func TestHandleDoesNotRollBackAutomatically(t *testing.T) {
 			},
 		},
 		{
+			name:    "pin reverted outside doorstep",
+			enabled: true,
+			setup: func(h *harness) core.Deployment {
+				h.pins.current = func(core.Deployment) (core.Digest, error) { return digestOld, nil }
+				return h.store.add(in(core.StateVerifying, deploy()))
+			},
+		},
+		{
 			name:    "rollback failed its after gates",
 			enabled: true,
 			setup: func(h *harness) core.Deployment {

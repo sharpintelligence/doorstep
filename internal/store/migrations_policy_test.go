@@ -27,15 +27,18 @@ var (
 	addNonColumnKeyword = regexp.MustCompile(`^(constraint|primary|unique|check|foreign|exclude|value)\b`)
 	notNull             = regexp.MustCompile(`\bnot\s+null\b`)
 	columnDefault       = regexp.MustCompile(`\b(default|generated)\b`)
+	dropClause          = regexp.MustCompile(`\bdrop\s+(materialized\s+view|[a-z_]+)(?:\s+(?:if\s+exists\s+)?("[^"]+"|[a-z_][a-z0-9_]*))?`)
+	droppedObjectKinds  = []string{"table", "column", "type", "view", "materialized view", "function", "procedure", "schema", "sequence", "index", "trigger", "domain", "extension", "policy", "rule", "aggregate", "operator", "cast", "owned", "default", "identity"}
+	widenedByDrop       = []string{"not", "expression"}
+	addedRestriction    = regexp.MustCompile(`\badd\s+(?:constraint\s+(?:"[^"]+"|[a-z_][a-z0-9_]*)\s+)?(unique|primary\s+key|foreign\s+key|exclude)\b`)
 	destructivePatterns = []struct {
 		name    string
 		pattern *regexp.Regexp
 	}{
-		{name: "DROP TABLE", pattern: regexp.MustCompile(`\bdrop\s+table\b`)},
-		{name: "DROP COLUMN", pattern: regexp.MustCompile(`\bdrop\s+column\b`)},
 		{name: "RENAME", pattern: regexp.MustCompile(`\brename\b`)},
 		{name: "ALTER COLUMN ... TYPE", pattern: regexp.MustCompile(`\balter\s+(?:column\s+)?(?:"[^"]+"|\w+)\s+(?:set\s+data\s+)?type\b`)},
 		{name: "SET NOT NULL", pattern: regexp.MustCompile(`\bset\s+not\s+null\b`)},
+		{name: "TRUNCATE", pattern: regexp.MustCompile(`\btruncate\b`)},
 	}
 )
 
@@ -94,16 +97,53 @@ func normalizedUpSection(sql string) string {
 }
 
 func destructiveStatements(body string) []string {
-	var found []string
+	found := droppedObjects(body)
 	for _, d := range destructivePatterns {
 		if d.pattern.MatchString(body) {
 			found = append(found, d.name)
 		}
 	}
+	for _, m := range addedRestriction.FindAllStringSubmatch(body, -1) {
+		found = appendOnce(found, "ADD "+strings.ToUpper(strings.Join(strings.Fields(m[1]), " ")))
+	}
 	if addsRequiredColumnWithoutDefault(body) {
 		found = append(found, "ADD COLUMN ... NOT NULL without DEFAULT")
 	}
 	return found
+}
+
+func droppedObjects(body string) []string {
+	var found []string
+	for _, m := range dropClause.FindAllStringSubmatch(body, -1) {
+		kind := strings.Join(strings.Fields(m[1]), " ")
+		switch {
+		case slices.Contains(widenedByDrop, kind):
+		case kind == "constraint":
+			if !replacesCheckConstraint(body, m[2]) {
+				found = appendOnce(found, "DROP CONSTRAINT")
+			}
+		case slices.Contains(droppedObjectKinds, kind):
+			found = appendOnce(found, "DROP "+strings.ToUpper(kind))
+		default:
+			found = appendOnce(found, "DROP COLUMN")
+		}
+	}
+	return found
+}
+
+func replacesCheckConstraint(body, name string) bool {
+	if name == "" {
+		return false
+	}
+	readd := regexp.MustCompile(`\badd\s+constraint\s+` + regexp.QuoteMeta(name) + `\s+check\b`)
+	return readd.MatchString(body)
+}
+
+func appendOnce(found []string, name string) []string {
+	if slices.Contains(found, name) {
+		return found
+	}
+	return append(found, name)
 }
 
 func addsRequiredColumnWithoutDefault(body string) bool {
@@ -180,6 +220,29 @@ func TestCheckMigrationPolicy(t *testing.T) {
 		{name: "floor lowered after an earlier contract", file: "00020_contract_drop_size.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP COLUMN size;\nUPDATE schema_compatibility SET min_binary_schema = 13;", highestFloor: 15, wantFloor: 15, violations: []string{"lowers the floor 15"}},
 		{name: "non-contract floor raise", file: "00016_bump_floor.sql", sql: "-- +goose Up\nUPDATE schema_compatibility SET min_binary_schema = 15;", highestFloor: 13, wantFloor: 15},
 		{name: "contract name required for destructive", file: "00014_drop_color.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP COLUMN color;\nUPDATE schema_compatibility SET min_binary_schema = 13;", wantFloor: 13, violations: []string{"must be in an NNNNN_contract_"}},
+		{name: "drop not null", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ALTER COLUMN color DROP NOT NULL;"},
+		{name: "drop generated expression", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ALTER COLUMN total DROP EXPRESSION;"},
+		{name: "replace quoted enum check", file: "00013_widget_state.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP CONSTRAINT IF EXISTS \"Widgets_State\", ADD CONSTRAINT \"Widgets_State\" CHECK (state IN ('a'));"},
+		{name: "add foreign key in a new table", file: "00013_widgets.sql", sql: "-- +goose Up\nCREATE TABLE parts (id bigint PRIMARY KEY, widget_id bigint REFERENCES widgets (id), UNIQUE (widget_id));"},
+		{name: "drop column without the column keyword", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP IF EXISTS color;", violations: []string{"DROP COLUMN"}},
+		{name: "drop type", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP TYPE widget_kind;", violations: []string{"DROP TYPE"}},
+		{name: "drop view", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP VIEW IF EXISTS widget_summary;", violations: []string{"DROP VIEW"}},
+		{name: "drop materialized view", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP MATERIALIZED VIEW widget_totals;", violations: []string{"DROP MATERIALIZED VIEW"}},
+		{name: "drop function", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP FUNCTION notify_widgets();", violations: []string{"DROP FUNCTION"}},
+		{name: "drop schema", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP SCHEMA legacy CASCADE;", violations: []string{"DROP SCHEMA"}},
+		{name: "drop index", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP INDEX CONCURRENTLY widgets_name_key;", violations: []string{"DROP INDEX"}},
+		{name: "drop trigger", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP TRIGGER widgets_notify ON widgets;", violations: []string{"DROP TRIGGER"}},
+		{name: "drop default", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ALTER COLUMN color DROP DEFAULT;", violations: []string{"DROP DEFAULT"}},
+		{name: "drop identity", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ALTER COLUMN id DROP IDENTITY IF EXISTS;", violations: []string{"DROP IDENTITY"}},
+		{name: "drop unique constraint", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP CONSTRAINT widgets_name_key;", violations: []string{"DROP CONSTRAINT"}},
+		{name: "drop check and add a different one", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP CONSTRAINT widgets_state_check, ADD CONSTRAINT widgets_state_check2 CHECK (state IN ('a'));", violations: []string{"DROP CONSTRAINT"}},
+		{name: "drop check and add a unique constraint of the same name", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets DROP CONSTRAINT widgets_c, ADD CONSTRAINT widgets_c UNIQUE (name);", violations: []string{"DROP CONSTRAINT, ADD UNIQUE"}},
+		{name: "truncate", file: "00013_widgets.sql", sql: "-- +goose Up\nTRUNCATE widgets;", violations: []string{"TRUNCATE"}},
+		{name: "add unique constraint", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ADD CONSTRAINT widgets_name_key UNIQUE (name);", violations: []string{"ADD UNIQUE"}},
+		{name: "add unnamed unique constraint", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ADD UNIQUE (name);", violations: []string{"ADD UNIQUE"}},
+		{name: "add foreign key", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ADD CONSTRAINT widgets_owner_fkey FOREIGN KEY (owner_id) REFERENCES owners (id);", violations: []string{"ADD FOREIGN KEY"}},
+		{name: "add primary key", file: "00013_widgets.sql", sql: "-- +goose Up\nALTER TABLE widgets ADD PRIMARY KEY (id);", violations: []string{"ADD PRIMARY KEY"}},
+		{name: "several destructive statements", file: "00013_widgets.sql", sql: "-- +goose Up\nDROP TABLE a;\nDROP TABLE b;\nTRUNCATE c;", violations: []string{"DROP TABLE, TRUNCATE"}},
 		{name: "uppercase file name", file: "00013_Widgets.sql", sql: "-- +goose Up\nSELECT 1;", violations: []string{"file name must match"}},
 	}
 	for _, tt := range tests {
