@@ -67,17 +67,37 @@ func TestSoakGate(t *testing.T) {
 			name: "degraded past the grace fails",
 			steps: []appStep{
 				{app: healthyApp, wantStatus: core.GatePending},
-				{advance: 3 * time.Minute, app: degradedApp, wantStatus: core.GatePending, wantMessage: "is degraded: CrashLoopBackOff", wantFields: map[string]any{"degraded_since": "2026-11-23T12:03:00Z", "healthy_since": t0}},
+				{advance: 3 * time.Minute, app: degradedApp, wantStatus: core.GatePending, wantMessage: "is degraded: CrashLoopBackOff", wantFields: map[string]any{"degraded_since": "2026-11-23T12:03:00Z", "healthy_since": nil, "until": nil}},
 				{advance: time.Minute, app: degradedApp, wantStatus: core.GateFailed, wantMessage: "Argo CD Application argocd/web-prod stayed degraded for 1m0s while soaking: CrashLoopBackOff"},
 			},
 		},
 		{
-			name: "brief degradation inside the grace is tolerated",
+			name: "flapping between degraded and progressing fails after the grace",
 			steps: []appStep{
 				{app: healthyApp, wantStatus: core.GatePending},
-				{advance: 3 * time.Minute, app: degradedApp, wantStatus: core.GatePending},
-				{advance: 30 * time.Second, app: healthyApp, wantStatus: core.GatePending, wantFields: map[string]any{"healthy_since": t0, "degraded_since": nil}},
-				{advance: 6*time.Minute + 30*time.Second, app: healthyApp, wantStatus: core.GatePassed},
+				{advance: 3 * time.Minute, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:03:00Z"}},
+				{advance: 30 * time.Second, app: progressingApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:03:00Z", "healthy_since": nil}},
+				{advance: 30 * time.Second, app: degradedApp, wantStatus: core.GateFailed, wantMessage: "stayed degraded for 1m0s while soaking"},
+			},
+		},
+		{
+			name: "brief degradation restarts the clock",
+			steps: []appStep{
+				{app: healthyApp, wantStatus: core.GatePending},
+				{advance: 8 * time.Minute, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"healthy_since": nil, "until": nil}},
+				{advance: 30 * time.Second, app: healthyApp, wantStatus: core.GatePending, wantMessage: "soaking until 2026-11-23T12:18:30Z", wantFields: map[string]any{"healthy_since": "2026-11-23T12:08:30Z", "until": "2026-11-23T12:18:30Z", "degraded_since": nil}},
+				{advance: 2 * time.Minute, app: healthyApp, wantStatus: core.GatePending},
+				{advance: 8 * time.Minute, app: healthyApp, wantStatus: core.GatePassed},
+			},
+		},
+		{
+			name: "healthy clears the grace",
+			steps: []appStep{
+				{app: healthyApp, wantStatus: core.GatePending},
+				{advance: time.Minute, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": t1}},
+				{advance: 30 * time.Second, app: healthyApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": nil}},
+				{advance: 30 * time.Second, app: progressingApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": nil}},
+				{advance: 30 * time.Second, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:02:30Z"}},
 			},
 		},
 		{
@@ -103,16 +123,19 @@ func TestSoakGateState(t *testing.T) {
 	t.Parallel()
 
 	healthySince := func(s string) json.RawMessage { return json.RawMessage(`{"healthy_since":"` + s + `"}`) }
+	const now = "2026-11-23T12:00:00Z"
 	tests := []struct {
-		name     string
-		previous *core.GateResult
-		want     core.GateStatus
+		name      string
+		previous  *core.GateResult
+		want      core.GateStatus
+		wantSince string
+		wantUntil string
 	}{
-		{name: "pending previous carries the clock", previous: &core.GateResult{Status: core.GatePending, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePassed},
-		{name: "terminal previous restarts the soak", previous: &core.GateResult{Status: core.GatePassed, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePending},
-		{name: "failed previous restarts the soak", previous: &core.GateResult{Status: core.GateFailed, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePending},
-		{name: "unparsable evidence starts fresh", previous: &core.GateResult{Status: core.GatePending, Evidence: json.RawMessage(`[1,2]`)}, want: core.GatePending},
-		{name: "future clock starts fresh", previous: &core.GateResult{Status: core.GatePending, Evidence: healthySince("2026-11-23T13:00:00Z")}, want: core.GatePending},
+		{name: "pending previous carries the clock", previous: &core.GateResult{Status: core.GatePending, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePassed, wantSince: "2026-11-23T11:50:00Z", wantUntil: now},
+		{name: "terminal previous restarts the soak", previous: &core.GateResult{Status: core.GatePassed, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePending, wantSince: now, wantUntil: "2026-11-23T12:10:00Z"},
+		{name: "failed previous restarts the soak", previous: &core.GateResult{Status: core.GateFailed, Evidence: healthySince("2026-11-23T11:50:00Z")}, want: core.GatePending, wantSince: now, wantUntil: "2026-11-23T12:10:00Z"},
+		{name: "unparsable evidence starts fresh", previous: &core.GateResult{Status: core.GatePending, Evidence: json.RawMessage(`[1,2]`)}, want: core.GatePending, wantSince: now, wantUntil: "2026-11-23T12:10:00Z"},
+		{name: "future clock starts fresh", previous: &core.GateResult{Status: core.GatePending, Evidence: healthySince("2026-11-23T13:00:00Z")}, want: core.GatePending, wantSince: now, wantUntil: "2026-11-23T12:10:00Z"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,6 +146,36 @@ func TestSoakGateState(t *testing.T) {
 			ev := evaluateGate(t, g, deployment(core.KindDeploy), tt.previous)
 			if ev.Status != tt.want {
 				t.Errorf("Evaluate = %s %q, want %s", ev.Status, ev.Message, tt.want)
+			}
+			evidence := evidenceMap(t, ev)
+			if evidence["healthy_since"] != tt.wantSince || evidence["until"] != tt.wantUntil {
+				t.Errorf("evidence healthy_since %v until %v, want %s and %s", evidence["healthy_since"], evidence["until"], tt.wantSince, tt.wantUntil)
+			}
+		})
+	}
+}
+
+func TestSoakGateWaitingCarriesDegradedSince(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		previous json.RawMessage
+		want     any
+	}{
+		{name: "past start is carried", previous: json.RawMessage(`{"healthy_since":"2026-11-23T11:55:00Z","degraded_since":"2026-11-23T11:59:30Z"}`), want: "2026-11-23T11:59:30Z"},
+		{name: "future start is dropped", previous: json.RawMessage(`{"degraded_since":"2026-11-23T12:30:00Z"}`), want: nil},
+		{name: "bad start is dropped", previous: json.RawMessage(`{"degraded_since":"soon"}`), want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newBuiltinFakes()
+			f.apps.set(progressingApp, nil)
+			g := builtinGate(t, f.deps(), webApp(), soakConfig(10*time.Minute))
+			ev := evaluateGate(t, g, deployment(core.KindDeploy), &core.GateResult{Status: core.GatePending, Evidence: tt.previous})
+			if got := evidenceMap(t, ev)["degraded_since"]; got != tt.want {
+				t.Errorf("degraded_since = %v, want %v", got, tt.want)
 			}
 		})
 	}

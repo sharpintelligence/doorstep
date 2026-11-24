@@ -126,6 +126,14 @@ func judgeDegraded(previousSince string, now time.Time, grace time.Duration) deg
 	return degradedVerdict{since: since, failed: now.Sub(since) >= grace}
 }
 
+func carriedDegradedSince(previousSince string, now time.Time) string {
+	since, ok := parseTimestamp(previousSince)
+	if !ok || since.After(now) {
+		return ""
+	}
+	return timestamp(since)
+}
+
 func pendingState[T any](previous *core.GateResult) T {
 	var state T
 	if previous == nil || previous.Status != core.GatePending || len(previous.Evidence) == 0 {

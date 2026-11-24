@@ -40,7 +40,7 @@ func (g soakGate) Evaluate(ctx context.Context, req Request) (Evaluation, error)
 	now := g.now()
 	ev := soakEvidence{appEvidence: o.evidence(g.ref), Soak: g.duration.String()}
 	healthySince, soaking := parseTimestamp(previous.HealthySince)
-	if soaking && healthySince.After(now) {
+	if soaking && (healthySince.After(now) || o.condition == appDegraded) {
 		soaking = false
 	}
 	if !soaking && o.condition == appReady {
@@ -69,6 +69,7 @@ func (g soakGate) Evaluate(ctx context.Context, req Request) (Evaluation, error)
 			message = withDetail(fmt.Sprintf("%s for %s while soaking", o.failure, g.grace), o.app.HealthMessage)
 		}
 	case appWaiting:
+		ev.DegradedSince = carriedDegradedSince(previous.DegradedSince, now)
 	}
 	evidence, err := marshalEvidence(ev)
 	if err != nil {

@@ -148,6 +148,10 @@ func TestActive(t *testing.T) {
 		{name: "weekend freeze over on Monday", cron: "0 17 * * 5", duration: 63 * time.Hour, location: time.UTC, now: "2026-11-30 08:00:00"},
 		{name: "weekend freeze not yet on Friday", cron: "0 17 * * 5", duration: 63 * time.Hour, location: time.UTC, now: "2026-11-27 16:59:00"},
 		{name: "overlapping firings extend end", cron: "0 9,10 * * *", duration: 90 * time.Minute, location: time.UTC, now: "2026-11-23 10:15:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 11:30:00"},
+		{name: "start is the start of the chain", cron: "0 9,10 * * *", duration: 90 * time.Minute, location: time.UTC, now: "2026-11-23 11:00:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 11:30:00"},
+		{name: "start walks back through several firings", cron: "0 9,10,11 * * *", duration: 90 * time.Minute, location: time.UTC, now: "2026-11-23 12:00:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 12:30:00"},
+		{name: "contiguous chain start", cron: "0 9,13 * * *", duration: 4 * time.Hour, location: time.UTC, now: "2026-11-23 14:00:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 17:00:00"},
+		{name: "chain does not cross a gap", cron: "0 9,14 * * *", duration: 4 * time.Hour, location: time.UTC, now: "2026-11-23 15:00:00", wantOK: true, wantStart: "2026-11-23 14:00:00", wantEnd: "2026-11-23 18:00:00"},
 		{name: "contiguous firings chain", cron: "0 9,13 * * *", duration: 4 * time.Hour, location: time.UTC, now: "2026-11-23 10:00:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 17:00:00"},
 		{name: "gap between firings does not chain", cron: "0 9,14 * * *", duration: 4 * time.Hour, location: time.UTC, now: "2026-11-23 10:00:00", wantOK: true, wantStart: "2026-11-23 09:00:00", wantEnd: "2026-11-23 13:00:00"},
 		{name: "in the gap", cron: "0 9,14 * * *", duration: 4 * time.Hour, location: time.UTC, now: "2026-11-23 13:30:00"},
@@ -160,6 +164,12 @@ func TestActive(t *testing.T) {
 		{name: "duration across the spring forward hour is elapsed time", cron: "0 0 * * *", duration: 3 * time.Hour, location: london, now: "2026-03-29 02:30:00", wantOK: true, wantStart: "2026-03-29 00:00:00", wantEnd: "2026-03-29 03:00:00"},
 		{name: "after a duration across the spring forward hour", cron: "0 0 * * *", duration: 3 * time.Hour, location: london, now: "2026-03-29 03:00:00"},
 		{name: "New York spring forward", cron: "0 9 * * *", duration: time.Hour, location: newYork, now: "2026-03-08 13:30:00", wantOK: true, wantStart: "2026-03-08 13:00:00", wantEnd: "2026-03-08 14:00:00"},
+		{name: "firing in the spring forward gap is skipped", cron: "30 2 * * *", duration: time.Hour, location: newYork, now: "2026-03-08 07:45:00"},
+		{name: "firing after the spring forward gap fires", cron: "30 2 * * *", duration: time.Hour, location: newYork, now: "2026-03-09 06:45:00", wantOK: true, wantStart: "2026-03-09 06:30:00", wantEnd: "2026-03-09 07:30:00"},
+		{name: "firing in the fall back overlap fires first", cron: "30 1 * * *", duration: 30 * time.Minute, location: newYork, now: "2026-11-01 05:45:00", wantOK: true, wantStart: "2026-11-01 05:30:00", wantEnd: "2026-11-01 06:00:00"},
+		{name: "between the fall back firings", cron: "30 1 * * *", duration: 30 * time.Minute, location: newYork, now: "2026-11-01 06:15:00"},
+		{name: "firing in the fall back overlap fires again", cron: "30 1 * * *", duration: 30 * time.Minute, location: newYork, now: "2026-11-01 06:45:00", wantOK: true, wantStart: "2026-11-01 06:30:00", wantEnd: "2026-11-01 07:00:00"},
+		{name: "fall back firings chain when the duration covers the hour", cron: "30 1 * * *", duration: time.Hour, location: newYork, now: "2026-11-01 07:15:00", wantOK: true, wantStart: "2026-11-01 05:30:00", wantEnd: "2026-11-01 07:30:00"},
 		{name: "New York fall back", cron: "0 9 * * *", duration: time.Hour, location: newYork, now: "2026-11-01 14:30:00", wantOK: true, wantStart: "2026-11-01 14:00:00", wantEnd: "2026-11-01 15:00:00"},
 	}
 	for _, tt := range tests {
@@ -223,10 +233,11 @@ func TestActiveChainIsCapped(t *testing.T) {
 	if !ok {
 		t.Fatal("every-minute window is not active")
 	}
-	if want := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC); !start.Equal(want) {
+	firing := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	if want := firing.Add(-1000 * time.Minute); !start.Equal(want) {
 		t.Errorf("start = %s, want %s", start, want)
 	}
-	if want := start.Add(1001 * time.Minute); !end.Equal(want) {
+	if want := firing.Add(1001 * time.Minute); !end.Equal(want) {
 		t.Errorf("end = %s, want %s", end, want)
 	}
 }

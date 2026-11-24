@@ -112,13 +112,20 @@ func TestHealthGate(t *testing.T) {
 			},
 		},
 		{
-			name: "recovering inside the grace resets it",
+			name: "progressing between degraded polls keeps the grace running",
 			steps: []appStep{
-				{app: degradedApp, wantStatus: core.GatePending},
-				{advance: 50 * time.Second, app: progressingApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": nil}},
-				{advance: 50 * time.Second, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:01:40Z"}},
-				{advance: 50 * time.Second, app: degradedApp, wantStatus: core.GatePending},
-				{advance: 10 * time.Second, app: degradedApp, wantStatus: core.GateFailed},
+				{app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": start}},
+				{advance: 20 * time.Second, app: progressingApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": start}},
+				{advance: 20 * time.Second, app: outOfSyncApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": start}},
+				{advance: 30 * time.Second, app: progressingApp, wantStatus: core.GatePending, wantMessage: "health Progressing", wantFields: map[string]any{"degraded_since": start}},
+				{advance: 10 * time.Second, app: degradedApp, wantStatus: core.GateFailed, wantMessage: "stayed degraded for 1m0s", wantFields: map[string]any{"degraded_since": start}},
+			},
+		},
+		{
+			name: "waiting never starts the grace",
+			steps: []appStep{
+				{app: progressingApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": nil}},
+				{advance: 2 * time.Minute, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:02:00Z"}},
 			},
 		},
 		{
@@ -129,11 +136,11 @@ func TestHealthGate(t *testing.T) {
 			},
 		},
 		{
-			name: "not found keeps no degraded state",
+			name: "not found keeps the degraded state",
 			steps: []appStep{
 				{app: degradedApp, wantStatus: core.GatePending},
-				{advance: 30 * time.Second, err: gates.ErrApplicationNotFound, wantStatus: core.GatePending},
-				{advance: 40 * time.Second, app: degradedApp, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": "2026-11-23T12:01:10Z"}},
+				{advance: 30 * time.Second, err: gates.ErrApplicationNotFound, wantStatus: core.GatePending, wantFields: map[string]any{"degraded_since": start}},
+				{advance: 40 * time.Second, app: degradedApp, wantStatus: core.GateFailed, wantFields: map[string]any{"degraded_since": start}},
 			},
 		},
 	}

@@ -46,6 +46,7 @@ func (g healthGate) Evaluate(ctx context.Context, req Request) (Evaluation, erro
 			message = withDetail(fmt.Sprintf("%s for %s", o.failure, g.grace), o.app.HealthMessage)
 		}
 	case appWaiting:
+		ev.DegradedSince = carriedDegradedSince(previous.DegradedSince, now)
 	}
 	evidence, err := marshalEvidence(ev)
 	if err != nil {

@@ -15,6 +15,10 @@ var (
 	businessHours = config.Window{Effect: config.WindowAllow, Cron: "0 9 * * 1-5", Duration: config.Duration(8 * time.Hour), Name: "business hours"}
 	mondayRelease = config.Window{Effect: config.WindowDeny, Cron: "0 12 * * 1", Duration: config.Duration(2 * time.Hour)}
 	eveningWindow = config.Window{Effect: config.WindowAllow, Cron: "0 20 * * *", Duration: config.Duration(time.Hour)}
+
+	tuesdayMorningDeny     = config.Window{Effect: config.WindowDeny, Cron: "0 8 * * 2", Duration: config.Duration(2 * time.Hour)}
+	tuesdayLateMorningDeny = config.Window{Effect: config.WindowDeny, Cron: "0 10 * * 2", Duration: config.Duration(time.Hour)}
+	tuesdayDeny            = config.Window{Effect: config.WindowDeny, Cron: "0 0 * * 2", Duration: config.Duration(24 * time.Hour)}
 )
 
 func scheduleGate(timezone string, applyToRollbacks bool, windows ...config.Window) config.Gate {
@@ -73,6 +77,37 @@ func TestScheduleGate(t *testing.T) {
 			wantStatus:    core.GatePending,
 			wantMessage:   "outside deploy windows; next opens 2026-11-23T20:00:00Z",
 			wantNextAllow: "2026-11-23T20:00:00Z",
+		},
+		{
+			name:          "next opening waits for a deny window covering the allow start",
+			gate:          scheduleGate("UTC", false, businessHours, tuesdayMorningDeny),
+			now:           time.Date(2026, 11, 23, 18, 0, 0, 0, time.UTC),
+			wantStatus:    core.GatePending,
+			wantMessage:   "outside deploy windows; next opens 2026-11-24T10:00:00Z",
+			wantNextAllow: "2026-11-24T10:00:00Z",
+		},
+		{
+			name:          "next opening waits for consecutive deny windows",
+			gate:          scheduleGate("UTC", false, businessHours, tuesdayMorningDeny, tuesdayLateMorningDeny),
+			now:           time.Date(2026, 11, 23, 18, 0, 0, 0, time.UTC),
+			wantStatus:    core.GatePending,
+			wantMessage:   "outside deploy windows; next opens 2026-11-24T11:00:00Z",
+			wantNextAllow: "2026-11-24T11:00:00Z",
+		},
+		{
+			name:          "next opening skips an allow window denied throughout",
+			gate:          scheduleGate("UTC", false, businessHours, tuesdayDeny),
+			now:           time.Date(2026, 11, 23, 18, 0, 0, 0, time.UTC),
+			wantStatus:    core.GatePending,
+			wantMessage:   "outside deploy windows; next opens 2026-11-25T09:00:00Z",
+			wantNextAllow: "2026-11-25T09:00:00Z",
+		},
+		{
+			name:        "no next opening when deny windows cover every allow window",
+			gate:        scheduleGate("UTC", false, businessHours, config.Window{Effect: config.WindowDeny, Cron: "0 0 * * 1-5", Duration: config.Duration(24 * time.Hour)}),
+			now:         time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC),
+			wantStatus:  core.GatePending,
+			wantMessage: "outside deploy windows",
 		},
 		{
 			name:        "deny wins over an overlapping allow",

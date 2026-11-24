@@ -9,6 +9,8 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/core"
 )
 
+const maxNextOpenSteps = 100
+
 type scheduleGate struct {
 	windows          []config.ScheduledWindow
 	applyToRollbacks bool
@@ -95,7 +97,7 @@ func (g scheduleGate) Evaluate(ctx context.Context, req Request) (Evaluation, er
 	case g.hasAllow && allow == nil:
 		status = core.GatePending
 		message = "outside deploy windows"
-		if next := g.nextAllow(now); !next.IsZero() {
+		if next := g.nextOpen(now); !next.IsZero() {
 			ev.NextAllow = timestamp(next)
 			message += "; next opens " + ev.NextAllow
 		}
@@ -113,17 +115,62 @@ func (g scheduleGate) Evaluate(ctx context.Context, req Request) (Evaluation, er
 	return Evaluation{Status: status, Message: message, Evidence: evidence}, nil
 }
 
-func (g scheduleGate) nextAllow(now time.Time) time.Time {
+func (g scheduleGate) nextOpen(now time.Time) time.Time {
+	candidate := g.nextAllowFiring(now)
+	for range maxNextOpenSteps {
+		if candidate.IsZero() {
+			return candidate
+		}
+		denyEnd, denied := g.latestDenyEnd(candidate)
+		if !denied {
+			return candidate
+		}
+		if g.allowActive(denyEnd) {
+			candidate = denyEnd
+		} else {
+			candidate = g.nextAllowFiring(denyEnd)
+		}
+	}
+	return time.Time{}
+}
+
+func (g scheduleGate) nextAllowFiring(after time.Time) time.Time {
 	var next time.Time
 	for _, w := range g.windows {
 		if w.Effect != config.WindowAllow {
 			continue
 		}
-		if t := w.Window.Next(now); !t.IsZero() && (next.IsZero() || t.Before(next)) {
+		if t := w.Window.Next(after); !t.IsZero() && (next.IsZero() || t.Before(next)) {
 			next = t
 		}
 	}
 	return next
+}
+
+func (g scheduleGate) latestDenyEnd(at time.Time) (time.Time, bool) {
+	var latest time.Time
+	denied := false
+	for _, w := range g.windows {
+		if w.Effect != config.WindowDeny {
+			continue
+		}
+		if _, end, ok := w.Window.Active(at); ok && (!denied || end.After(latest)) {
+			latest, denied = end, true
+		}
+	}
+	return latest, denied
+}
+
+func (g scheduleGate) allowActive(at time.Time) bool {
+	for _, w := range g.windows {
+		if w.Effect != config.WindowAllow {
+			continue
+		}
+		if _, _, ok := w.Window.Active(at); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func label(w config.ScheduledWindow) string {

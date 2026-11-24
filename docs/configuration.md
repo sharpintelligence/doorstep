@@ -428,7 +428,7 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `lock` | `before` | none | No manual freeze ([locks.md](locks.md)) blocks the app and environment. |
 | `schedule` | `before` | `windows`, required; `timezone`, default `UTC`; `apply_to_rollbacks`, default `false` | No deny window is active and, if the gate has allow windows, one of them is; see [Deploy windows](#deploy-windows). |
 | `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced and healthy, and not degraded for a minute or more. |
-| `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy. |
+| `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy; a `Degraded` observation restarts the clock. |
 
 The default gates are `checks` before and `health` after; `lock`, `schedule` and `soak` run only when listed. Rollbacks skip `checks`, `lock` and `soak`, and skip `schedule` unless it sets `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
@@ -498,7 +498,7 @@ apps:
           windows: *office-hours
 ```
 
-A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{effect: deny, cron: "0 17 * * 5", duration: 63h}`. A window's `duration` is elapsed time, so across a daylight saving change it covers one hour more or less of wall-clock time.
+A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{effect: deny, cron: "0 17 * * 5", duration: 63h}`. A window's `duration` is elapsed time, so across a daylight saving change it covers one hour more or less of wall-clock time. A firing time that falls in the hour skipped when clocks go forward does not fire that day, and one in the hour repeated when clocks go back fires twice: `cron: "30 2 * * *"` in `America/New_York` opens no window on 2026-03-08 (an allow window holds deploys an extra day; a deny window does not apply), and `cron: "30 1 * * *"` opens two windows on 2026-11-01. Keep firings outside 01:00-03:00 local time, or use `UTC`, to avoid this; see [gates.md](gates.md#schedule).
 
 #### Rules across apps
 

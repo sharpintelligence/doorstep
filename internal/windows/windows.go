@@ -108,8 +108,33 @@ func (w Window) Active(now time.Time) (start, end time.Time, ok bool) {
 	if first.IsZero() || first.After(now) {
 		return time.Time{}, time.Time{}, false
 	}
-	end = first.Add(w.duration)
-	next := first
+	return w.chainStart(first), w.chainEnd(first), true
+}
+
+func (w Window) chainStart(firing time.Time) time.Time {
+	start := firing
+	for range maxChainedFiring {
+		earlier := w.earliestTouching(start)
+		if earlier.IsZero() {
+			break
+		}
+		start = earlier
+	}
+	return start
+}
+
+func (w Window) earliestTouching(start time.Time) time.Time {
+	for f := w.next(start.Add(-w.duration - time.Second)); !f.IsZero() && f.Before(start); f = w.next(f) {
+		if !f.Add(w.duration).Before(start) {
+			return f
+		}
+	}
+	return time.Time{}
+}
+
+func (w Window) chainEnd(firing time.Time) time.Time {
+	end := firing.Add(w.duration)
+	next := firing
 	for range maxChainedFiring {
 		next = w.next(next)
 		if next.IsZero() || next.After(end) {
@@ -117,7 +142,7 @@ func (w Window) Active(now time.Time) (start, end time.Time, ok bool) {
 		}
 		end = next.Add(w.duration)
 	}
-	return first, end, true
+	return end
 }
 
 func (w Window) Next(now time.Time) time.Time {

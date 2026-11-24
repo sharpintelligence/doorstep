@@ -161,15 +161,17 @@ A window is active at time *now* when some firing *t* of its cron expression sat
 | Windows active now | Verdict | Message |
 | --- | --- | --- |
 | any `deny` window | `pending` | `deploys are frozen until <end> (<name or cron>)` |
-| no `deny`; the gate has `allow` windows and none is active | `pending` | `outside deploy windows; next opens <time>` |
+| no `deny`; the gate has `allow` windows and none is active | `pending` | `outside deploy windows; next opens <time>`, where `<time>` is the first moment an `allow` window is open and no `deny` window is active; the suffix is left out when no such moment is found within 100 deny windows |
 | an `allow` window and no `deny` | `passed` | `inside deploy window until <end> (<name or cron>)` |
 | none, and the gate has no `allow` windows | `passed` | `no deny window is active` |
 
-Deny wins. The end shown for a window extends across later firings that overlap or touch it, so an hourly window with a 90 minute duration reports when the run of firings ends. A `pending` verdict leaves the deployment waiting at the head of its target's queue; it starts on the first poll after the window opens. A pass is sticky ([above](#sticky-results-and-re-evaluation)), so a deploy that started inside a window is not stopped when the window closes: windows stop the start of a deploy, not a deploy in flight. The gate has no timeout, because a freeze may last days.
+Deny wins. The start and end shown for a window extend across earlier and later firings that overlap or touch it, so an hourly window with a 90 minute duration reports when the run of firings began and when it ends (each direction follows at most 1000 firings). A `pending` verdict leaves the deployment waiting at the head of its target's queue; it starts on the first poll after the window opens. A pass is sticky ([above](#sticky-results-and-re-evaluation)), so a deploy that started inside a window is not stopped when the window closes: windows stop the start of a deploy, not a deploy in flight. The gate has no timeout, because a freeze may last days.
 
 For a rollback the gate returns `skipped` (`skipped for rollback`) unless the gate sets `apply_to_rollbacks: true`, in which case rollbacks wait for the window like any deploy. The default lets recovery through a freeze, like manual freeze locks ([ADR 0004](decisions/0004-freeze-locks.md)).
 
-Evidence: `{"evaluated_at", "active": [{"effect", "name", "cron", "timezone", "start", "end"}], "next_allow"}`.
+Evidence: `{"evaluated_at", "active": [{"effect", "name", "cron", "timezone", "start", "end"}], "next_allow"}`; `next_allow` is the `<time>` of the message.
+
+Cron firings are wall-clock times in the window's time zone and follow `robfig/cron` across daylight saving changes: a firing inside the spring-forward gap is skipped that day, and a firing inside the fall-back overlap fires twice, once in each offset. In `America/New_York`, `30 2 * * *` does not fire on 2026-03-08, so an allow window at that time holds deploys an extra day and a deny window at that time does not apply that day; `30 1 * * *` fires at 05:30 and 06:30 UTC on 2026-11-01, opening two windows (one run of firings when `duration` covers the hour between them). Schedule windows outside 01:00-03:00 local time, or use a zone without daylight saving such as `UTC`, to avoid both.
 
 The semantics follow Argo CD sync windows (kind, schedule, duration, time zone), and expressions are parsed by the library Kubernetes CronJobs and Argo CD use (`robfig/cron`), restricted to five fields ([ADR 0008](decisions/0008-built-in-gates-and-deploy-schedules.md)). The parsing and window arithmetic live in `internal/windows`, which `config` also uses, so a configuration that validates cannot fail to build its gates at startup.
 
@@ -180,11 +182,11 @@ The Argo CD Application (`argocd.namespace`/`argocd.application`) must be synced
 | Application | Verdict |
 | --- | --- |
 | sync `Synced`, health `Healthy`, and no operation `Running` | `passed` |
-| health `Degraded` continuously for one minute | `failed` (`Argo CD Application <ns>/<name> stayed degraded for 1m0s: <health message>`) |
-| health `Degraded` for less than a minute | `pending` |
+| health `Degraded` one minute or more after it was first seen `Degraded`, without a synced and healthy observation in between | `failed` (`Argo CD Application <ns>/<name> stayed degraded for 1m0s: <health message>`) |
+| health `Degraded` for less than that minute | `pending` |
 | anything else (`Progressing`, `OutOfSync`, `Missing`, `Suspended`, `Unknown`, an operation running, the Application not found) | `pending` with an explanatory message, until the timeout fails it |
 
-Right after a sync Argo CD can still show the previous version's `Degraded` state, which is exactly what happens when a fix is deployed to a degraded app, and a false failure triggers an automatic rollback, so degradation must persist for the grace before it fails the gate. The start of the degradation is kept as `degraded_since` in the evidence of the `pending` result and dropped once the Application is anything but `Degraded`. Errors reading the Application other than not found are evaluation errors ([Errors](#errors)).
+Right after a sync Argo CD can still show the previous version's `Degraded` state, which is exactly what happens when a fix is deployed to a degraded app, and a false failure triggers an automatic rollback, so degradation must persist for the grace before it fails the gate. The start of the degradation is kept as `degraded_since` in the evidence of the `pending` result. It is carried through every observation that is not synced and healthy (`Progressing`, `OutOfSync`, not found, ...) and dropped only when the Application is synced and healthy, so an Application flapping between `Degraded` and `Progressing`, as a crash-looping workload does, fails on the first `Degraded` observation after the grace rather than at the timeout. Only a `Degraded` observation fails the gate; a carried `degraded_since` alone does not. Errors reading the Application other than not found are evaluation errors ([Errors](#errors)).
 
 The gate does not compare the Application's revision with the pin commit: in a GitOps repository shared by several apps another app's pin moves the Application's revision. Evidence: `{"application", "found", "sync", "health", "health_message", "revision", "operation_phase", "degraded_since", "pin_commit"}`.
 
@@ -193,8 +195,9 @@ The gate does not compare the Application's revision with the pin commit: in a G
 Requires the Application to stay healthy for `duration` after the deploy. The gate reads the Application itself, so it also catches a regression that appears after the health gate passed.
 
 - The soak clock starts at the first evaluation that sees the Application synced and healthy (`healthy_since`) and is not reset when the Application is briefly `Progressing`, `OutOfSync` or not found, so autoscaling does not restart the soak.
+- Any `Degraded` observation stops the clock: `healthy_since` is dropped and the soak starts again from the next synced and healthy observation, so a soak never passes across a degraded stretch.
 - The gate passes once `duration` has elapsed since `healthy_since` and the Application is synced and healthy at that moment; until then it is `pending` with the stable message `soaking until <time>`.
-- `Degraded` for one minute fails it, with the same grace as `health`.
+- `Degraded` for one minute fails it, with the same grace and the same `degraded_since` carrying as `health`.
 - The clock is carried only from a `pending` previous result, so `Reevaluate` of a passed or failed soak starts a new soak.
 - The timeout defaults to `duration` + `10m`, so an Application that never becomes healthy cannot hold the target forever.
 
