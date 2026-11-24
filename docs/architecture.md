@@ -65,7 +65,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) | built |
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API | planned |
-| `internal/gates` | health, metrics and soak gates | planned |
+| `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; see [gates.md](gates.md). The `checks`, `health` and `soak` gate types are planned | built |
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
 | `internal/notify` | Slack, ntfy and generic webhook notifications | planned |
 | `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
@@ -85,6 +85,7 @@ The design is ports and adapters.
 - Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config`.
 - `store` imports only `core`.
 - `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
+- `gates` imports `core`, `config` (the typed `App` and `Gate` its factories read) and `metrics` (only the label types of its `Metrics` port). It reaches Postgres only through its `ResultStore` port, which `*store.Store` satisfies, and never imports `store` or `engine`.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
 - No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The only exceptions are the link-time `buildinfo.version`, `buildinfo.commit` and `buildinfo.commitTime` variables, which the release image build sets because it has no `.git` directory. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
@@ -131,9 +132,9 @@ type SyncWatcher interface {
 	Health(ctx context.Context, t core.Target) (core.Health, error)
 }
 
-type Gate interface {
-	Name() string
-	Evaluate(ctx context.Context, d core.Deployment) (core.GateResult, error)
+type GateEvaluator interface {
+	Evaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
+	Reevaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
 }
 
 type Notifier interface {
@@ -152,6 +153,8 @@ type Clock interface {
 The store already implements the deployment side: `TransitionDeployment`, `SetLineage` and `LastSuccessfulDeployment` ([database.md](database.md#transitions-and-lineage)). The engine bead decides whether its port takes `store.Transition` as is or a mirror type in `core`, keeping `engine` free of a `store` import.
 
 `PinWriter` is `*gitops.Writer`. Like the registry adapter, `gitops` owns its request and result types (plain strings plus `core.Digest`, `core.Commit`, `core.DeploymentID` and `core.Kind`) and imports only `core` and `github`, never `config`; the engine maps `config.App` to `gitops.Target`. It has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). See [GitOps pin writer](#gitops-pin-writer).
+
+`GateEvaluator` is `*gates.Evaluator`. A `before` outcome of `passed` lets the deploy start pinning; an `after` outcome of `passed` makes it succeed and `failed` triggers a rollback; `pending` means poll again. Individual gates implement `gates.Gate` and are built from the configuration by `gates.Registry`; the engine never sees them. See [gates.md](gates.md).
 
 ## Registry resolution
 
@@ -387,4 +390,4 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 
 - The queue runner is tested with fakes inside `testing/synctest` bubbles, so wake-ups, polling, heartbeats and backoff run on a fake clock.
 
-See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [api.md](api.md) for the HTTP API and [metrics.md](metrics.md) for the exported metrics.
+See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [gates.md](gates.md) for gate evaluation, [api.md](api.md) for the HTTP API and [metrics.md](metrics.md) for the exported metrics.

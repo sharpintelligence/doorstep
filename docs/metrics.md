@@ -53,7 +53,7 @@ Deployment, rollback and gate series appear once the engine records into them. U
 
 ### Labels
 
-`app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
+`app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. Each gate type declares its kind when it is registered with the gate registry (for example `checks` as `ci`, `health` as `argocd`). A gate records one `passed` or `failed` observation when it reaches that verdict, measured from when it started waiting to the verdict (so a timeout is a `failed` observation of about the timeout), and one `error` observation, with the duration of that call, each time it cannot be evaluated. Polls that leave a gate `pending` and gates skipped for a rollback record nothing. See [gates.md](gates.md#metrics). There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
 
 The other labels are fixed sets. Any other value is recorded as `unknown`.
 

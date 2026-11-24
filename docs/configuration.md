@@ -341,6 +341,8 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. |
 | `soak` | `after` | `duration`, required | The Application stays healthy for `duration`. |
 
+A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)).
+
 A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` on `soak`, `duration` on `checks` or `health`) are errors, even when zero. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
 
 #### Rules across apps

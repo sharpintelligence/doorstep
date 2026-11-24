@@ -72,8 +72,13 @@ func TestSchemaAcceptsEveryCoreValue(t *testing.T) {
 		t.Fatalf("EnsureApp: %v", err)
 	}
 	for _, s := range core.GateStatuses() {
-		if err := store.ExecSQL(t.Context(), st, "INSERT INTO gate_results (deployment_id, name, status, evidence) VALUES ($1, $2, $3, '{\"ok\":true}')", deploymentID, "gate-"+string(s), s); err != nil {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO gate_results (deployment_id, name, type, phase, status, evidence) VALUES ($1, $2, 'checks', 'before', $3, '{\"ok\":true}')", deploymentID, "gate-"+string(s), s); err != nil {
 			t.Errorf("gate status %s rejected: %v", s, err)
+		}
+	}
+	for _, p := range core.GatePhases() {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, $2, 'health', $3, 'pending')", deploymentID, "phase-"+string(p), p); err != nil {
+			t.Errorf("gate phase %s rejected: %v", p, err)
 		}
 	}
 	for _, k := range core.LockKinds() {
@@ -147,7 +152,9 @@ func TestSchemaRejectsInvalidRows(t *testing.T) {
 	}{
 		{name: "empty app name", sql: "INSERT INTO apps (name, environment) VALUES (' ', 'prod')", constraint: "apps_name_check"},
 		{name: "duplicate app", sql: "INSERT INTO apps (name, environment) VALUES ('web', 'prod')", constraint: "apps_name_environment_key"},
-		{name: "unknown gate status", sql: "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'soak', 'running')", constraint: "gate_results_status_check"},
+		{name: "unknown gate status", sql: "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'soak', 'soak', 'after', 'running')", constraint: "gate_results_status_check"},
+		{name: "unknown gate phase", sql: "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'soak', 'soak', 'during', 'pending')", constraint: "gate_results_phase_check"},
+		{name: "blank gate type", sql: "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'soak', ' ', 'after', 'pending')", constraint: "gate_results_type_check"},
 		{name: "unknown lock kind", sql: "INSERT INTO locks (app_id, kind, owner) VALUES ((SELECT app_id FROM deployments WHERE id = $1), 'manual', 'ops')", constraint: "locks_kind_check"},
 		{name: "unknown event type", sql: "INSERT INTO deployment_events (deployment_id, app_id, type) VALUES ($1, $2, 'comment')", constraint: "deployment_events_type_check"},
 		{name: "unknown event state", sql: "INSERT INTO deployment_events (deployment_id, app_id, type, to_state) VALUES ($1, $2, 'transition', 'paused')", constraint: "deployment_events_to_state_check"},
@@ -237,7 +244,7 @@ func TestSchemaMaintainsUpdatedAt(t *testing.T) {
 		},
 		{
 			name:   "gate_results",
-			setup:  "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'pending')",
+			setup:  "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'health', 'health', 'after', 'pending')",
 			update: "UPDATE gate_results SET status = 'passed', updated_at = '2000-01-01' WHERE deployment_id = $1",
 			read:   "SELECT updated_at > started_at AND updated_at > now() - interval '1 minute' FROM gate_results WHERE deployment_id = $1",
 		},
@@ -275,8 +282,8 @@ func TestSchemaRejectsDuplicateLocksAndGates(t *testing.T) {
 	err = store.ExecSQL(t.Context(), st, "INSERT INTO locks (app_id, kind, owner) VALUES ($1, 'freeze', 'someone-else')", appID)
 	assertConstraint(t, err, "locks_app_id_kind_key")
 
-	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'pending')", d.ID)
-	err = store.ExecSQL(t.Context(), st, "INSERT INTO gate_results (deployment_id, name, status) VALUES ($1, 'health', 'passed')", d.ID)
+	mustExec(t, st, "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'health', 'health', 'after', 'pending')", d.ID)
+	err = store.ExecSQL(t.Context(), st, "INSERT INTO gate_results (deployment_id, name, type, phase, status) VALUES ($1, 'health', 'health', 'after', 'passed')", d.ID)
 	assertConstraint(t, err, "gate_results_deployment_id_name_key")
 }
 
