@@ -42,7 +42,7 @@ type DeploymentHistory struct {
 	Retries         []core.Deployment
 }
 
-const listDeploymentsSQL = `SELECT` + deploymentColumns + `
+const listDeploymentsSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE ($1::text = '' OR a.name = $1)
   AND ($2::text = '' OR a.environment = $2)
   AND (cardinality($3::text[]) = 0 OR d.state = ANY($3))
@@ -66,11 +66,11 @@ FROM gate_results
 WHERE deployment_id = $1
 ORDER BY name`
 
-const selectRelatedDeploymentsSQL = `SELECT` + deploymentColumns + `
+const selectRelatedDeploymentsSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE d.rollback_of_id = $1 OR d.parent_id = $1
 ORDER BY d.id DESC`
 
-const lastSuccessfulDeploymentSQL = `SELECT` + deploymentColumns + `
+const lastSuccessfulDeploymentSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE a.name = $1
   AND a.environment = $2
   AND d.state = 'succeeded'

@@ -224,8 +224,8 @@ func TestErrorMapping(t *testing.T) {
 		logged  bool
 	}{
 		{name: "detail not found", path: "/api/v1/deployments/9", err: fmt.Errorf("deployment 9: %w", core.ErrNotFound), status: http.StatusNotFound, code: "not_found", message: "deployment 9 not found"},
-		{name: "detail failure", path: "/api/v1/deployments/9", err: errors.New("connection refused to db.internal"), status: http.StatusInternalServerError, code: "internal", message: "internal server error", logged: true},
-		{name: "list failure", path: "/api/v1/apps/web/deployments", err: errors.New("connection refused to db.internal"), status: http.StatusInternalServerError, code: "internal", message: "internal server error", logged: true},
+		{name: "detail failure", path: "/api/v1/deployments/9", err: errors.New("connection refused to db.internal"), status: http.StatusInternalServerError, code: "internal", message: "internal error", logged: true},
+		{name: "list failure", path: "/api/v1/apps/web/deployments", err: errors.New("connection refused to db.internal"), status: http.StatusInternalServerError, code: "internal", message: "internal error", logged: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

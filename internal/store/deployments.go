@@ -39,10 +39,12 @@ const deploymentColumns = `
     d.parent_id, d.rollback_of_id, d.superseded_by_id, d.failure_reason,
     d.created_at, d.updated_at, d.started_at, d.finished_at`
 
-const selectDeploymentSQL = `
-SELECT` + deploymentColumns + `
+const deploymentTables = `
 FROM deployments d
-JOIN apps a ON a.id = d.app_id
+JOIN apps a ON a.id = d.app_id`
+
+const selectDeploymentSQL = `
+SELECT` + deploymentColumns + deploymentTables + `
 WHERE d.id = $1`
 
 func deploymentFields(d *core.Deployment) []any {
