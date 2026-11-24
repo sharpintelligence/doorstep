@@ -1,6 +1,6 @@
 # Decisions
 
-This directory holds architecture decision records (ADRs). An ADR records one decision that is expensive to reverse, why it was made and what was given up. ADRs explain why; the architecture document (`docs/architecture.md`, not yet written) describes what exists now.
+This directory holds architecture decision records (ADRs). An ADR records one decision that is expensive to reverse, why it was made and what was given up. ADRs explain why; the [architecture document](../architecture.md) describes what exists now.
 
 ## Index
 

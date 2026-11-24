@@ -7,7 +7,17 @@ import (
 	"strings"
 )
 
-var version = "dev"
+var (
+	version    = "dev"
+	commit     = ""
+	commitTime = ""
+)
+
+type linked struct {
+	version    string
+	commit     string
+	commitTime string
+}
 
 type Info struct {
 	Version    string `json:"version"`
@@ -18,11 +28,16 @@ type Info struct {
 }
 
 func Read() Info {
-	return read(version, debug.ReadBuildInfo)
+	return read(linked{version: version, commit: commit, commitTime: commitTime}, debug.ReadBuildInfo)
 }
 
-func read(releaseVersion string, readBuildInfo func() (*debug.BuildInfo, bool)) Info {
-	info := Info{Version: releaseVersion, GoVersion: runtime.Version()}
+func read(link linked, readBuildInfo func() (*debug.BuildInfo, bool)) Info {
+	info := Info{
+		Version:    link.version,
+		Commit:     link.commit,
+		CommitTime: link.commitTime,
+		GoVersion:  runtime.Version(),
+	}
 	bi, ok := readBuildInfo()
 	if !ok || bi == nil {
 		return info
