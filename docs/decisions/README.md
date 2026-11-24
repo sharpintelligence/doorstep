@@ -10,6 +10,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0002](0002-rollback-is-a-new-deployment.md) | A rollback is a new deployment | Accepted | 2026-11-23 |
 | [0003](0003-queue-batching-and-urgent.md) | Queue batching and urgent deploys | Accepted | 2026-11-23 |
 | [0004](0004-freeze-locks.md) | Freeze locks stop new deploys, not recovery | Proposed | 2026-11-23 |
+| [0005](0005-pin-commits-and-trailers.md) | Pin commits, byte-preserving edits and trailers | Accepted | 2026-11-23 |
 
 ## When to write one
 

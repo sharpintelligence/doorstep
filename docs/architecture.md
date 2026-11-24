@@ -59,11 +59,11 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, tracked commits, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
 | `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
 | `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends only on `core` through a `Repository` port that `*store.Store` satisfies; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
-| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites and branch heads, webhook signature verification | built |
-| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens | built |
+| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses, check suites and branch heads, webhook signature verification; `Repo` handle with typed contents, refs, commits and pull request calls | built |
+| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens; in-memory fake repository (branches, commits, contents, refs, pull requests with squash merges) with hooks to inject concurrent writes, blocked merges and conflicts | built |
 | `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; see [Merge and CI detection](#merge-and-ci-detection). The webhook handler and poller that call it, and API and CLI requests, are later beads | built |
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
-| `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, committed through the GitHub API | planned |
+| `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) | built |
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API | planned |
 | `internal/gates` | health, metrics and soak gates | planned |
 | `internal/rollback` | selects the previous good digest and re-pins it | planned |
@@ -121,7 +121,9 @@ type DigestResolver interface {
 }
 
 type PinWriter interface {
-	Pin(ctx context.Context, req core.PinRequest) (core.Commit, error)
+	Pin(ctx context.Context, req gitops.Request) (gitops.Result, error)
+	Current(ctx context.Context, t gitops.Target) (gitops.Pinned, error)
+	Abandon(ctx context.Context, req gitops.Request) error
 }
 
 type SyncWatcher interface {
@@ -149,7 +151,7 @@ type Clock interface {
 
 The store already implements the deployment side: `TransitionDeployment`, `SetLineage` and `LastSuccessfulDeployment` ([database.md](database.md#transitions-and-lineage)). The engine bead decides whether its port takes `store.Transition` as is or a mirror type in `core`, keeping `engine` free of a `store` import.
 
-`PinWriter` has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). Both preserve comments and formatting through the yaml v3 `Node` API.
+`PinWriter` is `*gitops.Writer`. Like the registry adapter, `gitops` owns its request and result types (plain strings plus `core.Digest`, `core.Commit`, `core.DeploymentID` and `core.Kind`) and imports only `core` and `github`, never `config`; the engine maps `config.App` to `gitops.Target`. It has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). See [GitOps pin writer](#gitops-pin-writer).
 
 ## Registry resolution
 
@@ -221,6 +223,41 @@ poller             ──► Service.Open(limit) + Reevaluate      still follow 
 - **Wiring.** Nothing constructs `intake.Service` in `serve` yet. The engine bead maps each `config.App` to an `intake.App{Target, Repository, Branch, RequiredChecks, ImageRepository}` (including the target environment) and supplies the `Queue` factory over the queue adapter; the webhook bead calls `HandlePush` and `Reevaluate`, and the poller calls `Open` and `Reevaluate`.
 - **Not here.** `intake` applies no timeout to commits that stay pending (the `checks` gate owns the 30 minute timeout) and records no metrics yet.
 
+## GitOps pin writer
+
+`internal/gitops` writes a digest into the GitOps repository through the GitHub API, without a clone, and reports the commit Argo CD should sync. The operator reference, with examples, is [gitops.md](gitops.md); the decision record is [ADR 0005](decisions/0005-pin-commits-and-trailers.md).
+
+```go
+writer := gitops.New(app, gitops.Options{Logger: logger})
+result, err := writer.Pin(ctx, gitops.Request{Target: target, Digest: digest, Deployment: id, Kind: core.KindDeploy, AppCommit: commit})
+```
+
+- Every call is idempotent, blocking and bound to its context. `Pin` first reads the pin file on the branch; if it already holds the desired value, nothing is written and the result points at the existing commit among the last 20 touching the file: the one whose trailers name this app, digest and deployment (with its `Doorstep-Previous-Digest`), else the newest naming this app and digest. When neither exists `Result.Commit` is empty and the engine must not record a pin commit for the deployment; it never gets another app's commit. A restart therefore resumes exactly where it stopped, and nothing about the write is stored in Postgres beyond `Result.Commit` and `Result.Previous`.
+- The engine serialises pins per target (one active deployment per target). If a stale `Pin` is replayed after its pin landed and a newer one replaced it, both modes fail with `ErrPinOverwritten` instead of writing the old digest back: commit mode finds this deployment's trailers in the history, pull request mode finds its merged pull request.
+- Editing finds the target scalar with the yaml v3 `Node` API and splices bytes in the original text; it never re-encodes the document, so comments, blank lines, quoting, indentation and CRLF line endings survive and the diff is one line. The edited file is parsed again and must hold the desired value with the same node count (two more when a kustomize `digest` key is inserted). Block and multi-line scalars, anchors, aliases, merge keys, explicit tags, null values and flow mappings that need an insert fail with `ErrUnsupportedYAML` instead of guessing.
+- Commit mode: `GET` the file from the Contents API, edit, `PUT` it with the blob `sha` and `branch`. Only a concurrent edit of the same file conflicts (`409` or `422` whose message is about the blob sha); doorstep re-reads, re-edits and retries up to `Options.MaxAttempts` (5) with jittered exponential backoff from 200 ms capped at 10 s, then returns `ErrConflict` wrapping GitHub's error. Branch protection and ruleset refusals (`GH006`, `GH013`, "rule violations", "through a pull request") return `ErrBranchProtected` at once; other refusals are returned unretried. GitHub signs the commit as the App.
+- Pull request mode: the head branch is `doorstep/<app>-<deployment id>`, created from the base, or force-reset to the base when it exists without an open pull request. The edited file is written to it, the pull request is found by head and base or opened (adopting one a concurrent run opened first), and doorstep polls every `Options.PollInterval` (10 s) for up to `Options.MergeTimeout` (30 min). It calls update-branch when GitHub reports `behind` (ignoring "head moved" and "nothing to update" refusals, restarting on a merge conflict, failing on anything else), closes and reopens from the current base when it reports `dirty` (at most three times), and otherwise tries a squash merge pinned to the head SHA it validated, treating `405` and `409` as "not yet". A timeout returns `ErrMergeTimeout` and leaves the pull request open for the next call. A pull request merged by someone else counts only if the base then holds the desired value; otherwise `Pin` returns `ErrPinOverwritten`.
+- Before every merge attempt the pull request must come from the GitOps repository itself (not a fork) and change exactly one file, or doorstep refuses with `ErrPullRequestTampered`. If that file differs from doorstep's own edit of the current base, doorstep writes its edit again before merging, so the merged content is always doorstep's.
+- `Current` returns the pinned digest at the branch head (empty, not an error, when the value is not a digest yet). `Abandon` closes the deployment's pull request and deletes its branch.
+- The commit subject is `deploy(<app>): pin <image>@sha256:<12 hex>` or `rollback(...)`, and the last paragraph carries `Doorstep-*` trailers (app, deployment, kind, app commit, image, digest, previous digest, rollback target, blocks, URL), so the git log alone is enough to find previous digests and blocks.
+- No retry of `5xx` or network errors inside the adapter; as with `registry` and `github`, transient retry policy belongs to the engine.
+
+| Error | Cause | What callers do |
+| --- | --- | --- |
+| `ErrInvalidRequest` | the request failed validation inside the adapter | never retry |
+| `ErrPinNotFound` | no pin file, no `images` entry with that name, or nothing at the YAML path | fix the GitOps repository or configuration |
+| `ErrAmbiguousPin` | duplicate entries, duplicate keys, or the path in several documents | fix the GitOps repository |
+| `ErrUnsupportedYAML` | the value cannot be edited without guessing | simplify the YAML around the pin |
+| `ErrConflict` | writes kept conflicting, or the pull request kept conflicting with the base; wraps GitHub's message | retry later |
+| `ErrBranchProtected` | branch protection or a ruleset refused a direct commit | do not retry; fix the bypass list or use `pull_request` mode |
+| `ErrPinOverwritten` | this deployment's pin landed but the branch now holds another value | do not retry; the deployment did not stay pinned |
+| `github.ErrRefNotFound` | the GitOps branch is missing or the repository is not visible to the installation | fix the configuration |
+| `ErrPullRequestClosed` | someone closed doorstep's pull request without merging | treat as cancelled |
+| `ErrPullRequestTampered` | the pull request comes from a fork or changes other files | investigate; doorstep does not merge it |
+| `ErrMergeTimeout` | not mergeable within `MergeTimeout` | call `Pin` again to keep waiting, or `Abandon` |
+| `github.ErrFileTooLarge`, `github.ErrNotAFile` | the pin file is over 1 MiB, or a directory, symlink or submodule | fix the GitOps repository |
+| `*github.APIError` | any other GitHub refusal, such as `403` or `404` | inspect `StatusCode` |
+
 ## State machine and concurrency
 
 Deployment state is persisted in Postgres:
@@ -242,7 +279,7 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
 - Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - A target's queue runs in-flight deployments first, then by priority (`normal` 0, `urgent` 100, `rollback` 200), then oldest first. An urgent deploy jumps queued work but never preempts an in-flight deployment.
-- Claiming a queued deploy batches it: the deploy with the newest commit among the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy of an older commit. Commit age is the order in which commits were first enqueued. Rollbacks never batch and are never superseded ([ADR 0003](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
+- Claiming a queued deploy batches it: the deploy with the newest commit among the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy of an older commit. Commit age is the order in which commits were first enqueued. Rollbacks never batch and are never superseded ([ADR 0005](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
 - Enqueueing a deploy is idempotent per app and commit SHA while a deploy of that commit is queued or in flight.
 - `LISTEN/NOTIFY` is only a wake-up hint: a trigger on `queue_entries` notifies on enqueue, completion, release and priority changes, and `queue.Runner` also polls every 5 seconds, so a missed notification costs latency, not correctness.
 - A partial unique index enforces at most one active deployment per (application, environment).
@@ -262,7 +299,7 @@ Postgres is the only stateful dependency. Running more than one replica is safe.
 | Config file | `go.yaml.in/yaml/v3` with `KnownFields(true)` | YAML is native to Kubernetes users; strict decoding catches typos; the Node API also serves comment-preserving GitOps edits |
 | Kubernetes | `k8s.io/client-go` dynamic client and informer on `argoproj.io/v1alpha1` `Application` | avoids importing the argo-cd module and its dependency graph; only a few status fields are needed |
 | Registry | `github.com/google/go-containerregistry` (`name`, `authn`, `v1/remote`, `remote/transport`) | `remote.Head` for tag to digest with proper registry auth: challenge parsing, token exchange, anonymous/basic/identity tokens and redirect handling are not hand-rolled. Its `DefaultKeychain` is not used. |
-| GitHub | hand-written REST client on `net/http`; RS256 JWT with `crypto/rsa`; HMAC with `crypto/hmac` | about six endpoints; small, auditable code instead of a large SDK |
+| GitHub | hand-written REST client on `net/http`; RS256 JWT with `crypto/rsa`; HMAC with `crypto/hmac` | a small set of endpoints (installations, tokens, contents, refs, commits, pull requests); small, auditable code instead of a large SDK |
 | Metrics | `github.com/prometheus/client_golang` with a private registry | standard exposition, no global registry |
 | Web UI | `html/template` and htmx vendored through `embed` | no CDN, no JavaScript build step, works offline |
 | UI auth | `github.com/coreos/go-oidc` and `golang.org/x/oauth2`, plus hashed API tokens in Postgres | OIDC discovery and token verification are not hand-rolled |
@@ -287,7 +324,8 @@ Client.Do(ctx, method, path, in, out)   JSON in/out, non-2xx → *APIError
 - `RepoClient` rejects owner and repository names that are not valid GitHub names (`ErrInvalidRepository`), so names from configuration or webhooks cannot reach other API routes. Owners may contain `_` for Enterprise Managed User accounts (`handle_shortcode`). A missing or suspended installation is `ErrNotInstalled` / `ErrInstallationSuspended` and is never cached.
 - Lookups and mints go through a small in-package single-flight group: concurrent callers for the same repository or installation share one call and its result or error, each waiting under its own context. The shared call runs detached from any one caller's cancellation and is bounded to 30 s. A `401` drops the cached token; a `404` or a suspension `403` while minting evicts the token and every lookup that pointed at that installation. Expired lookups are swept whenever a new one is stored. Nothing retries automatically; engine steps are idempotent and retried by the engine.
 - Every request, with an App JWT or an installation token, goes through a transport that only sends it when the scheme and host match the configured API URL and refuses anything else with `ErrForeignHost`, including redirects. Tokens are never exported from the package.
-- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Typed methods sit on top of `Client.Do`: `ListCheckRuns`, `ListCheckRunsNamed`, `CombinedStatus`, `ListCheckSuites` and `BranchHead` (see [Merge and CI detection](#merge-and-ci-detection)); later beads add contents, pull requests and status writes. `BranchHead` validates branch names (`ErrInvalidBranch`) and reports a missing branch as `ErrBranchNotFound`.
+- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Typed methods sit on top of `Client.Do`: `ListCheckRuns`, `ListCheckRunsNamed`, `CombinedStatus`, `ListCheckSuites` and `BranchHead` (see [Merge and CI detection](#merge-and-ci-detection). `BranchHead` validates branch names (`ErrInvalidBranch`) and reports a missing branch as `ErrBranchNotFound`.
+- `App.Repo(ctx, owner, name)` returns a `Repo` handle with typed calls on top of `Client.Do`: `GetFile`/`PutFile` (Contents API; regular files of at most 1 MiB, `ErrNotAFile`, `ErrFileTooLarge`), `BranchSHA`/`CreateBranch`/`DeleteBranch` (`ErrRefNotFound`, `ErrRefExists`), `ListCommits`, and pull request list, create, get, update, merge and update-branch. Each path segment is escaped on its own and paths with empty, `.` or `..` segments or control characters are rejected (`ErrInvalidPath`). `HasStatus` classifies an `*APIError`. Later beads add statuses and checks the same way.
 - `VerifySignature` checks `X-Hub-Signature-256` webhook signatures against the raw body with a constant-time comparison.
 
 Setup, permissions and the least-privilege model are described in [github-app.md](github-app.md).
@@ -299,7 +337,8 @@ Version tags (`vX.Y.Z`) on `main` trigger a workflow that cross-compiles a `linu
 ## Security posture
 
 - GitHub access is through one GitHub App installed on each owner with *Only select repositories*: one-hour installation tokens, held in memory only, refreshed five minutes before expiry, and only ever sent to the configured API host (requests and redirects to any other host are refused). GitHub applies the App's permissions to every selected repository, so the repository selection is what limits reach. Commits are attributed to and verified as the App.
-- Pins are written through the GitHub Contents/Git Data API using the blob SHA for optimistic concurrency: no local clone, no git binary, no SSH keys, no writable volume.
+- Pins are written through the GitHub Contents API using the blob SHA for optimistic concurrency: no local clone, no git binary, no SSH keys, no writable volume. Only regular files of at most 1 MiB are read or written, and every value written into a commit message is checked for control characters, so trailers cannot be injected.
+- In pull request mode doorstep only merges its own pull request: the head must be a branch of the GitOps repository itself, the pull request must change exactly the pin file, that file must be byte-equal to doorstep's edit of the current base, and the merge is pinned to the head SHA that was checked. Anyone who can push to the branch therefore cannot use the App's write access to merge other changes.
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed.
 - Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications.
 - Only image digests are pinned, never mutable tags.
