@@ -351,3 +351,15 @@ ol.timeline {
   color: var(--muted);
   margin-top: -0.5rem;
 }
+
+.attempt {
+  margin-bottom: 1.5rem;
+}
+
+.attempt h3 {
+  margin-bottom: 0.25rem;
+}
+
+.attempt ul {
+  margin-top: 0.25rem;
+}

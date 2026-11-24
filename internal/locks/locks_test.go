@@ -3,8 +3,10 @@ package locks
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +17,8 @@ import (
 )
 
 var (
+	alice     = core.Actor{Kind: core.ActorUser, ID: "alice"}
+	bob       = core.Actor{Kind: core.ActorUser, ID: "bob"}
 	errBoom   = errors.New("boom")
 	fixedTime = time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	web       = core.Target{App: "web", Environment: core.DefaultEnvironment}
@@ -24,6 +28,10 @@ type fakeRepo struct {
 	mu sync.Mutex
 
 	acquired  []core.LockRequest
+	audits    []core.AuditEntry
+	auditErr  error
+	commits   int
+	rollbacks int
 	released  []string
 	remindFor []time.Duration
 	sweeps    int
@@ -69,6 +77,30 @@ func (f *fakeRepo) ReleaseFreeze(_ context.Context, target *core.Target, actor s
 		l.Target = *target
 	}
 	return l, nil
+}
+
+func (f *fakeRepo) RecordAudit(_ context.Context, e core.AuditEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.auditErr != nil {
+		return f.auditErr
+	}
+	f.audits = append(f.audits, e)
+	return nil
+}
+
+func (f *fakeRepo) InTx(_ context.Context, fn func(Repository) error) error {
+	snapshot := f.audits
+	err := fn(f)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
+		f.audits = snapshot
+		f.rollbacks++
+		return err
+	}
+	f.commits++
+	return nil
 }
 
 func (f *fakeRepo) ListFreezes(context.Context) ([]core.Lock, error) {
@@ -158,7 +190,7 @@ func TestNewRequiresRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := s.Lock(t.Context(), core.LockRequest{Owner: "alice", Reason: "r"}); err != nil {
+	if _, err := s.Lock(t.Context(), Request{Actor: alice, Reason: "r"}); err != nil {
 		t.Errorf("Lock with default notifier and logger: %v", err)
 	}
 }
@@ -168,32 +200,33 @@ func TestLockValidation(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		req        core.LockRequest
+		req        Request
 		wantErr    []string
 		wantOwner  string
 		wantReason string
 	}{
-		{name: "app", req: core.LockRequest{Target: &web, Owner: "alice", Reason: "migration"}, wantOwner: "alice", wantReason: "migration"},
-		{name: "global", req: core.LockRequest{Owner: "alice", Reason: "holiday"}, wantOwner: "alice", wantReason: "holiday"},
-		{name: "trimmed", req: core.LockRequest{Owner: "  alice\t", Reason: "\n migration  "}, wantOwner: "alice", wantReason: "migration"},
-		{name: "expires in", req: core.LockRequest{Owner: "alice", Reason: "r", ExpiresIn: durationPtr(time.Hour)}, wantOwner: "alice", wantReason: "r"},
-		{name: "expires at", req: core.LockRequest{Owner: "alice", Reason: "r", ExpiresAt: timePtr(fixedTime.Add(time.Hour))}, wantOwner: "alice", wantReason: "r"},
-		{name: "unicode reason at limit", req: core.LockRequest{Owner: "alice", Reason: strings.Repeat("é", MaxReasonLength)}, wantOwner: "alice", wantReason: strings.Repeat("é", MaxReasonLength)},
-		{name: "owner at limit", req: core.LockRequest{Owner: strings.Repeat("a", MaxOwnerLength), Reason: "r"}, wantOwner: strings.Repeat("a", MaxOwnerLength), wantReason: "r"},
-		{name: "missing reason", req: core.LockRequest{Owner: "alice"}, wantErr: []string{"reason is required"}},
-		{name: "blank reason", req: core.LockRequest{Owner: "alice", Reason: " \t\n"}, wantErr: []string{"reason is required"}},
-		{name: "long reason", req: core.LockRequest{Owner: "alice", Reason: strings.Repeat("x", MaxReasonLength+1)}, wantErr: []string{"at most 500"}},
-		{name: "control character in reason", req: core.LockRequest{Owner: "alice", Reason: "line\nbreak"}, wantErr: []string{"control characters"}},
-		{name: "escape in reason", req: core.LockRequest{Owner: "alice", Reason: "bell\a"}, wantErr: []string{"control characters"}},
-		{name: "invalid UTF-8 reason", req: core.LockRequest{Owner: "alice", Reason: "bad\xff"}, wantErr: []string{"UTF-8"}},
-		{name: "missing owner", req: core.LockRequest{Reason: "r"}, wantErr: []string{"owner is required"}},
-		{name: "long owner", req: core.LockRequest{Owner: strings.Repeat("a", MaxOwnerLength+1), Reason: "r"}, wantErr: []string{"owner must be at most 200"}},
-		{name: "control character in owner", req: core.LockRequest{Owner: "al\x00ice", Reason: "r"}, wantErr: []string{"owner must be valid UTF-8 without control"}},
-		{name: "both expiries", req: core.LockRequest{Owner: "alice", Reason: "r", ExpiresIn: durationPtr(time.Hour), ExpiresAt: timePtr(fixedTime)}, wantErr: []string{"at most one"}},
-		{name: "zero duration", req: core.LockRequest{Owner: "alice", Reason: "r", ExpiresIn: durationPtr(0)}, wantErr: []string{"must be positive"}},
-		{name: "negative duration", req: core.LockRequest{Owner: "alice", Reason: "r", ExpiresIn: durationPtr(-time.Hour)}, wantErr: []string{"must be positive"}},
-		{name: "invalid target", req: core.LockRequest{Target: &core.Target{App: "web"}, Owner: "alice", Reason: "r"}, wantErr: []string{"environment"}},
-		{name: "every error", req: core.LockRequest{ExpiresIn: durationPtr(0)}, wantErr: []string{"owner is required", "reason is required", "must be positive"}},
+		{name: "app", req: Request{Target: &web, Actor: alice, Reason: "migration"}, wantOwner: "user:alice", wantReason: "migration"},
+		{name: "global", req: Request{Actor: alice, Reason: "holiday"}, wantOwner: "user:alice", wantReason: "holiday"},
+		{name: "trimmed", req: Request{Actor: alice, Reason: "\n migration  "}, wantOwner: "user:alice", wantReason: "migration"},
+		{name: "expires in", req: Request{Actor: alice, Reason: "r", ExpiresIn: durationPtr(time.Hour)}, wantOwner: "user:alice", wantReason: "r"},
+		{name: "expires at", req: Request{Actor: alice, Reason: "r", ExpiresAt: timePtr(fixedTime.Add(time.Hour))}, wantOwner: "user:alice", wantReason: "r"},
+		{name: "unicode reason at limit", req: Request{Actor: alice, Reason: strings.Repeat("é", MaxReasonLength)}, wantOwner: "user:alice", wantReason: strings.Repeat("é", MaxReasonLength)},
+		{name: "owner at limit", req: Request{Actor: core.Actor{Kind: core.ActorUser, ID: strings.Repeat("a", MaxOwnerLength-len("user:"))}, Reason: "r"}, wantOwner: "user:" + strings.Repeat("a", MaxOwnerLength-len("user:")), wantReason: "r"},
+		{name: "missing reason", req: Request{Actor: alice}, wantErr: []string{"reason is required"}},
+		{name: "blank reason", req: Request{Actor: alice, Reason: " \t\n"}, wantErr: []string{"reason is required"}},
+		{name: "long reason", req: Request{Actor: alice, Reason: strings.Repeat("x", MaxReasonLength+1)}, wantErr: []string{"at most 500"}},
+		{name: "control character in reason", req: Request{Actor: alice, Reason: "line\nbreak"}, wantErr: []string{"control characters"}},
+		{name: "escape in reason", req: Request{Actor: alice, Reason: "bell\a"}, wantErr: []string{"control characters"}},
+		{name: "invalid UTF-8 reason", req: Request{Actor: alice, Reason: "bad\xff"}, wantErr: []string{"UTF-8"}},
+		{name: "missing actor", req: Request{Reason: "r"}, wantErr: []string{"unknown actor kind"}},
+		{name: "actor without id", req: Request{Actor: core.Actor{Kind: core.ActorUser}, Reason: "r"}, wantErr: []string{"actor id must not be empty"}},
+		{name: "long owner", req: Request{Actor: core.Actor{Kind: core.ActorUser, ID: strings.Repeat("a", MaxOwnerLength)}, Reason: "r"}, wantErr: []string{"owner must be at most 200"}},
+		{name: "control character in actor", req: Request{Actor: core.Actor{Kind: core.ActorUser, ID: "al\x00ice"}, Reason: "r"}, wantErr: []string{"control characters"}},
+		{name: "both expiries", req: Request{Actor: alice, Reason: "r", ExpiresIn: durationPtr(time.Hour), ExpiresAt: timePtr(fixedTime)}, wantErr: []string{"at most one"}},
+		{name: "zero duration", req: Request{Actor: alice, Reason: "r", ExpiresIn: durationPtr(0)}, wantErr: []string{"must be positive"}},
+		{name: "negative duration", req: Request{Actor: alice, Reason: "r", ExpiresIn: durationPtr(-time.Hour)}, wantErr: []string{"must be positive"}},
+		{name: "invalid target", req: Request{Target: &core.Target{App: "web"}, Actor: alice, Reason: "r"}, wantErr: []string{"environment"}},
+		{name: "every error", req: Request{Actor: alice, ExpiresIn: durationPtr(0)}, wantErr: []string{"reason is required", "must be positive"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,7 +291,7 @@ func TestLockErrorsPassThrough(t *testing.T) {
 			t.Parallel()
 			n := &recordingNotifier{}
 			s := newService(t, &fakeRepo{acquireErr: tt.err}, n, nil)
-			_, err := s.Lock(t.Context(), core.LockRequest{Target: &web, Owner: "alice", Reason: "second"})
+			_, err := s.Lock(t.Context(), Request{Target: &web, Actor: alice, Reason: "second"})
 			if !errors.Is(err, tt.wantIs) {
 				t.Errorf("Lock = %v, want %v", err, tt.wantIs)
 			}
@@ -268,7 +301,7 @@ func TestLockErrorsPassThrough(t *testing.T) {
 		})
 	}
 	s := newService(t, &fakeRepo{acquireErr: held}, nil, nil)
-	_, err := s.Lock(t.Context(), core.LockRequest{Target: &web, Owner: "alice", Reason: "second"})
+	_, err := s.Lock(t.Context(), Request{Target: &web, Actor: alice, Reason: "second"})
 	if got, ok := errors.AsType[*core.LockHeldError](err); !ok || got.Lock.Owner != "bob" {
 		t.Errorf("Lock = %v, want the held lock", err)
 	}
@@ -283,17 +316,17 @@ func TestLockNotifiesPurgedExpiredFreezes(t *testing.T) {
 		purged []core.Lock
 		want   []string
 	}{
-		{name: "nothing purged", target: &web, want: []string{"locked web actor=alice"}},
+		{name: "nothing purged", target: &web, want: []string{"locked web actor=user:alice"}},
 		{
 			name:   "app freeze purged",
 			target: &web,
 			purged: []core.Lock{{Target: web, Owner: "bob", Reason: "old"}},
-			want:   []string{"expired web actor=", "locked web actor=alice"},
+			want:   []string{"expired web actor=", "locked web actor=user:alice"},
 		},
 		{
 			name:   "global freeze purged",
 			purged: []core.Lock{{Global: true, Owner: "bob", Reason: "old"}},
-			want:   []string{"expired global actor=", "locked global actor=alice"},
+			want:   []string{"expired global actor=", "locked global actor=user:alice"},
 		},
 	}
 	for _, tt := range tests {
@@ -302,7 +335,7 @@ func TestLockNotifiesPurgedExpiredFreezes(t *testing.T) {
 			var logs bytes.Buffer
 			n := &recordingNotifier{}
 			s := newService(t, &fakeRepo{purged: tt.purged}, n, &logs)
-			if _, err := s.Lock(t.Context(), core.LockRequest{Target: tt.target, Owner: "alice", Reason: "new"}); err != nil {
+			if _, err := s.Lock(t.Context(), Request{Target: tt.target, Actor: alice, Reason: "new", Role: core.RoleDeployer}); err != nil {
 				t.Fatalf("Lock: %v", err)
 			}
 			if !slices.Equal(n.summary(), tt.want) {
@@ -335,7 +368,7 @@ func TestNotifyOutlivesTheRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	before := time.Now()
-	if _, err := s.Unlock(ctx, &web, "bob"); err != nil {
+	if _, err := s.Unlock(ctx, &web, bob, core.RoleDeployer); err != nil {
 		t.Fatalf("Unlock: %v", err)
 	}
 	if n.err != nil {
@@ -352,18 +385,18 @@ func TestUnlock(t *testing.T) {
 	tests := []struct {
 		name         string
 		target       *core.Target
-		actor        string
+		actor        core.Actor
 		repoErr      error
 		wantIs       error
 		wantReleased []string
 		wantNotified []string
 	}{
-		{name: "app", target: &web, actor: "bob", wantReleased: []string{"web by bob"}, wantNotified: []string{"unlocked web actor=bob"}},
-		{name: "global", actor: " bob ", wantReleased: []string{"global by bob"}, wantNotified: []string{"unlocked global actor=bob"}},
-		{name: "not found", target: &web, actor: "bob", repoErr: core.ErrNotFound, wantIs: core.ErrNotFound, wantReleased: []string{"web by bob"}},
-		{name: "database error", actor: "bob", repoErr: errBoom, wantIs: errBoom, wantReleased: []string{"global by bob"}},
-		{name: "missing actor", target: &web, actor: " ", wantIs: core.ErrInvalidLock},
-		{name: "invalid target", target: &core.Target{App: "web"}, actor: "bob", wantIs: core.ErrInvalidLock},
+		{name: "app", target: &web, actor: bob, wantReleased: []string{"web by user:bob"}, wantNotified: []string{"unlocked web actor=user:bob"}},
+		{name: "global", actor: bob, wantReleased: []string{"global by user:bob"}, wantNotified: []string{"unlocked global actor=user:bob"}},
+		{name: "not found", target: &web, actor: bob, repoErr: core.ErrNotFound, wantIs: core.ErrNotFound, wantReleased: []string{"web by user:bob"}},
+		{name: "database error", actor: bob, repoErr: errBoom, wantIs: errBoom, wantReleased: []string{"global by user:bob"}},
+		{name: "missing actor", target: &web, actor: core.Actor{}, wantIs: core.ErrInvalidLock},
+		{name: "invalid target", target: &core.Target{App: "web"}, actor: bob, wantIs: core.ErrInvalidLock},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -371,7 +404,7 @@ func TestUnlock(t *testing.T) {
 			repo := &fakeRepo{releaseErr: tt.repoErr}
 			n := &recordingNotifier{}
 			s := newService(t, repo, n, nil)
-			lock, err := s.Unlock(t.Context(), tt.target, tt.actor)
+			lock, err := s.Unlock(t.Context(), tt.target, tt.actor, core.RoleDeployer)
 			if tt.wantIs != nil {
 				if !errors.Is(err, tt.wantIs) {
 					t.Errorf("Unlock = %v, want %v", err, tt.wantIs)
@@ -395,10 +428,10 @@ func TestNotifierFailureIsLogged(t *testing.T) {
 	var logs bytes.Buffer
 	n := &recordingNotifier{err: errBoom}
 	s := newService(t, &fakeRepo{}, n, &logs)
-	if _, err := s.Lock(t.Context(), core.LockRequest{Target: &web, Owner: "alice", Reason: "r"}); err != nil {
+	if _, err := s.Lock(t.Context(), Request{Target: &web, Actor: alice, Reason: "r"}); err != nil {
 		t.Errorf("Lock with failing notifier: %v", err)
 	}
-	if _, err := s.Unlock(t.Context(), &web, "bob"); err != nil {
+	if _, err := s.Unlock(t.Context(), &web, bob, core.RoleDeployer); err != nil {
 		t.Errorf("Unlock with failing notifier: %v", err)
 	}
 	if got := strings.Count(logs.String(), "lock notification failed"); got != 2 {
@@ -579,4 +612,163 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func TestLockAuditEntry(t *testing.T) {
+	t.Parallel()
+
+	expires := fixedTime.Add(2 * time.Hour)
+	tests := []struct {
+		name       string
+		req        Request
+		wantTarget *core.Target
+		wantDetail string
+	}{
+		{
+			name:       "app",
+			req:        Request{Target: &web, Reason: " migration ", Actor: alice, Role: core.RoleDeployer},
+			wantTarget: &web,
+			wantDetail: `{"reason":"migration","scope":"web"}`,
+		},
+		{
+			name:       "global with expiry",
+			req:        Request{Reason: "holiday", Actor: alice, Role: core.RoleAdmin, ExpiresAt: &expires},
+			wantDetail: `{"reason":"holiday","scope":"global"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo := &fakeRepo{}
+			s := newService(t, repo, nil, nil)
+			if _, err := s.Lock(t.Context(), tt.req); err != nil {
+				t.Fatalf("Lock: %v", err)
+			}
+			if len(repo.audits) != 1 || repo.commits != 1 {
+				t.Fatalf("audits = %d, commits = %d, want one each", len(repo.audits), repo.commits)
+			}
+			got := repo.audits[0]
+			if got.Action != core.AuditLockAcquire || got.Actor != tt.req.Actor || got.Role != tt.req.Role {
+				t.Errorf("audit = %+v", got)
+			}
+			if !reflect.DeepEqual(got.Target, tt.wantTarget) {
+				t.Errorf("target = %v, want %v", got.Target, tt.wantTarget)
+			}
+			if got.Validate() != nil {
+				t.Errorf("audit entry is invalid: %v", got.Validate())
+			}
+			if tt.req.ExpiresAt == nil && string(got.Detail) != tt.wantDetail {
+				t.Errorf("detail = %s, want %s", got.Detail, tt.wantDetail)
+			}
+		})
+	}
+}
+
+func TestLockAuditDetailCarriesExpiry(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{}
+	s := newService(t, repo, nil, nil)
+	hour := time.Hour
+	if _, err := s.Lock(t.Context(), Request{Reason: "r", Actor: alice, Role: core.RoleDeployer, ExpiresIn: &hour}); err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(repo.audits[0].Detail, &detail); err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if _, ok := detail["expires_at"]; ok {
+		t.Errorf("detail has expires_at although the repository returned no expiry: %v", detail)
+	}
+}
+
+func TestUnlockAuditEntry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		target     *core.Target
+		wantTarget *core.Target
+		wantDetail string
+	}{
+		{name: "app", target: &web, wantTarget: &web, wantDetail: `{"locked_at":"0001-01-01T00:00:00Z","owner":"alice","reason":"held","scope":"web"}`},
+		{name: "global", wantDetail: `{"locked_at":"0001-01-01T00:00:00Z","owner":"alice","reason":"held","scope":"global"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo := &fakeRepo{}
+			s := newService(t, repo, nil, nil)
+			if _, err := s.Unlock(t.Context(), tt.target, bob, core.RoleDeployer); err != nil {
+				t.Fatalf("Unlock: %v", err)
+			}
+			if len(repo.audits) != 1 {
+				t.Fatalf("audits = %d, want 1", len(repo.audits))
+			}
+			got := repo.audits[0]
+			if got.Action != core.AuditLockRelease || got.Actor != bob || got.Role != core.RoleDeployer {
+				t.Errorf("audit = %+v", got)
+			}
+			if !reflect.DeepEqual(got.Target, tt.wantTarget) {
+				t.Errorf("target = %v, want %v", got.Target, tt.wantTarget)
+			}
+			if string(got.Detail) != tt.wantDetail {
+				t.Errorf("detail = %s, want %s", got.Detail, tt.wantDetail)
+			}
+			if err := got.Validate(); err != nil {
+				t.Errorf("audit entry is invalid: %v", err)
+			}
+		})
+	}
+}
+
+func TestFailedLockChangesWriteNoAudit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		repo *fakeRepo
+		run  func(*Service) error
+	}{
+		{name: "lock held", repo: &fakeRepo{acquireErr: &core.LockHeldError{}}, run: func(s *Service) error {
+			_, err := s.Lock(t.Context(), Request{Target: &web, Reason: "r", Actor: alice, Role: core.RoleDeployer})
+			return err
+		}},
+		{name: "lock invalid", repo: &fakeRepo{}, run: func(s *Service) error {
+			_, err := s.Lock(t.Context(), Request{Target: &web, Actor: alice, Role: core.RoleDeployer})
+			return err
+		}},
+		{name: "lock audit fails", repo: &fakeRepo{auditErr: errBoom}, run: func(s *Service) error {
+			_, err := s.Lock(t.Context(), Request{Target: &web, Reason: "r", Actor: alice, Role: core.RoleDeployer})
+			return err
+		}},
+		{name: "unlock not found", repo: &fakeRepo{releaseErr: core.ErrNotFound}, run: func(s *Service) error {
+			_, err := s.Unlock(t.Context(), &web, bob, core.RoleDeployer)
+			return err
+		}},
+		{name: "unlock invalid actor", repo: &fakeRepo{}, run: func(s *Service) error {
+			_, err := s.Unlock(t.Context(), &web, core.Actor{}, core.RoleDeployer)
+			return err
+		}},
+		{name: "unlock audit fails", repo: &fakeRepo{auditErr: errBoom}, run: func(s *Service) error {
+			_, err := s.Unlock(t.Context(), &web, bob, core.RoleDeployer)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := &recordingNotifier{}
+			s := newService(t, tt.repo, n, nil)
+			if err := tt.run(s); err == nil {
+				t.Fatal("call succeeded")
+			}
+			if len(tt.repo.audits) != 0 || tt.repo.commits != 0 {
+				t.Errorf("audits = %d, commits = %d, want none", len(tt.repo.audits), tt.repo.commits)
+			}
+			if len(n.events) != 0 {
+				t.Errorf("failed call notified %v", n.summary())
+			}
+		})
+	}
 }

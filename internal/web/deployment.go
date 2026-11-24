@@ -20,6 +20,7 @@ type deploymentView struct {
 	App          App
 	Configured   bool
 	Phases       []gatePhase
+	Attempts     []attemptView
 	CanCancel    bool
 	CancelReason string
 }
@@ -58,6 +59,7 @@ func (h *Handler) renderDeployment(w http.ResponseWriter, r *http.Request, id co
 			view.Phases = append(view.Phases, gatePhase{Phase: phase, Results: results})
 		}
 	}
+	view.Attempts = attemptsFrom(history.Events)
 	p := h.newPage(r, "Deployment "+strconv.FormatInt(int64(d.ID), 10), "apps", nil)
 	view.CanCancel = h.deploys != nil && p.CanOperate() && !d.State.Terminal()
 	p.Content = view

@@ -33,6 +33,8 @@ func (h *Handler) funcs() template.FuncMap {
 		"isoTime":       isoTime,
 		"stateClass":    stateClass,
 		"gateClass":     gateClass,
+		"verdictClass":  verdictClass,
+		"isRetry":       isRetryEvent,
 		"commitLink":    h.commitLink,
 		"revisionLink":  h.revisionLink,
 		"prettyJSON":    prettyJSON,

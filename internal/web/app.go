@@ -18,6 +18,8 @@ type appForm struct {
 	RollbackReason string
 	LockReason     string
 	LockExpiresIn  string
+	BlockRef       string
+	BlockReason    string
 }
 
 type appView struct {

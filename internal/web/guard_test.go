@@ -23,6 +23,7 @@ var wantRoutes = map[string]core.Role{
 	"POST /apps/{app}/deployments":  core.RoleDeployer,
 	"POST /deployments/{id}/cancel": core.RoleDeployer,
 	"POST /apps/{app}/rollback":     core.RoleDeployer,
+	"POST /apps/{app}/block":        core.RoleDeployer,
 	"POST /apps/{app}/unblock":      core.RoleDeployer,
 	"POST /apps/{app}/lock":         core.RoleDeployer,
 	"POST /apps/{app}/unlock":       core.RoleDeployer,
@@ -44,6 +45,7 @@ var routePaths = map[string]string{
 	"POST /apps/{app}/deployments":  "/apps/blog/deployments",
 	"POST /deployments/{id}/cancel": "/deployments/5/cancel",
 	"POST /apps/{app}/rollback":     "/apps/blog/rollback",
+	"POST /apps/{app}/block":        "/apps/blog/block",
 	"POST /apps/{app}/unblock":      "/apps/blog/unblock",
 	"POST /apps/{app}/lock":         "/apps/blog/lock",
 	"POST /apps/{app}/unlock":       "/apps/blog/unlock",
@@ -130,7 +132,7 @@ func TestEveryRouteEnforcesItsRole(t *testing.T) {
 						t.Fatalf("%s = %d, want access", name, rec.Code)
 					}
 				}
-				if called := len(f.deploys.deploys) + len(f.deploys.cancels) + len(f.rollbacks.requests) + len(f.rollbacks.unblocks) +
+				if called := len(f.deploys.deploys) + len(f.deploys.cancels) + len(f.rollbacks.requests) + len(f.rollbacks.unblocks) + len(f.rollbacks.blockReqs) +
 					len(f.locks.requests) + len(f.locks.unlocks) + len(f.tokens.created) + len(f.tokens.revoked); called > 0 && (principal == nil || !principal.Allows(role)) {
 					t.Fatalf("a denied request reached a service")
 				}

@@ -26,6 +26,8 @@ var notices = map[string]string{
 	"deploy_exists":    "A deploy of this commit was already queued or running; this is that deployment.",
 	"deploy_cancelled": "Deployment cancelled.",
 	"rollback_queued":  "Rollback queued. The version it replaces is blocked from deploying again automatically.",
+	"blocked":          "Version blocked. It will not be deployed automatically until it is unblocked.",
+	"block_exists":     "This version was already blocked.",
 	"unblocked":        "Block removed.",
 	"locked":           "App locked.",
 	"unlocked":         "App unlocked.",

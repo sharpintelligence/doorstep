@@ -37,7 +37,7 @@ The `doorstep_rollbacks_total{app, reason="manual"}` counter is incremented for 
 A block says "do not deploy this version of this app automatically". It is keyed on the image digest, the app commit SHA, or both:
 
 - A rollback blocks the current deployment's digest and, unless it equals the target's commit, its commit SHA. A deploy cancelled before its digest was resolved gets a commit-only block. A cancelled rebuild of the target's own commit that never resolved blocks nothing.
-- `doorstep block <app> <digest|commit> --reason <text>` blocks by hand. The reason is required.
+- `doorstep block <app> <digest|commit> --reason <text>` blocks by hand, as does the Block form on the app page of the [web UI](ui.md). The reason is required.
 - Lookups match either key: a block on a digest stops that digest, a block on a commit stops that commit.
 - An app has at most one active block per digest and one active commit-only block per commit. Blocking a version that already has an active block extends that block: a digest is added to a commit-only block of the same commit, and a commit is added to a digest block that has none. When the digest is already blocked together with a different commit (two commits built the same image), the new commit gets its own commit-only block instead, so both commits stay blocked; a rollback then reports and audits that commit-only block, since the digest was already blocked.
 

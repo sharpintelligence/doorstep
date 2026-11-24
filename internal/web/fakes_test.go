@@ -17,6 +17,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/deploys"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -126,23 +127,25 @@ type fakeLocks struct {
 	mu        sync.Mutex
 	locks     []core.Lock
 	events    []core.LockEvent
-	requests  []core.LockRequest
+	requests  []locks.Request
+	roles     []core.Role
 	unlocks   []string
 	lockErr   error
 	unlockErr error
 }
 
-func (f *fakeLocks) Lock(_ context.Context, req core.LockRequest) (core.Lock, error) {
+func (f *fakeLocks) Lock(_ context.Context, req locks.Request) (core.Lock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
 	return core.Lock{}, f.lockErr
 }
 
-func (f *fakeLocks) Unlock(_ context.Context, target *core.Target, actor string) (core.Lock, error) {
+func (f *fakeLocks) Unlock(_ context.Context, target *core.Target, actor core.Actor, role core.Role) (core.Lock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.unlocks = append(f.unlocks, core.LockRequest{Target: target}.Scope()+" by "+actor)
+	f.unlocks = append(f.unlocks, core.LockRequest{Target: target}.Scope()+" by "+actor.String())
+	f.roles = append(f.roles, role)
 	return core.Lock{}, f.unlockErr
 }
 
@@ -161,6 +164,9 @@ type fakeRollbacks struct {
 	blocks      []core.Block
 	unblocks    []core.BlockRef
 	unblockErr  error
+	blockReqs   []rollback.BlockRequest
+	blockExists bool
+	blockErr    error
 }
 
 func (f *fakeRollbacks) Rollback(_ context.Context, req rollback.Request) (rollback.Result, error) {
@@ -177,6 +183,16 @@ func (f *fakeRollbacks) Rollback(_ context.Context, req rollback.Request) (rollb
 
 func (f *fakeRollbacks) ListBlocks(context.Context, core.Target) ([]core.Block, error) {
 	return f.blocks, nil
+}
+
+func (f *fakeRollbacks) Block(_ context.Context, req rollback.BlockRequest) (core.Block, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockReqs = append(f.blockReqs, req)
+	if f.blockErr != nil {
+		return core.Block{}, false, f.blockErr
+	}
+	return core.Block{Target: req.Target, Digest: req.Ref.Digest, Reason: req.Reason}, !f.blockExists, nil
 }
 
 func (f *fakeRollbacks) Unblock(_ context.Context, _ core.Target, ref core.BlockRef, _ core.Actor, _ core.Role) ([]core.Block, error) {

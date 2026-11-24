@@ -50,11 +50,45 @@
 <p class="muted">No gate has run for this deployment.</p>
 {{end}}
 
+{{with .Content.Attempts}}
+<h2>Attempts</h2>
+{{range .}}
+<section class="attempt">
+{{$number := .Number}}
+<h3>Attempt {{.Number}}{{if .MaxAttempts}} of {{.MaxAttempts}}{{end}}{{if .Final}} (final){{end}}</h3>
+<p>{{template "time" .OccurredAt}}{{with .Verdict}} <span class="{{verdictClass .}}">{{.}}</span>{{end}}{{with .Summary}} {{.}}{{end}}</p>
+{{if not .HasDiagnosis}}{{with .Message}}<p>{{.}}</p>{{end}}{{end}}
+<dl class="facts">
+{{with .SyncReason}}<dt>Sync result</dt><dd>{{.}}</dd>{{end}}
+{{if .Final}}
+<dt>Next</dt><dd>{{with .Decision}}Decision: {{.}}{{else}}Failed{{end}}{{if .RollbackEligible}} <span class="badge bad">rollback eligible</span>{{end}}</dd>
+{{else if .NextAttempt}}
+<dt>Next</dt><dd>Retrying as attempt {{.NextAttempt}}{{if .Delay}} after {{.Delay}}{{end}}</dd>
+{{end}}
+</dl>
+{{with .Findings}}
+<table>
+<caption>Findings for attempt {{$number}}</caption>
+<thead><tr><th scope="col">Signal</th><th scope="col">Node</th><th scope="col">Pods</th><th scope="col">Reason</th><th scope="col">Exit code</th><th scope="col">Detail</th></tr></thead>
+<tbody>
+{{range .}}
+<tr><th scope="row">{{.Signal}}</th><td>{{.Node}}</td><td>{{.Pods}}</td><td>{{.Reason}}</td><td>{{with .ExitCode}}{{.}}{{end}}</td><td>{{.Detail}}</td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+{{with .Nodes}}<p><strong>Nodes</strong></p><ul>{{range .}}<li><code>{{.}}</code></li>{{end}}</ul>{{end}}
+{{with .Evidence}}<p><strong>Evidence</strong></p><ul>{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{if .PodsNotInspected}}<p class="hint">Pods were not inspected; the diagnosis is based on Argo CD messages.</p>{{end}}
+</section>
+{{end}}
+{{end}}
+
 <h2>Events</h2>
 {{if .Content.EventsTruncated}}<p class="hint">Only the newest events are shown.</p>{{end}}
 <ol class="timeline">
 {{range .Content.Events}}
-<li>{{template "time" .OccurredAt}} <strong>{{.Type}}</strong>{{if .To}} {{with .From}}{{.}} → {{end}}{{.To}}{{end}}{{with .Message}}: {{.}}{{end}}{{with .Actor}} <span class="muted">({{.}})</span>{{end}}</li>
+<li>{{template "time" .OccurredAt}} <strong>{{.Type}}</strong>{{if .To}} {{with .From}}{{.}} → {{end}}{{.To}}{{end}}{{with .Message}}: {{.}}{{end}}{{with .Actor}} <span class="muted">({{.}})</span>{{end}}{{if isRetry .}} <span class="badge active">retry</span>{{end}}</li>
 {{end}}
 </ol>
 

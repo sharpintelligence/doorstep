@@ -13,7 +13,7 @@ import (
 const SweepInterval = time.Minute
 
 type ReminderOptions struct {
-	Repository Repository
+	Repository Sweeper
 	Notifier   Notifier
 	Logger     *slog.Logger
 	Now        func() time.Time
@@ -21,7 +21,7 @@ type ReminderOptions struct {
 }
 
 type Reminder struct {
-	repo     Repository
+	repo     Sweeper
 	notifier Notifier
 	logger   *slog.Logger
 	now      func() time.Time

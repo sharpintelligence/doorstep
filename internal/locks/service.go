@@ -2,6 +2,7 @@ package locks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,15 +20,6 @@ const (
 
 	NotifyTimeout = 10 * time.Second
 )
-
-type Repository interface {
-	AcquireFreeze(ctx context.Context, req core.LockRequest) (core.Lock, []core.Lock, error)
-	ReleaseFreeze(ctx context.Context, target *core.Target, actor string) (core.Lock, error)
-	ListFreezes(ctx context.Context) ([]core.Lock, error)
-	BlockingFreezes(ctx context.Context, t core.Target) ([]core.Lock, error)
-	DeleteExpiredFreezes(ctx context.Context) ([]core.Lock, error)
-	ClaimLockReminders(ctx context.Context, every time.Duration) ([]core.Lock, error)
-}
 
 type Notifier interface {
 	NotifyLock(ctx context.Context, ev core.LockEvent) error
@@ -64,13 +56,43 @@ func New(opts Options) (*Service, error) {
 	return s, nil
 }
 
-func (s *Service) Lock(ctx context.Context, req core.LockRequest) (core.Lock, error) {
-	req.Owner = strings.TrimSpace(req.Owner)
-	req.Reason = strings.TrimSpace(req.Reason)
-	if err := validate(req); err != nil {
+type Request struct {
+	Target    *core.Target
+	Reason    string
+	ExpiresIn *time.Duration
+	ExpiresAt *time.Time
+	Actor     core.Actor
+	Role      core.Role
+}
+
+func (s *Service) Lock(ctx context.Context, req Request) (core.Lock, error) {
+	if err := req.Actor.Validate(); err != nil {
+		return core.Lock{}, fmt.Errorf("%w: %w", core.ErrInvalidLock, err)
+	}
+	lockReq := core.LockRequest{
+		Target:    req.Target,
+		Owner:     req.Actor.String(),
+		Reason:    strings.TrimSpace(req.Reason),
+		ExpiresIn: req.ExpiresIn,
+		ExpiresAt: req.ExpiresAt,
+	}
+	if err := validate(lockReq); err != nil {
 		return core.Lock{}, err
 	}
-	lock, expired, err := s.repo.AcquireFreeze(ctx, req)
+	var lock core.Lock
+	var expired []core.Lock
+	err := s.repo.InTx(ctx, func(tx Repository) error {
+		var err error
+		lock, expired, err = tx.AcquireFreeze(ctx, lockReq)
+		if err != nil {
+			return err
+		}
+		detail := map[string]any{"scope": lock.Scope(), "reason": lock.Reason}
+		if lock.ExpiresAt != nil {
+			detail["expires_at"] = lock.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		return tx.RecordAudit(ctx, auditEntry(core.AuditLockAcquire, lock, req.Actor, req.Role, detail))
+	})
 	if err != nil {
 		return core.Lock{}, err
 	}
@@ -86,9 +108,12 @@ func (s *Service) Lock(ctx context.Context, req core.LockRequest) (core.Lock, er
 	return lock, nil
 }
 
-func (s *Service) Unlock(ctx context.Context, target *core.Target, actor string) (core.Lock, error) {
-	actor = strings.TrimSpace(actor)
-	if err := validateOwner("actor", actor); err != nil {
+func (s *Service) Unlock(ctx context.Context, target *core.Target, actor core.Actor, role core.Role) (core.Lock, error) {
+	if err := actor.Validate(); err != nil {
+		return core.Lock{}, fmt.Errorf("%w: %w", core.ErrInvalidLock, err)
+	}
+	actorName := actor.String()
+	if err := validateOwner("actor", actorName); err != nil {
 		return core.Lock{}, err
 	}
 	if target != nil {
@@ -96,17 +121,41 @@ func (s *Service) Unlock(ctx context.Context, target *core.Target, actor string)
 			return core.Lock{}, fmt.Errorf("%w: %w", core.ErrInvalidLock, err)
 		}
 	}
-	lock, err := s.repo.ReleaseFreeze(ctx, target, actor)
+	var lock core.Lock
+	err := s.repo.InTx(ctx, func(tx Repository) error {
+		var err error
+		lock, err = tx.ReleaseFreeze(ctx, target, actorName)
+		if err != nil {
+			return err
+		}
+		detail := map[string]any{
+			"scope":     lock.Scope(),
+			"owner":     lock.Owner,
+			"reason":    lock.Reason,
+			"locked_at": lock.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		return tx.RecordAudit(ctx, auditEntry(core.AuditLockRelease, lock, actor, role, detail))
+	})
 	if err != nil {
 		return core.Lock{}, err
 	}
 	s.logger.InfoContext(ctx, "unlocked",
 		slog.String("scope", lock.Scope()),
 		slog.String("owner", lock.Owner),
-		slog.String("actor", actor),
+		slog.String("actor", actorName),
 	)
-	notify(ctx, s.notifier, s.logger, core.LockEvent{Action: core.LockActionUnlocked, Lock: lock, Actor: actor, OccurredAt: s.now()})
+	notify(ctx, s.notifier, s.logger, core.LockEvent{Action: core.LockActionUnlocked, Lock: lock, Actor: actorName, OccurredAt: s.now()})
 	return lock, nil
+}
+
+func auditEntry(action core.AuditAction, lock core.Lock, actor core.Actor, role core.Role, detail map[string]any) core.AuditEntry {
+	data, _ := json.Marshal(detail)
+	entry := core.AuditEntry{Actor: actor, Role: role, Action: action, Detail: data}
+	if !lock.Global {
+		target := lock.Target
+		entry.Target = &target
+	}
+	return entry
 }
 
 func (s *Service) List(ctx context.Context) ([]core.Lock, error) {

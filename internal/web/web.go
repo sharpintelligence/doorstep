@@ -156,6 +156,7 @@ func (h *Handler) routes() []route {
 		{pattern: "GET /audit", role: core.RoleViewer, handler: h.auditPage},
 		{pattern: "GET /tokens", role: core.RoleAdmin, handler: h.tokensPage},
 		{pattern: "POST /apps/{app}/rollback", role: core.RoleDeployer, handler: h.rollback},
+		{pattern: "POST /apps/{app}/block", role: core.RoleDeployer, handler: h.block},
 		{pattern: "POST /apps/{app}/unblock", role: core.RoleDeployer, handler: h.unblock},
 		{pattern: "POST /apps/{app}/lock", role: core.RoleDeployer, handler: h.lockApp},
 		{pattern: "POST /apps/{app}/unlock", role: core.RoleDeployer, handler: h.unlockApp},
