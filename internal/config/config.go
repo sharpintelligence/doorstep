@@ -26,11 +26,13 @@ const (
 	EnvRegistryCredentialsFile = "DOORSTEP_REGISTRY_CREDENTIALS_FILE"
 
 	EnvLockReminderInterval = "DOORSTEP_LOCK_REMINDER_INTERVAL"
+	EnvPollInterval         = "DOORSTEP_POLL_INTERVAL"
 
 	EnvKubeconfig  = "DOORSTEP_KUBECONFIG"
 	EnvKubeContext = "DOORSTEP_KUBE_CONTEXT"
 
 	MinLockReminderInterval = time.Minute
+	MinPollInterval         = 10 * time.Second
 )
 
 var ErrDatabaseSource = errors.New("set exactly one of " + EnvDatabaseURL + " and " + EnvDatabaseURLFile)
@@ -43,6 +45,7 @@ type Config struct {
 	Registry   Registry
 	Locks      Locks
 	Kubernetes Kubernetes
+	Intake     Intake
 }
 
 type Server struct {
@@ -83,6 +86,10 @@ func (k Kubernetes) Validate() error {
 	return nil
 }
 
+type Intake struct {
+	PollInterval time.Duration
+}
+
 func Default() Config {
 	return Config{
 		Server: Server{
@@ -97,6 +104,7 @@ func Default() Config {
 		},
 		GitHub: defaultGitHub(),
 		Locks:  Locks{ReminderInterval: 24 * time.Hour},
+		Intake: Intake{PollInterval: time.Minute},
 	}
 }
 
@@ -116,6 +124,7 @@ func FromEnv(base Config, lookup func(string) (string, bool)) (Config, error) {
 		lookupDuration(lookup, EnvShutdownDelay, &cfg.Server.ShutdownDelay),
 		lookupDuration(lookup, EnvShutdownTimeout, &cfg.Server.ShutdownTimeout),
 		lookupDuration(lookup, EnvLockReminderInterval, &cfg.Locks.ReminderInterval),
+		lookupDuration(lookup, EnvPollInterval, &cfg.Intake.PollInterval),
 	)
 	if v, ok := lookup(EnvLogLevel); ok {
 		cfg.Log.Level = v
@@ -186,7 +195,7 @@ func (c Config) ValidateSettings() error {
 			errs = append(errs, fmt.Errorf("public url: %w", err))
 		}
 	}
-	errs = append(errs, c.Log.Validate(), c.Locks.Validate(), c.Kubernetes.Validate())
+	errs = append(errs, c.Log.Validate(), c.Locks.Validate(), c.Kubernetes.Validate(), c.Intake.Validate())
 	errs = append(errs, c.GitHub.validate()...)
 	return errors.Join(errs...)
 }
@@ -208,6 +217,16 @@ func (l Locks) Validate() error {
 		return fmt.Errorf("lock reminder interval: must not be negative, got %s", l.ReminderInterval)
 	case l.ReminderInterval > 0 && l.ReminderInterval < MinLockReminderInterval:
 		return fmt.Errorf("lock reminder interval: must be 0 (disabled) or at least %s, got %s", MinLockReminderInterval, l.ReminderInterval)
+	}
+	return nil
+}
+
+func (i Intake) Validate() error {
+	switch {
+	case i.PollInterval < 0:
+		return fmt.Errorf("poll interval: must not be negative, got %s", i.PollInterval)
+	case i.PollInterval > 0 && i.PollInterval < MinPollInterval:
+		return fmt.Errorf("poll interval: must be 0 (disabled) or at least %s, got %s", MinPollInterval, i.PollInterval)
 	}
 	return nil
 }

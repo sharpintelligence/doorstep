@@ -11,7 +11,7 @@ Each setting is resolved from the first source that provides it:
 
 An environment variable that is set but empty counts as set, and is then validated like any other value. All settings are validated together on startup, and every invalid setting is reported in one error.
 
-A secret with several possible sources is resolved as a whole: when any flag or environment variable for the database URL is set, it replaces `database.url_file` from the file, and when either `DOORSTEP_GITHUB_APP_PRIVATE_KEY` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is set, it replaces `github.private_key_file`. Sources at the same level still conflict, so setting both database environment variables is an error.
+A secret with several possible sources is resolved as a whole: when any flag or environment variable for the database URL is set, it replaces `database.url_file` from the file, when either `DOORSTEP_GITHUB_APP_PRIVATE_KEY` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is set, it replaces `github.private_key_file`, and when either `DOORSTEP_GITHUB_WEBHOOK_SECRET` or `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` is set, it replaces `github.webhook_secret_file`. Sources at the same level still conflict, so setting both database environment variables is an error.
 
 Apps, notification targets and the `auth` section are only read from the configuration file; they have no flags or environment variables.
 
@@ -33,8 +33,9 @@ Apps, notification targets and the `auth` section are only read from the configu
 | | `DOORSTEP_KUBECONFIG` | empty (in-cluster) | Kubeconfig file used to read Argo CD Applications. Empty uses the pod's ServiceAccount; doorstep never falls back to `$KUBECONFIG` or `~/.kube/config`. Only a subset of kubeconfig settings is supported; see [argocd.md](argocd.md#connecting-to-the-cluster). `serve` does not read Applications yet; the `--kubeconfig` flag is offered by [`argocd status`](#doorstep-argocd-status). |
 | | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` | Context in that kubeconfig. Requires a kubeconfig. The `--kube-context` flag is offered by `argocd status`. |
 | | `DOORSTEP_LOCK_REMINDER_INTERVAL` | `24h` | How long a freeze lock may be held before doorstep sends a reminder, and how often it repeats while the lock stays held. Go duration syntax. `0s` disables reminders (expired locks are still cleaned up); otherwise at least `1m`; must not be negative. See [locks.md](locks.md#reminders). |
+| | `DOORSTEP_POLL_INTERVAL` | `1m` | How often doorstep polls GitHub for new branch heads and re-checks open commits, as a safety net for missed or unreachable webhooks. Go duration syntax. `0s` disables polling; otherwise at least `10s`; must not be negative. See [Intake](#intake). |
 
-The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval and the Kubernetes connection have no `serve` flag.
+The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval, the poll interval and the Kubernetes connection have no `serve` flag.
 
 Example:
 
@@ -95,9 +96,21 @@ GitHub access is optional as a group: with none of these set, `doorstep serve` r
 | `DOORSTEP_GITHUB_APP_ID` | `github.app_id` | unset | The App's numeric App ID or its Client ID, used as the JWT issuer. Must not contain whitespace. |
 | `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` | `github.private_key_file` | unset | Path to the App's private key: PEM, PKCS #1 (`RSA PRIVATE KEY`, as GitHub downloads it) or PKCS #8 (`PRIVATE KEY`), RSA, at least 2048 bits. Usually a mounted Kubernetes Secret. |
 | `DOORSTEP_GITHUB_APP_PRIVATE_KEY` | none | unset | The private key inline, same formats. Literal `\n` sequences are turned into newlines, for env files that cannot hold multi-line values. Setting both this and `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` is an error. |
+| `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` | `github.webhook_secret_file` | unset | Path to the App's webhook secret. Setting it mounts `POST /webhooks/github`; without it the route is absent and doorstep relies on polling. Requires the App ID and private key. See [github-app.md](github-app.md#webhooks). |
+| `DOORSTEP_GITHUB_WEBHOOK_SECRET` | none | unset | The webhook secret inline. Setting both this and `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` is an error. |
 | `DOORSTEP_GITHUB_API_URL` | `github.api_url` | `https://api.github.com` | REST API root. For GitHub Enterprise Server use `https://<host>/api/v3`. Must be an absolute URL without user information, query or fragment, and must use `https` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`). A trailing slash is ignored. Validated even when no App is configured. |
 
-The key is read and parsed when `serve` starts; a missing, unreadable or malformed key stops startup. Key values are redacted wherever configuration is printed or logged.
+The key is read and parsed when `serve` starts; a missing, unreadable or malformed key stops startup. The webhook secret is likewise read once at startup (one trailing newline is trimmed, files are capped at 64 KiB); a missing, unreadable or empty secret stops startup, and a rotated secret needs a restart. Key and secret values are redacted wherever configuration is printed or logged.
+
+## Intake
+
+doorstep learns about new commits from GitHub webhooks when a webhook secret is configured, and from a poller that runs whenever the GitHub App is configured and at least one app exists. Both feed the same intake, which is idempotent, so they can run together. See [github-app.md](github-app.md#polling) for what a poll cycle does.
+
+| Environment variable | File key | Default | Description |
+| --- | --- | --- | --- |
+| `DOORSTEP_POLL_INTERVAL` | `intake.poll_interval` | `1m` | Time between poll cycles across all replicas. `0s` disables polling; otherwise at least `10s`. Every replica checks every `min(interval, 15s)` whether a cycle is due, and only the replica that claims it in Postgres runs it. |
+
+`serve` logs which paths are active: `github webhooks enabled`, `github webhooks disabled, polling only`, `github polling disabled, webhooks only`, or a warning when both are off. The first cycle after an app is added or after downtime tracks the current branch head and deploys it once green; there is no baseline that skips it.
 
 ## `doorstep image resolve`
 
@@ -273,12 +286,14 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `github.app_id` | none | `DOORSTEP_GITHUB_APP_ID` |
 | `github.private_key_file` | none | `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` or `DOORSTEP_GITHUB_APP_PRIVATE_KEY` |
 | `github.api_url` | none | `DOORSTEP_GITHUB_API_URL` |
+| `github.webhook_secret_file` | none | `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` or `DOORSTEP_GITHUB_WEBHOOK_SECRET` |
 | `registry.credentials_file` | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` |
 | `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
 | `kubernetes.kubeconfig` | `--kubeconfig` (`argocd status` only) | `DOORSTEP_KUBECONFIG` |
 | `kubernetes.context` | `--kube-context` (`argocd status` only) | `DOORSTEP_KUBE_CONTEXT` |
+| `intake.poll_interval` | none | `DOORSTEP_POLL_INTERVAL` |
 
-A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL and the GitHub App private key can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
+A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL, the GitHub App private key and the webhook secret can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).
 
 ### `auth`
 
@@ -440,10 +455,13 @@ database:
 github:
   app_id: "123456"
   private_key_file: /etc/doorstep/secrets/github-app-private-key.pem
+  webhook_secret_file: /etc/doorstep/secrets/github-webhook-secret
 registry:
   credentials_file: /etc/doorstep/registry/.dockerconfigjson
 locks:
   reminder_interval: 12h
+intake:
+  poll_interval: 2m
 
 notifications:
   - name: ops
@@ -618,6 +636,6 @@ Notification secrets and the sign-in client secret (`auth.oidc.client_secret_*` 
 
 `doorstep serve` checks every referenced notification and client secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
-The database URL, the GitHub App private key and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections.
+The database URL, the GitHub App private key, the GitHub webhook secret and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `github.webhook_secret_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections. The private key and webhook secret are read once at startup, so rotating them needs a restart.
 
 Settings for the remaining secrets arrive with the features that need them.

@@ -56,6 +56,21 @@ doorstep_notifications_total{result="unknown",type="unknown"} 1
 `,
 		},
 		{
+			name: "intake poll cycles by result, primed at zero",
+			calls: func(r *Recorder) {
+				r.PollCycle(PollSucceeded)
+				r.PollCycle(PollSucceeded)
+				r.PollCycle(PollResult("odd"))
+			},
+			want: `
+# HELP doorstep_intake_poll_cycles_total Intake poll cycles run by this replica, by result.
+# TYPE doorstep_intake_poll_cycles_total counter
+doorstep_intake_poll_cycles_total{result="failed"} 0
+doorstep_intake_poll_cycles_total{result="succeeded"} 2
+doorstep_intake_poll_cycles_total{result="unknown"} 1
+`,
+		},
+		{
 			name: "rollbacks per app and reason",
 			calls: func(r *Recorder) {
 				r.Rollback("web", RollbackReasonGateFailed)
@@ -83,6 +98,51 @@ doorstep_rollbacks_total{app="web",reason="unknown"} 1
 				t.Error(err)
 			}
 		})
+	}
+}
+
+func TestRecorderWebhookDeliveries(t *testing.T) {
+	t.Parallel()
+
+	m := New(Options{})
+	r := m.Recorder()
+	r.WebhookDelivery(WebhookEventPush, WebhookProcessed)
+	r.WebhookDelivery(WebhookEventPush, WebhookProcessed)
+	r.WebhookDelivery(WebhookEventStatus, WebhookDuplicate)
+	r.WebhookDelivery(WebhookEvent("pull_request"), WebhookIgnored)
+	r.WebhookDelivery(WebhookEvent("deployment"), WebhookIgnored)
+	r.WebhookDelivery(WebhookEventPing, WebhookResult("weird"))
+
+	families, err := m.Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	got := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "doorstep_webhook_deliveries_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := labelMap(metric.GetLabel())
+			got[labels["event"]+"/"+labels["result"]] = metric.GetCounter().GetValue()
+		}
+	}
+	if want := len(allWebhookEvents)*len(allWebhookResults) + 1; len(got) != want {
+		t.Errorf("series = %d, want %d primed plus one unknown result", len(got), want)
+	}
+	want := map[string]float64{
+		"push/processed":   2,
+		"status/duplicate": 1,
+		"other/ignored":    2,
+		"ping/unknown":     1,
+		"push/failed":      0,
+		"push/in_progress": 0,
+		"other/rejected":   0,
+	}
+	for key, value := range want {
+		if v, ok := got[key]; !ok || v != value {
+			t.Errorf("%s = %v (present %t), want %v", key, v, ok, value)
+		}
 	}
 }
 

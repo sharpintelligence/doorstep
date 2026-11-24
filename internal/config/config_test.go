@@ -20,6 +20,7 @@ func TestDefault(t *testing.T) {
 		Log:    Log{Level: "info", Format: "json"},
 		GitHub: GitHub{APIURL: "https://api.github.com"},
 		Locks:  Locks{ReminderInterval: 24 * time.Hour},
+		Intake: Intake{PollInterval: time.Minute},
 	}
 	got := Default()
 	if got != want {
@@ -129,6 +130,22 @@ func TestFromEnv(t *testing.T) {
 			name: "lock reminders disabled",
 			env:  map[string]string{EnvLockReminderInterval: "0s"},
 			want: func(c *Config) { c.Locks.ReminderInterval = 0 },
+		},
+		{
+			name: "poll interval",
+			env:  map[string]string{EnvPollInterval: "30s"},
+			want: func(c *Config) { c.Intake.PollInterval = 30 * time.Second },
+		},
+		{
+			name: "polling disabled",
+			env:  map[string]string{EnvPollInterval: "0"},
+			want: func(c *Config) { c.Intake.PollInterval = 0 },
+		},
+		{
+			name:    "unparseable poll interval",
+			env:     map[string]string{EnvPollInterval: "often"},
+			want:    func(*Config) {},
+			wantErr: []string{EnvPollInterval, `"often"`},
 		},
 		{
 			name:    "unparseable lock reminder interval",
@@ -330,6 +347,18 @@ func TestValidate(t *testing.T) {
 		},
 		{name: "database URL file", mutate: func(c *Config) { c.Database = Database{URLFile: "/run/secrets/db"} }},
 		{name: "lock reminders disabled", mutate: func(c *Config) { c.Locks.ReminderInterval = 0 }},
+		{name: "polling disabled", mutate: func(c *Config) { c.Intake.PollInterval = 0 }},
+		{name: "poll interval at minimum", mutate: func(c *Config) { c.Intake.PollInterval = 10 * time.Second }},
+		{
+			name:    "poll interval below minimum",
+			mutate:  func(c *Config) { c.Intake.PollInterval = 9 * time.Second },
+			wantErr: []string{"poll interval: must be 0 (disabled) or at least 10s, got 9s"},
+		},
+		{
+			name:    "negative poll interval",
+			mutate:  func(c *Config) { c.Intake.PollInterval = -time.Minute },
+			wantErr: []string{"poll interval: must not be negative, got -1m0s"},
+		},
 		{name: "lock reminder at minimum", mutate: func(c *Config) { c.Locks.ReminderInterval = time.Minute }},
 		{
 			name:    "lock reminder below minimum",

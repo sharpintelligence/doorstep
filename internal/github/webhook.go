@@ -9,6 +9,8 @@ import (
 
 const (
 	SignatureHeader = "X-Hub-Signature-256"
+	EventHeader     = "X-GitHub-Event"
+	DeliveryHeader  = "X-GitHub-Delivery"
 	signaturePrefix = "sha256="
 )
 

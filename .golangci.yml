@@ -34,6 +34,10 @@ linters:
         text: "^G101: Potential hardcoded credentials"
         linters:
           - gosec
+      - path: ^internal/config/github\.go$
+        text: "^G101: Potential hardcoded credentials"
+        linters:
+          - gosec
       - path: ^internal/cli/cli\.go$
         text: "^Function `newRootCommand->newServeCommand->newServeCommand\\$1` should pass the context parameter$"
         linters:

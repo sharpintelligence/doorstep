@@ -811,6 +811,46 @@ func TestOpenTrackedCommits(t *testing.T) {
 	}
 }
 
+func TestOpenTrackedCommitsRotatesPastTheLimit(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	apps := []string{"a", "b", "c", "d", "e"}
+	var (
+		all     []core.FollowedBranch
+		commits []core.TrackedCommit
+	)
+	for i, app := range apps {
+		commits = append(commits, mustTrack(t, st, newTrackedCommit(app, shaOf(byte('a'+i)))))
+		all = append(all, followed(app, "acme/"+app, "main"))
+	}
+	ids := func(c ...core.TrackedCommit) []core.TrackedCommitID { return trackedIDs(c) }
+
+	rounds := []struct {
+		name string
+		want []core.TrackedCommitID
+	}{
+		{name: "never evaluated first, by id", want: ids(commits[0], commits[1])},
+		{name: "commits evaluated last round move behind the rest", want: ids(commits[2], commits[3])},
+		{name: "the last never evaluated commit comes before the oldest evaluation", want: ids(commits[4], commits[0])},
+		{name: "rotation continues with the oldest evaluations", want: ids(commits[1], commits[2])},
+	}
+	readAt := evaluatedAt
+	for _, round := range rounds {
+		got, err := st.OpenTrackedCommits(t.Context(), all, 2)
+		if err != nil {
+			t.Fatalf("%s: OpenTrackedCommits: %v", round.name, err)
+		}
+		if !slices.Equal(trackedIDs(got), round.want) {
+			t.Fatalf("%s: OpenTrackedCommits = %v, want %v", round.name, trackedIDs(got), round.want)
+		}
+		for _, c := range got {
+			readAt = readAt.Add(time.Second)
+			mustSettle(t, st, c, evaluation(core.ChecksPending, readAt))
+		}
+	}
+}
+
 func TestTrackedCommitStaysClosedWhenItsDeploymentIsDeleted(t *testing.T) {
 	t.Parallel()
 

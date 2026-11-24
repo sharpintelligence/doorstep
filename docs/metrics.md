@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment and gate series appear once the engine records into them; `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). Until then `doorstep_build_info`, `doorstep_notifications_total`, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total` series is created at zero on start.
+Deployment and gate series appear once the engine records into them; `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). Until then `doorstep_build_info`, `doorstep_notifications_total`, the webhook and poll cycle counters, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total`, `doorstep_webhook_deliveries_total` and `doorstep_intake_poll_cycles_total` series is created at zero on start.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -47,6 +47,8 @@ Deployment and gate series appear once the engine records into them; `doorstep_r
 | `doorstep_rollbacks_total` | counter | `app`, `reason` | Rollbacks started. |
 | `doorstep_gate_evaluation_duration_seconds` | histogram | `app`, `gate`, `phase`, `result` | Time from a gate starting to wait to its verdict, or the duration of a call that failed (see [Labels](#labels)). Its `_count` is the number of verdicts and evaluation errors. |
 | `doorstep_notifications_total` | counter | `type`, `result` | Notification deliveries. `sent` after the target accepted it (possibly after retries), `failed` when every attempt failed or the failure was permanent, `dropped` when it was never attempted because the target's queue was full or doorstep was shutting down. See [notifications.md](notifications.md#delivery). |
+| `doorstep_webhook_deliveries_total` | counter | `event`, `result` | GitHub webhook deliveries received at `/webhooks/github`. `event` is `push`, `check_run`, `check_suite`, `status`, `installation`, `installation_repositories`, `ping` or `other`. `result` is `processed`, `ignored` (an event or ref doorstep does not act on), `duplicate` (a push delivery ID already handled), `in_progress` (`409`, a push delivery ID another request is handling), `rejected` (`400` or `413`), `unauthorized` (missing or wrong signature) or `failed` (`500`). A rising `unauthorized` count usually means the webhook secrets differ ([github-app.md](github-app.md#webhooks)). |
+| `doorstep_intake_poll_cycles_total` | counter | `result` | Intake poll cycles this replica ran after claiming them, `succeeded` or `failed`. Replicas that did not win the claim count nothing, so sum across replicas. See [github-app.md](github-app.md#polling). |
 | `doorstep_queue_depth` | gauge | none | Deployments waiting in the queue, read from the database at scrape time: queue entries whose deployment is `queued` and not leased, across all apps. In-flight deployments are not counted ([queue.md](queue.md#observability)). The read is cut off after 2 seconds; the series is omitted for a scrape if the database cannot be read, rather than reported as zero. |
 | `doorstep_queue_depth_errors_total` | counter | none | Scrapes where the queue depth could not be read. The first failure of a streak is logged at `warn` and the recovery at `info`; further failures are only counted. |
 | `doorstep_build_info` | gauge | `version`, `commit`, `go_version` | Always 1; identifies the running build. |
@@ -56,7 +58,7 @@ Deployment and gate series appear once the engine records into them; `doorstep_r
 
 `app` is the application name from the configuration and `gate` is the gate kind, never a user-defined instance name. Each gate type declares its kind when it is registered with the gate registry (for example `checks` as `ci`, `health` as `argocd`). A gate records one `passed` or `failed` observation when it reaches that verdict, measured from when it started waiting to the verdict, including the call that produced the verdict (so a gate that decides on its first evaluation records the duration of that call, and a timeout is a `failed` observation of about the timeout), and one `error` observation, with the duration of that call, each time it cannot be evaluated. Polls that leave a gate `pending` and gates skipped for a rollback record nothing. See [gates.md](gates.md#metrics). There are no labels for environment, repository, owner, commit, digest, deployment ID or error text, so the series count stays bounded.
 
-The other labels are fixed sets. Any other value is recorded as `unknown`.
+The other labels are fixed sets. Any other value is recorded as `unknown`, except `event`, where any other webhook event is recorded as `other`.
 
 | Label | Values |
 | --- | --- |
@@ -64,7 +66,8 @@ The other labels are fixed sets. Any other value is recorded as `unknown`.
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
 | `gate` | `ci`, `lock`, `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
-| `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown` |
+| `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown`; webhooks: `processed`, `ignored`, `duplicate`, `rejected`, `unauthorized`, `failed`, `unknown`; poll cycles: `succeeded`, `failed`, `unknown` |
+| `event` | `push`, `check_run`, `check_suite`, `status`, `installation`, `installation_repositories`, `ping`, `other` |
 | `type` | `slack`, `webhook`, `github` (deployment statuses), `unknown` |
 
 ### Histogram buckets

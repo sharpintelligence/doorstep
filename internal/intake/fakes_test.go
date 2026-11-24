@@ -3,6 +3,7 @@ package intake_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/intake"
+	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
 type fakeCommits struct {
@@ -284,22 +286,41 @@ func (f *fakeChecks) lastCall() checksCall {
 type fakeBranches struct {
 	mu    sync.Mutex
 	heads map[string]string
+	errs  map[string]error
 	err   error
 	calls int
+	reads []string
 }
 
 func newFakeBranches() *fakeBranches {
-	return &fakeBranches{heads: map[string]string{}}
+	return &fakeBranches{heads: map[string]string{}, errs: map[string]error{}}
 }
 
 func (f *fakeBranches) BranchHead(_ context.Context, repository, branch string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	key := strings.ToLower(repository) + ":" + branch
+	f.reads = append(f.reads, key)
 	if f.err != nil {
 		return "", f.err
 	}
-	return f.heads[strings.ToLower(repository)+":"+branch], nil
+	if err := f.errs[key]; err != nil {
+		return "", err
+	}
+	return f.heads[key], nil
+}
+
+func (f *fakeBranches) failFor(repository, branch string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errs[strings.ToLower(repository)+":"+branch] = err
+}
+
+func (f *fakeBranches) readKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.reads)
 }
 
 func (f *fakeBranches) set(repository, branch, sha string) {
@@ -331,3 +352,293 @@ func (c *tickingClock) Now() time.Time {
 }
 
 var errBoom = errors.New("boom")
+
+type reevaluation struct {
+	repository string
+	sha        string
+}
+
+type fakeIntake struct {
+	mu            sync.Mutex
+	pushes        []intake.Push
+	reevaluations []reevaluation
+	open          []core.TrackedCommit
+	heads         map[string]string
+	pushErr       error
+	reevaluateErr error
+	openErr       error
+	tracksErr     error
+	ctxErrs       []error
+	openCalls     int
+}
+
+func fakeHeadKey(repository, branch string) string {
+	return strings.ToLower(repository) + ":" + branch
+}
+
+func (f *fakeIntake) HandlePush(ctx context.Context, p intake.Push) ([]intake.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushes = append(f.pushes, p)
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
+	if f.pushErr != nil {
+		return nil, f.pushErr
+	}
+	f.trackLocked(p.Repository, p.Branch, p.SHA)
+	return []intake.Result{{Commit: core.TrackedCommit{Commit: core.Commit{Repository: p.Repository, SHA: p.SHA}}, Enqueued: true}}, nil
+}
+
+func (f *fakeIntake) Reevaluate(ctx context.Context, repository, sha string) ([]intake.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reevaluations = append(f.reevaluations, reevaluation{repository: repository, sha: sha})
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
+	if f.reevaluateErr != nil {
+		return nil, f.reevaluateErr
+	}
+	return nil, nil
+}
+
+func (f *fakeIntake) Open(_ context.Context, limit int) ([]core.TrackedCommit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openCalls++
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return slices.Clone(f.open[:min(limit, len(f.open))]), nil
+}
+
+func (f *fakeIntake) TracksHead(_ context.Context, repository, branch, sha string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.tracksErr != nil {
+		return false, f.tracksErr
+	}
+	return f.heads[fakeHeadKey(repository, branch)] == sha, nil
+}
+
+func (f *fakeIntake) track(repository, branch, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.trackLocked(repository, branch, sha)
+}
+
+func (f *fakeIntake) trackLocked(repository, branch, sha string) {
+	if f.heads == nil {
+		f.heads = map[string]string{}
+	}
+	f.heads[fakeHeadKey(repository, branch)] = sha
+}
+
+func (f *fakeIntake) setOpen(commits ...core.TrackedCommit) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open = commits
+}
+
+func (f *fakeIntake) failPushes(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushErr = err
+}
+
+func (f *fakeIntake) recorded() ([]intake.Push, []reevaluation, []error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.pushes), slices.Clone(f.reevaluations), slices.Clone(f.ctxErrs)
+}
+
+func (f *fakeIntake) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushes, f.reevaluations, f.ctxErrs = nil, nil, nil
+}
+
+type fakeDeliveries struct {
+	mu          sync.Mutex
+	claimed     map[string]string
+	completed   map[string]bool
+	released    []string
+	staleAfter  []time.Duration
+	claimErr    error
+	completeErr error
+	releaseErr  error
+}
+
+func newFakeDeliveries() *fakeDeliveries {
+	return &fakeDeliveries{claimed: map[string]string{}, completed: map[string]bool{}}
+}
+
+func (f *fakeDeliveries) Claim(_ context.Context, id, event string, staleAfter time.Duration) (store.DeliveryClaim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staleAfter = append(f.staleAfter, staleAfter)
+	if f.claimErr != nil {
+		return "", f.claimErr
+	}
+	if _, ok := f.claimed[id]; ok {
+		if f.completed[id] {
+			return store.DeliveryCompleted, nil
+		}
+		return store.DeliveryInProgress, nil
+	}
+	f.claimed[id] = event
+	return store.DeliveryClaimed, nil
+}
+
+func (f *fakeDeliveries) Complete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completeErr != nil {
+		return f.completeErr
+	}
+	f.completed[id] = true
+	return nil
+}
+
+func (f *fakeDeliveries) Release(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.released = append(f.released, id)
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	delete(f.claimed, id)
+	return nil
+}
+
+func (f *fakeDeliveries) state() (map[string]string, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.claimed), slices.Clone(f.released)
+}
+
+func (f *fakeDeliveries) completedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(maps.Keys(f.completed))
+}
+
+type fakeInstallations struct {
+	mu            sync.Mutex
+	installations []int64
+	repositories  []string
+}
+
+func (f *fakeInstallations) EvictInstallation(id int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.installations = append(f.installations, id)
+}
+
+func (f *fakeInstallations) EvictRepository(owner, repo string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repositories = append(f.repositories, owner+"/"+repo)
+	return nil
+}
+
+func (f *fakeInstallations) evicted() ([]int64, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.installations), slices.Clone(f.repositories)
+}
+
+type fakeObserver struct {
+	mu         sync.Mutex
+	deliveries []string
+	cycles     []intake.PollResult
+}
+
+func (f *fakeObserver) WebhookDelivery(event string, result intake.WebhookResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deliveries = append(f.deliveries, event+"/"+string(result))
+}
+
+func (f *fakeObserver) PollCycle(result intake.PollResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cycles = append(f.cycles, result)
+}
+
+func (f *fakeObserver) recorded() ([]string, []intake.PollResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.deliveries), slices.Clone(f.cycles)
+}
+
+type fakeClaims struct {
+	mu        sync.Mutex
+	lease     time.Duration
+	every     time.Duration
+	err       error
+	finishErr error
+	lost      bool
+	calls     int
+	finished  []time.Time
+	refuse    bool
+}
+
+var fakeLease = time.Date(2026, 11, 24, 12, 1, 0, 0, time.UTC)
+
+func (f *fakeClaims) ClaimPoll(_ context.Context, lease time.Duration) (time.Time, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lease = lease
+	if f.err != nil {
+		return time.Time{}, false, f.err
+	}
+	if f.refuse {
+		return time.Time{}, false, nil
+	}
+	return fakeLease, true, nil
+}
+
+func (f *fakeClaims) FinishPoll(ctx context.Context, leasedUntil time.Time, every time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	f.finished = append(f.finished, leasedUntil)
+	f.every = every
+	if f.finishErr != nil {
+		return false, f.finishErr
+	}
+	return !f.lost, nil
+}
+
+func (f *fakeClaims) finishedLeases() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.finished)
+}
+
+func (f *fakeClaims) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+type fakeExpired struct {
+	mu      sync.Mutex
+	calls   []time.Duration
+	deleted int64
+	err     error
+}
+
+func (f *fakeExpired) DeleteBefore(_ context.Context, olderThan time.Duration) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, olderThan)
+	return f.deleted, f.err
+}
+
+func (f *fakeExpired) recorded() []time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}

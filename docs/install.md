@@ -37,6 +37,7 @@ kubectl create namespace doorstep
 kubectl -n doorstep create secret generic doorstep \
   --from-literal=database-url='postgres://doorstep:CHANGE_ME@postgres.example.svc:5432/doorstep?sslmode=verify-full' \
   --from-file=github-app-private-key.pem=./doorstep.private-key.pem \
+  --from-literal=github-webhook-secret="$(openssl rand -hex 32)" \
   --from-literal=slack-webhook-url='https://hooks.slack.com/services/T000/B000/XXXX'
 ```
 
@@ -77,11 +78,12 @@ All keys live in the Secret `doorstep`. Nothing in the base generates or contain
 | --- | --- | --- | --- |
 | `database-url` | `/etc/doorstep/secrets/database-url` | yes | `DOORSTEP_DATABASE_URL_FILE`, set by the base |
 | `github-app-private-key.pem` | `/etc/doorstep/secrets/github-app-private-key.pem` | for GitHub | `github.private_key_file` in `config.yaml` |
+| `github-webhook-secret` | `/etc/doorstep/secrets/github-webhook-secret` | for GitHub webhooks | `github.webhook_secret_file` in `config.yaml`; the same value as the App's webhook secret ([github-app.md](github-app.md#webhooks)). Leave the key and the setting out for a polling-only install |
 | `slack-webhook-url` | `/etc/doorstep/secrets/slack-webhook-url` | for Slack | `webhook_url_file` of a notification target |
 
-Other notification secrets follow the same pattern: add a key to the Secret and reference `/etc/doorstep/secrets/<key>` from its `*_file` setting. The key for the GitHub webhook secret will be documented when the webhook handler lands.
+Other notification secrets follow the same pattern: add a key to the Secret and reference `/etc/doorstep/secrets/<key>` from its `*_file` setting.
 
-Notification secrets and registry credentials are re-read when used, so rotating them needs no restart. The database URL and the GitHub App private key are read once at startup: after changing either, restart the Deployment with `kubectl -n doorstep rollout restart deployment/doorstep`.
+Notification secrets and registry credentials are re-read when used, so rotating them needs no restart. The database URL, the GitHub App private key and the GitHub webhook secret are read once at startup: after changing any of them, restart the Deployment with `kubectl -n doorstep rollout restart deployment/doorstep`.
 
 ## Pinning the image
 
@@ -147,6 +149,8 @@ patches:
                   items:
                     - key: github-app-private-key.pem
                       path: github-app-private-key.pem
+                    - key: github-webhook-secret
+                      path: github-webhook-secret
                     - key: slack-webhook-url
                       path: slack-webhook-url
               - name: database
@@ -222,6 +226,8 @@ spec:
                 port:
                   name: http
 ```
+
+The only path GitHub needs to reach is `POST /webhooks/github`; it authenticates every delivery by its signature, so it is safe to expose without sign-in. To keep the rest of doorstep private, route just that path publicly (`path: /webhooks/github`, `pathType: Exact`) and serve the UI and API on an internal ingress. When GitHub cannot reach doorstep at all, leave the webhook inactive: the poller picks up new commits within `intake.poll_interval` ([configuration.md](configuration.md#intake)).
 
 The base ships no Ingress or NetworkPolicy, because both depend on your controller and CNI.
 

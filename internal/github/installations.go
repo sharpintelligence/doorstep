@@ -86,6 +86,18 @@ func (a *App) lookupInstallation(ctx context.Context, key, owner, repo string) (
 	return installation.ID, nil
 }
 
+func (a *App) EvictInstallation(id int64) {
+	a.forgetInstallation(id)
+}
+
+func (a *App) EvictRepository(owner, repo string) error {
+	if err := validateRepository(owner, repo); err != nil {
+		return err
+	}
+	a.forgetRepository(installationKey(owner, repo))
+	return nil
+}
+
 func (a *App) forgetRepository(key string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

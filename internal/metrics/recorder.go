@@ -19,6 +19,8 @@ type Recorder struct {
 	rollbacks          *prometheus.CounterVec
 	gateDuration       *prometheus.HistogramVec
 	notifications      *prometheus.CounterVec
+	webhookDeliveries  *prometheus.CounterVec
+	pollCycles         *prometheus.CounterVec
 }
 
 func newRecorder() *Recorder {
@@ -50,17 +52,35 @@ func newRecorder() *Recorder {
 			Name:      "notifications_total",
 			Help:      "Notification deliveries, by target type and result.",
 		}, []string{"type", "result"}),
+		webhookDeliveries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "webhook_deliveries_total",
+			Help:      "GitHub webhook deliveries received, by event and result.",
+		}, []string{"event", "result"}),
+		pollCycles: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "intake_poll_cycles_total",
+			Help:      "Intake poll cycles run by this replica, by result.",
+		}, []string{"result"}),
 	}
 	for _, t := range allNotificationTypes {
 		for _, result := range allNotificationResults {
 			r.notifications.WithLabelValues(t.label(), result.label())
 		}
 	}
+	for _, event := range allWebhookEvents {
+		for _, result := range allWebhookResults {
+			r.webhookDeliveries.WithLabelValues(event.label(), result.label())
+		}
+	}
+	for _, result := range allPollResults {
+		r.pollCycles.WithLabelValues(result.label())
+	}
 	return r
 }
 
 func (r *Recorder) collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications}
+	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications, r.webhookDeliveries, r.pollCycles}
 }
 
 func (r *Recorder) DeploymentStarted(app string) {
@@ -81,6 +101,14 @@ func (r *Recorder) GateEvaluated(app string, gate GateKind, phase Phase, result 
 
 func (r *Recorder) NotificationDelivered(t NotificationType, result NotificationResult) {
 	r.notifications.WithLabelValues(t.label(), result.label()).Inc()
+}
+
+func (r *Recorder) WebhookDelivery(event WebhookEvent, result WebhookResult) {
+	r.webhookDeliveries.WithLabelValues(event.label(), result.label()).Inc()
+}
+
+func (r *Recorder) PollCycle(result PollResult) {
+	r.pollCycles.WithLabelValues(result.label()).Inc()
 }
 
 func (r *Recorder) PrimeApp(app string) {

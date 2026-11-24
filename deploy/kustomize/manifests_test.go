@@ -132,6 +132,9 @@ func TestDeploymentEnvironmentNamesAreKnownSettings(t *testing.T) {
 		config.EnvGitHubAppPrivateKey,
 		config.EnvGitHubAppPrivateKeyFile,
 		config.EnvGitHubAPIURL,
+		config.EnvGitHubWebhookSecret,
+		config.EnvGitHubWebhookSecretFile,
+		config.EnvPollInterval,
 	}
 	tests := []struct {
 		name      string

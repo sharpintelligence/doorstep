@@ -126,6 +126,66 @@ func (r NotificationResult) label() string {
 	}
 }
 
+type WebhookEvent string
+
+const (
+	WebhookEventPush                     WebhookEvent = "push"
+	WebhookEventCheckRun                 WebhookEvent = "check_run"
+	WebhookEventCheckSuite               WebhookEvent = "check_suite"
+	WebhookEventStatus                   WebhookEvent = "status"
+	WebhookEventInstallation             WebhookEvent = "installation"
+	WebhookEventInstallationRepositories WebhookEvent = "installation_repositories"
+	WebhookEventPing                     WebhookEvent = "ping"
+	WebhookEventOther                    WebhookEvent = "other"
+)
+
+func (e WebhookEvent) label() string {
+	switch e {
+	case WebhookEventPush, WebhookEventCheckRun, WebhookEventCheckSuite, WebhookEventStatus,
+		WebhookEventInstallation, WebhookEventInstallationRepositories, WebhookEventPing, WebhookEventOther:
+		return string(e)
+	default:
+		return string(WebhookEventOther)
+	}
+}
+
+type WebhookResult string
+
+const (
+	WebhookProcessed    WebhookResult = "processed"
+	WebhookIgnored      WebhookResult = "ignored"
+	WebhookDuplicate    WebhookResult = "duplicate"
+	WebhookInProgress   WebhookResult = "in_progress"
+	WebhookRejected     WebhookResult = "rejected"
+	WebhookUnauthorized WebhookResult = "unauthorized"
+	WebhookFailed       WebhookResult = "failed"
+)
+
+func (r WebhookResult) label() string {
+	switch r {
+	case WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookInProgress, WebhookRejected, WebhookUnauthorized, WebhookFailed:
+		return string(r)
+	default:
+		return unknownLabel
+	}
+}
+
+type PollResult string
+
+const (
+	PollSucceeded PollResult = "succeeded"
+	PollFailed    PollResult = "failed"
+)
+
+func (r PollResult) label() string {
+	switch r {
+	case PollSucceeded, PollFailed:
+		return string(r)
+	default:
+		return unknownLabel
+	}
+}
+
 var (
 	allOutcomes = []Outcome{OutcomeSucceeded, OutcomeFailed, OutcomeRolledBack, OutcomeRollbackFailed, OutcomeCancelled, OutcomeSuperseded}
 	allReasons  = []RollbackReason{RollbackReasonGateFailed, RollbackReasonSyncFailed, RollbackReasonManual}
@@ -135,4 +195,11 @@ var (
 
 	allNotificationTypes   = []NotificationType{NotificationSlack, NotificationWebhook, NotificationGitHub}
 	allNotificationResults = []NotificationResult{NotificationSent, NotificationFailed, NotificationDropped}
+
+	allWebhookEvents = []WebhookEvent{
+		WebhookEventPush, WebhookEventCheckRun, WebhookEventCheckSuite, WebhookEventStatus,
+		WebhookEventInstallation, WebhookEventInstallationRepositories, WebhookEventPing, WebhookEventOther,
+	}
+	allWebhookResults = []WebhookResult{WebhookProcessed, WebhookIgnored, WebhookDuplicate, WebhookInProgress, WebhookRejected, WebhookUnauthorized, WebhookFailed}
+	allPollResults    = []PollResult{PollSucceeded, PollFailed}
 )
