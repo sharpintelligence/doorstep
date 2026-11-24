@@ -104,6 +104,8 @@ Tests that need GitHub never call the real API and need no credentials. `githubt
 
 `internal/cli/engine_integration_test.go` runs the real `serve` against a test database, the GitHub fake (App auth, green checks on the source repository and an in-memory GitOps repository), the registry fake, the Argo CD fake (through `DOORSTEP_KUBECONFIG`) and an `httptest` webhook that records notifications. A small helper moves the fake Application to the newest GitOps commit, so a push webhook runs through every state to `succeeded` without polling waits. Serve tests that configure apps use the same fixture (`newEngineFixture`), because `serve` refuses to start with apps but without the GitHub App and a Kubernetes connection.
 
+`TestMVPDeploysAMergedPullRequestAndRollsBack` (`internal/cli/mvp_acceptance_test.go`) is the MVP acceptance test ([ADR 0021](decisions/0021-mvp-acceptance-evidence.md)): a signed push arrives before CI is green and the image exists, a `check_run` webhook queues the deploy, the lineage is read back through the API, a Slack target receives the messages, and `doorstep rollback` and `doorstep blocks` run through the CLI. With the database variables above exported, run it with `go test -race -count=1 -run TestMVP ./internal/cli/`. The same flow against a real GitHub App, registry and Argo CD is in [mvp-walkthrough.md](mvp-walkthrough.md).
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request); the weekly run executes only `govulncheck`. All jobs run on `ubuntu-24.04`. The `check` job:
