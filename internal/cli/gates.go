@@ -32,7 +32,7 @@ type gateDeps struct {
 type gateRegistrar func(r *gates.Registry, deps gateDeps) error
 
 func gateRegistrars() []gateRegistrar {
-	return []gateRegistrar{registerBuiltinGates}
+	return []gateRegistrar{registerBuiltinGates, registerPrometheusGateFromDeps}
 }
 
 func gateObservers(gateDeps) []gates.Observer {
@@ -46,6 +46,10 @@ func registerBuiltinGates(r *gates.Registry, deps gateDeps) error {
 		Freezes:      deps.locks,
 		Applications: newArgoApplications(deps.watcher, deps.catalog),
 	})
+}
+
+func registerPrometheusGateFromDeps(r *gates.Registry, deps gateDeps) error {
+	return registerPrometheusGate(r, deps.catalog, secretSource{lookupEnv: deps.lookupEnv, readFile: config.ReadSecretFile})
 }
 
 func newGateEvaluator(deps gateDeps) (*gates.Evaluator, error) {
