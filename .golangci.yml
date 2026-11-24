@@ -38,8 +38,8 @@ linters:
         text: "^Function `newRootCommand->newServeCommand->newServeCommand\\$1` should pass the context parameter$"
         linters:
           - contextcheck
-      - path: _test\.go$
-        text: "^G101: Potential hardcoded credentials"
+      - path: (_test\.go|^internal/auth/cookies\.go)$
+        text: "^G124: http.Cookie missing or has insecure Secure"
         linters:
           - gosec
   settings:

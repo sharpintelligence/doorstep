@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/logging"
@@ -23,24 +24,21 @@ func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 		Long:  "Apply pending database migrations and print each applied version. Migrations are forward-only; serve also applies them on start.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
+			cfg, err := resolveDatabaseCommandConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
 			if err != nil {
 				return err
 			}
 			return migrate(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), cfg)
 		},
 	}
-	flags := cmd.PersistentFlags()
-	addConfigFlag(flags, &configFlag)
-	bindLogFlags(flags, &overrides)
-	bindDatabaseFlags(flags, &overrides)
+	bindDatabaseCommandFlags(cmd.PersistentFlags(), &configFlag, &overrides)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Print applied and pending database migrations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := resolveMigrateConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
+			cfg, err := resolveDatabaseCommandConfig(cmd.Flags().Changed, overrides, configFlag, lookupEnv)
 			if err != nil {
 				return err
 			}
@@ -50,7 +48,13 @@ func newMigrateCommand(lookupEnv LookupEnv) *cobra.Command {
 	return cmd
 }
 
-func resolveMigrateConfig(changed func(name string) bool, overrides config.Config, configFlag string, lookupEnv LookupEnv) (config.Config, error) {
+func bindDatabaseCommandFlags(flags *pflag.FlagSet, configFlag *string, overrides *config.Config) {
+	addConfigFlag(flags, configFlag)
+	bindLogFlags(flags, overrides)
+	bindDatabaseFlags(flags, overrides)
+}
+
+func resolveDatabaseCommandConfig(changed func(name string) bool, overrides config.Config, configFlag string, lookupEnv LookupEnv) (config.Config, error) {
 	file, err := loadConfigFile(changed, configFlag, lookupEnv)
 	if err != nil {
 		return config.Config{}, err

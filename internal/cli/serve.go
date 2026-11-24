@@ -15,8 +15,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sharpintelligence/doorstep/internal/api"
+	"github.com/sharpintelligence/doorstep/internal/auth"
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
+	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
@@ -64,7 +66,7 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 	flags.DurationVar(&overrides.Server.ShutdownTimeout, flagShutdownTimeout, defaults.Server.ShutdownTimeout,
 		"time allowed for in-flight requests on shutdown (env "+config.EnvShutdownTimeout+")")
 	flags.StringVar(&overrides.Server.PublicURL, flagPublicURL, defaults.Server.PublicURL,
-		"external base URL of doorstep, used for links in notifications and GitHub deployment statuses; links are left out when empty (env "+config.EnvPublicURL+")")
+		"external base URL of doorstep, used for links in notifications and GitHub deployment statuses, and required for sign-in (https unless loopback); links are left out when empty (env "+config.EnvPublicURL+")")
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
 	addRegistryCredentialsFlag(flags, &overrides.Registry.CredentialsFile)
@@ -84,7 +86,7 @@ func resolveServeConfig(changed func(name string) bool, overrides config.Config,
 		cfg.Registry.CredentialsFile = overrides.Registry.CredentialsFile
 	}
 	catalog := file.Catalog()
-	if err := errors.Join(cfg.Validate(), catalog.Validate()); err != nil {
+	if err := errors.Join(cfg.Validate(), catalog.Validate(), catalog.ValidateWith(cfg)); err != nil {
 		return config.Config{}, config.Catalog{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 	return cfg, catalog, nil
@@ -147,6 +149,17 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	if err != nil {
 		return err
 	}
+	authService, err := newAuthService(cfg, in.catalog.Auth, auth.NewRepository(st), in.lookupEnv, logger)
+	if err != nil {
+		return fmt.Errorf("authentication: %w", err)
+	}
+	var background sync.WaitGroup
+	defer background.Wait()
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	defer stopProbe()
+	probeAuth(probeCtx, &background, logger, authService)
+
+	authenticator := authService.Authenticator()
 	apiHandler := api.New(api.Options{
 		Logger:        logger,
 		History:       st,
@@ -154,13 +167,18 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Apps:          apps,
 		Locks:         locksService,
 		KnownApp:      knownApp(in.catalog),
-		Authenticator: apiAuthenticator(),
+		Authenticator: principalAuthenticator{},
+		Middleware:    authenticator.RequireRole(core.RoleViewer),
 	})
 
 	build := buildinfo.Read()
 	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
-	mainRoutes := map[string]http.Handler{}
 	metricsRoutes := map[string]http.Handler{"GET /metrics": m.Handler()}
+	appRoutes := map[string]http.Handler{api.Prefix: apiHandler}
+	if h := authService.Handler(); h != nil {
+		maps.Copy(appRoutes, h.Routes())
+	}
+	mainRoutes := wrapRoutes(appRoutes, authenticator.Middleware)
 	checks := map[string]server.Check{"postgres": st.Ping}
 	newServer := func(routes map[string]http.Handler) *server.Server {
 		return server.New(server.Options{
@@ -186,7 +204,6 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		func(ctx context.Context) error { return reminder.Run(ctx, locks.SweepInterval) },
 	}
 	if cfg.Server.MetricsListenAddr == "" {
-		logger.WarnContext(ctx, "API disabled; it is served only on the metrics listener until API authentication exists")
 		maps.Copy(mainRoutes, metricsRoutes)
 	} else {
 		metricsLn, err := lc.Listen(ctx, "tcp", cfg.Server.MetricsListenAddr)
@@ -194,7 +211,6 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 			return errors.Join(fmt.Errorf("listen on %s: %w", cfg.Server.MetricsListenAddr, err), ln.Close())
 		}
 		logger.InfoContext(ctx, "metrics listening", slog.String("addr", metricsLn.Addr().String()))
-		metricsRoutes[api.Prefix] = apiHandler
 		metricsServer := newServer(metricsRoutes)
 		runs = append(runs, func(ctx context.Context) error { return metricsServer.Run(ctx, metricsLn) })
 	}
@@ -220,8 +236,17 @@ func newLocks(st *store.Store, cfg config.Locks, logger *slog.Logger) (*locks.Se
 	return service, reminder, nil
 }
 
-func apiAuthenticator() api.Authenticator {
-	return api.RejectAll{}
+type principalAuthenticator struct{}
+
+func (principalAuthenticator) Authenticate(r *http.Request, required core.Role) (string, error) {
+	principal, ok := auth.PrincipalFrom(r.Context())
+	switch {
+	case !ok:
+		return "", api.ErrUnauthenticated
+	case !principal.Allows(required):
+		return "", api.ErrForbidden
+	}
+	return principal.Actor.String(), nil
 }
 
 func knownApp(catalog config.Catalog) api.KnownApp {
@@ -229,6 +254,14 @@ func knownApp(catalog config.Catalog) api.KnownApp {
 		_, ok := catalog.App(app)
 		return ok
 	}
+}
+
+func wrapRoutes(routes map[string]http.Handler, middleware func(http.Handler) http.Handler) map[string]http.Handler {
+	wrapped := make(map[string]http.Handler, len(routes))
+	for pattern, handler := range routes {
+		wrapped[pattern] = middleware(handler)
+	}
+	return wrapped
 }
 
 func runServers(ctx context.Context, runs ...func(context.Context) error) error {

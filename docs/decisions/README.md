@@ -12,6 +12,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0004](0004-freeze-locks.md) | Freeze locks stop new deploys, not recovery | Proposed | 2026-11-23 |
 | [0005](0005-pin-commits-and-trailers.md) | Pin commits, byte-preserving edits and trailers | Accepted | 2026-11-23 |
 | [0006](0006-notifications-are-best-effort.md) | Notifications are best effort | Accepted | 2026-11-23 |
+| [0007](0007-authentication-and-roles.md) | Authentication and roles | Accepted | 2026-11-24 |
 
 ## When to write one
 

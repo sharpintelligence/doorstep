@@ -64,6 +64,11 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Server.ShutdownTimeout = 90 * time.Second },
 		},
 		{
+			name: "public url",
+			env:  map[string]string{EnvPublicURL: "https://deploy.example.com"},
+			want: func(c *Config) { c.Server.PublicURL = "https://deploy.example.com" },
+		},
+		{
 			name: "shutdown delay",
 			env:  map[string]string{EnvShutdownDelay: "0s"},
 			want: func(c *Config) { c.Server.ShutdownDelay = 0 },

@@ -1,6 +1,6 @@
 # Database
 
-Postgres holds doorstep's operational state: the deploy queue, locks, deployment history, gate results and the commits waiting for CI. Git remains the source of truth for what should run (see [ADR 0001](decisions/0001-go-and-core-design.md), decision 3); nothing in the cluster is ever reconciled from this database.
+Postgres holds doorstep's operational state: the deploy queue, locks, deployment history, gate results, API tokens, sign-in sessions and the audit log. Git remains the source of truth for what should run (see [ADR 0001](decisions/0001-go-and-core-design.md), decision 3); nothing in the cluster is ever reconciled from this database.
 
 The code lives in `internal/store` (pgx pool, transactions, migrations and repositories) with shared domain types in `internal/core`.
 
@@ -54,7 +54,7 @@ One row per deployment request, keyed by a store-assigned `id` (`core.Deployment
 | `kind` | `deploy` or `rollback` |
 | `state` | one of the states in [architecture.md](architecture.md#state-machine-and-concurrency) |
 | `source` | `webhook`, `poll`, `api`, `cli` or `system` |
-| `requested_by` | free-form actor |
+| `requested_by` | the requesting actor as `core.Actor.String()`, such as `user:alice` or `token:ci-blog` |
 | `source_repository`, `commit_sha` | app repository commit; the SHA must be 40 lowercase hex characters |
 | `image_repository`, `image_tag` | requested image (tags are the full commit SHA by convention) |
 | `image_digest` | resolved digest; `sha256:` and 64 lowercase hex characters, or null until resolved |
@@ -152,6 +152,34 @@ A commit is open while both `enqueued_at` and `superseded_by_id` are null. Only 
 - **Tracking and supersession.** `TrackCommit(ctx, commit, isHead)` locks the app's `apps` row (`FOR NO KEY UPDATE`) and calls `isHead` while holding it. If the commit is not the branch head it returns `stale` without writing. Otherwise it inserts the commit (`created`), reopens a superseded row (`reopened`) or finds the existing one (`existing`), and sets `superseded_by_id` on every other open commit of the app, all in one transaction. Pushes for one app are serialised and each sees the current head, so the branch head always wins regardless of the order in which pushes are delivered.
 - **Settlement.** `SettleTrackedCommit(ctx, id, evaluation, enqueue)` locks the app row and then the tracked row and does nothing for a closed commit. It saves `checks_state`, `checks` and `evaluated_at` only when `evaluated_at` is null or older than the evaluation's read time, so an older snapshot never overwrites a newer one. When the stored state is then `success`, it calls `enqueue` with a store bound to the same transaction and stores the deployment id and `enqueued_at`. The evaluation, the deployment, its queue entry and the link commit together or not at all, so concurrent settlements create exactly one deployment and never deploy on a stale snapshot. Locking the app row first, in the same order as `TrackCommit`, keeps a push and a settlement from deadlocking; whichever commits first wins, and the other sees the commit closed.
 - **Open commits.** `OpenTrackedCommits(ctx, followed, limit)` lists open commits of the given app, repository (case-insensitive) and branch triples, least recently evaluated first, so rows of apps that are no longer configured never take the poller's slots.
+
+### `api_tokens`
+
+One row per API token ([authentication.md](authentication.md#api-tokens)). `name` is unique and matches `^[a-z0-9][a-z0-9._-]{0,62}$`; `token_hash` is the 32-byte SHA-256 of the token and unique, and the token itself is never stored. `role` is a `core.Role`. `created_by` is the creating actor (`cli:root`). `expires_at` is null for tokens that never expire; `last_used_at` is updated at most once a minute; `revoked_at` marks a revoked token, whose row is kept so its name cannot be reused. Lookup is an equality match on `token_hash` that also requires `revoked_at IS NULL` and an unexpired `expires_at`.
+
+### `auth_sessions`
+
+One row per signed-in browser session. `token_hash` is the 32-byte SHA-256 of the session cookie and unique. The identity snapshot is `provider` (`oidc` or `github`), `subject` (the provider's stable ID), `username`, `name` and `email`, and `role` is the role decided at sign-in. `expires_at` is set from `auth.session_ttl` at creation and never extended; expired rows are ignored by lookups and deleted when a new sign-in starts. Deleting a row signs that session out immediately.
+
+### `auth_logins`
+
+One row per sign-in in progress, keyed by the 32-byte SHA-256 of its `state` (`state_hash`), with the `nonce`, the PKCE `pkce_verifier`, the path-only `return_to` and an `expires_at` 10 minutes after creation. The callback consumes it with `DELETE ... RETURNING`, so each state works once.
+
+### `audit_log`
+
+Who asked doorstep to do what ([authentication.md](authentication.md#audit-log)):
+
+| Column | Notes |
+| --- | --- |
+| `occurred_at` | `now()` at insert |
+| `actor_kind`, `actor_id`, `actor_name` | `core.Actor`: kind `user`, `token`, `cli` or `system`; `actor_id` is empty only for `system` |
+| `actor_role` | the actor's `core.Role` when known, else null |
+| `action` | dot-separated lowercase words (`^[a-z_]+(\.[a-z_]+)+$`), such as `deploy.request`; the known actions are constants in `core` |
+| `app`, `environment` | the target, both set or both null |
+| `deployment_id` | the deployment the action concerns, if any |
+| `detail` | JSON object with action-specific details |
+
+There are deliberately no foreign keys, so audit rows outlive the apps and deployments they mention. Indexes serve the newest-first listing (`occurred_at DESC, id DESC`), a target's activity (`app, environment, id DESC`), an actor's activity (`actor_kind, actor_id, id DESC`) and lookups by `deployment_id`. Unlike `deployment_events`, append-only is enforced by triggers: `audit_log_reject_change()` raises on every `UPDATE`, `DELETE` and `TRUNCATE`. A retention policy, if one is ever needed, is a deliberate migration that replaces the trigger.
 
 ## Transactions
 

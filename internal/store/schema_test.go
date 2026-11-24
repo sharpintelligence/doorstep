@@ -107,6 +107,60 @@ func TestSchemaAcceptsEveryCoreValue(t *testing.T) {
 			t.Errorf("event state %s rejected: %v", s, err)
 		}
 	}
+	for _, r := range core.Roles() {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES ($1, sha256($3::bytea), $2, 'cli:root')", "token-"+string(r), r, "token-"+string(r)); err != nil {
+			t.Errorf("token role %s rejected: %v", r, err)
+		}
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO auth_sessions (token_hash, provider, subject, username, role, expires_at) VALUES (sha256($1::bytea), 'github', '1', 'octocat', $2, now())", "session-"+string(r), r); err != nil {
+			t.Errorf("session role %s rejected: %v", r, err)
+		}
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO audit_log (actor_kind, actor_id, actor_role, action) VALUES ('user', 'octocat', $1, 'auth.login')", r); err != nil {
+			t.Errorf("audit role %s rejected: %v", r, err)
+		}
+	}
+	for _, k := range core.ActorKinds() {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO audit_log (actor_kind, actor_id, action) VALUES ($1, 'x', 'auth.login')", k); err != nil {
+			t.Errorf("actor kind %s rejected: %v", k, err)
+		}
+	}
+	for _, a := range core.AuditActions() {
+		if err := store.ExecSQL(t.Context(), st, "INSERT INTO audit_log (actor_kind, action) VALUES ('system', $1)", a); err != nil {
+			t.Errorf("audit action %s rejected: %v", a, err)
+		}
+	}
+}
+
+func TestSchemaRejectsInvalidAuthRows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sql        string
+		constraint string
+	}{
+		{name: "unknown token role", sql: "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES ('ci', sha256('x'), 'root', 'cli:root')", constraint: "api_tokens_role_check"},
+		{name: "short token hash", sql: "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES ('ci', 'abc'::bytea, 'viewer', 'cli:root')", constraint: "api_tokens_token_hash_check"},
+		{name: "uppercase token name", sql: "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES ('CI', sha256('x'), 'viewer', 'cli:root')", constraint: "api_tokens_name_check"},
+		{name: "token name too long", sql: "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES (repeat('a', 64), sha256('x'), 'viewer', 'cli:root')", constraint: "api_tokens_name_check"},
+		{name: "blank token creator", sql: "INSERT INTO api_tokens (name, token_hash, role, created_by) VALUES ('ci', sha256('x'), 'viewer', ' ')", constraint: "api_tokens_created_by_check"},
+		{name: "unknown session role", sql: "INSERT INTO auth_sessions (token_hash, provider, subject, username, role, expires_at) VALUES (sha256('x'), 'oidc', 's', 'u', 'root', now())", constraint: "auth_sessions_role_check"},
+		{name: "long session hash", sql: "INSERT INTO auth_sessions (token_hash, provider, subject, username, role, expires_at) VALUES (sha512('x'), 'oidc', 's', 'u', 'viewer', now())", constraint: "auth_sessions_token_hash_check"},
+		{name: "short login state", sql: "INSERT INTO auth_logins (state_hash, nonce, pkce_verifier, return_to, expires_at) VALUES ('x'::bytea, 'n', 'v', '/', now())", constraint: "auth_logins_state_hash_check"},
+		{name: "unknown actor kind", sql: "INSERT INTO audit_log (actor_kind, action) VALUES ('robot', 'auth.login')", constraint: "audit_log_actor_kind_check"},
+		{name: "unknown actor role", sql: "INSERT INTO audit_log (actor_kind, actor_role, action) VALUES ('system', 'root', 'auth.login')", constraint: "audit_log_actor_role_check"},
+		{name: "action without dot", sql: "INSERT INTO audit_log (actor_kind, action) VALUES ('system', 'login')", constraint: "audit_log_action_check"},
+		{name: "uppercase action", sql: "INSERT INTO audit_log (actor_kind, action) VALUES ('system', 'Auth.login')", constraint: "audit_log_action_check"},
+		{name: "action with digit", sql: "INSERT INTO audit_log (actor_kind, action) VALUES ('system', 'auth.login2')", constraint: "audit_log_action_check"},
+		{name: "app without environment", sql: "INSERT INTO audit_log (actor_kind, action, app) VALUES ('system', 'lock.acquire', 'web')", constraint: "audit_log_target_check"},
+		{name: "detail array", sql: "INSERT INTO audit_log (actor_kind, action, detail) VALUES ('system', 'lock.acquire', '[]')", constraint: "audit_log_detail_check"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			assertConstraint(t, store.ExecSQL(t.Context(), st, tt.sql), tt.constraint)
+		})
+	}
 }
 
 func TestSchemaRejectsInvalidDeployments(t *testing.T) {

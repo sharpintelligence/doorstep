@@ -96,7 +96,8 @@ func newConfigValidateCommand(lookupEnv LookupEnv) *cobra.Command {
 				return err
 			}
 			catalog := file.Catalog()
-			if err := errors.Join(file.Apply(config.Default()).ValidateSettings(), catalog.Validate()); err != nil {
+			settings := file.Apply(config.Default())
+			if err := errors.Join(settings.ValidateSettings(), catalog.Validate(), catalog.ValidateWith(settings)); err != nil {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "ok: %d apps, %d notification targets\n",

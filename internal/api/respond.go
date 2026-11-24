@@ -16,6 +16,7 @@ const (
 
 	codeInvalidRequest       = "invalid_request"
 	codeUnauthorized         = "unauthorized"
+	codeForbidden            = "forbidden"
 	codeNotFound             = "not_found"
 	codeMethodNotAllowed     = "method_not_allowed"
 	codeLocked               = "locked"

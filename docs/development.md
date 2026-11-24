@@ -66,6 +66,19 @@ bin/doorstep migrate status
 bin/doorstep serve
 ```
 
+## Signing in locally
+
+Sign-in needs a public URL and an identity provider. On a laptop, `http` is allowed for a loopback public URL, and the cookies are then named without the `__Host-` prefix and without `Secure`:
+
+```sh
+export DOORSTEP_PUBLIC_URL=http://localhost:8080
+bin/doorstep serve --config dev.yaml
+```
+
+with an `auth` section in `dev.yaml` pointing at a local issuer (Dex, or a Keycloak or Authentik container, also on loopback `http`) or at a GitHub OAuth App whose callback URL is `http://localhost:8080/auth/callback`, and `default_role: admin` so any account that signs in gets full access. See [authentication.md](authentication.md). For API access without a provider, create a token with `bin/doorstep token create --name dev --role admin` and send it as `Authorization: Bearer <token>`.
+
+Tests never contact a real identity provider: `internal/auth` tests run a fake OIDC issuer on `httptest` (discovery, JWKS with a generated RSA key, token and UserInfo endpoints) and a fake GitHub.
+
 ## GitHub in tests
 
 Tests that need GitHub never call the real API and need no credentials. `githubtest.NewServer(t)` (in `internal/github/githubtest`) starts a fake API with a freshly generated App key: it verifies App JWTs, serves installation lookup and token minting (`Install`, `Suspend`, `Uninstall`, call counters, an injectable clock) and authenticates extra handlers registered with `Handle` by installation token. Point `github.Options.BaseURL` at its `URL`, using its `AppID` and `PrivateKey`.

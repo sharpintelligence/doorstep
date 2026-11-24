@@ -64,11 +64,7 @@ func New(opts Options) (*App, error) {
 	if err := checkKeySize(opts.PrivateKey); err != nil {
 		return nil, err
 	}
-	rawBaseURL := opts.BaseURL
-	if rawBaseURL == "" {
-		rawBaseURL = DefaultBaseURL
-	}
-	baseURL, err := ParseBaseURL(rawBaseURL)
+	baseURL, err := ParseBaseURL(orDefaultBaseURL(opts.BaseURL))
 	if err != nil {
 		return nil, err
 	}

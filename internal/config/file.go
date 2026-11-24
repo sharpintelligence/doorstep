@@ -22,6 +22,7 @@ type File struct {
 	GitHub        FileGitHub     `yaml:"github"`
 	Registry      FileRegistry   `yaml:"registry"`
 	Locks         FileLocks      `yaml:"locks"`
+	Auth          Auth           `yaml:"auth"`
 	Notifications []Notification `yaml:"notifications"`
 	Apps          []App          `yaml:"apps"`
 }
@@ -132,7 +133,7 @@ func (f File) Apply(base Config) Config {
 }
 
 func (f File) Catalog() Catalog {
-	c := Catalog{Notifications: slices.Clone(f.Notifications)}
+	c := Catalog{Notifications: slices.Clone(f.Notifications), Auth: f.Auth.withDefaults()}
 	for i := range c.Notifications {
 		c.Notifications[i].Events = slices.Clone(c.Notifications[i].Events)
 	}

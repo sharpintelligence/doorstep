@@ -2,7 +2,7 @@
 
 doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mounted once by `serve`.
 
-> **Metrics listener only, for now.** API authentication is being built separately. Until it is merged, the API is mounted only on the metrics listener (`--metrics-listen-addr`, default `:9090`) and never on the main listener, which receives GitHub webhooks and is usually reachable from the internet. When the metrics address is empty the API is not served at all and `serve` logs a warning. The queue shows commit SHAs, GitHub logins and deploy cadence, so keep the metrics listener on a private network.
+> **Authentication.** The API is mounted on the main listener and every request must authenticate, with an API token (`Authorization: Bearer dsp_...`) or a signed-in session cookie; see [authentication.md](authentication.md). Reading needs the `viewer` role. Taking or releasing a freeze lock needs `deployer`. A missing or invalid credential answers `401` with `WWW-Authenticate: Bearer`, and an insufficient role answers `403`. The metrics listener does not serve the API.
 
 ## Conventions
 
@@ -17,7 +17,8 @@ doorstep's JSON API lives under `/api/v1/`. It is built by `internal/api` and mo
   | Status | Code | When |
   | --- | --- | --- |
   | 400 | `invalid_request` | malformed or invalid request body |
-  | 401 | `unauthorized` | lock endpoints without valid credentials |
+  | 401 | `unauthorized` | missing or invalid credentials |
+  | 403 | `forbidden` | the caller's role does not allow the request |
   | 404 | `not_found` | unknown resource or unknown API path |
   | 405 | `method_not_allowed` | wrong method; the `Allow` header lists the right ones |
   | 409 | `locked` | the app or the global scope is already frozen |
@@ -187,4 +188,4 @@ Optional fields and empty strings are omitted. `gitops` and `argocd` are always 
 
 ## Extending the API
 
-Each resource registers its routes in its own file (`queue.go` has `registerQueue`) with full-path `ServeMux` patterns under `api.Prefix`, and depends on small interfaces declared next to it, so handlers are tested with fakes and without Postgres. Shared helpers (`writeJSON`, `writeError`, `methodNotAllowed`) are in `respond.go`. `api.Options.Middleware` wraps the whole API in one place; authentication plugs in there.
+Each resource registers its routes in its own file (`queue.go` has `registerQueue`) with full-path `ServeMux` patterns under `api.Prefix`, and depends on small interfaces declared next to it, so handlers are tested with fakes and without Postgres. Shared helpers (`writeJSON`, `writeError`, `methodNotAllowed`) are in `respond.go`. `api.Options.Middleware` wraps the whole API in one place; `serve` applies `RequireRole(viewer)` there, and routes that change state ask `api.Authenticator` for a higher role.

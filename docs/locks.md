@@ -62,7 +62,7 @@ Independently of notifications, every change is written to the append-only `lock
 
 ## API
 
-All lock endpoints are under `/api/v1`, are served on the metrics listener only until API authentication exists (see [api.md](api.md)), and require authentication: `Authorization: Bearer <token>`. A missing or rejected token answers `401` with `WWW-Authenticate: Bearer`. Responses are JSON; errors use one envelope:
+All lock endpoints are under `/api/v1`, are served on the main listener (see [api.md](api.md)) and require authentication: `Authorization: Bearer <token>`. Listing locks needs the `viewer` role; locking and unlocking need `deployer`. A missing or rejected token answers `401` with `WWW-Authenticate: Bearer`, and a role that is too low answers `403` with code `forbidden`. Responses are JSON; errors use one envelope:
 
 ```json
 {"error": {"code": "not_found", "message": "blog is not locked"}}
@@ -126,7 +126,7 @@ Lists live freezes, the global one first, then apps by name:
 
 ### Authentication
 
-The API authenticates every request through the `api.Authenticator` port. API tokens are not issued yet; until they are, `serve` wires an authenticator that rejects every request, so **the lock endpoints answer `401` and locks cannot yet be taken or released through a running server** (the CLI and the API are complete and tested against an in-process server). The token work replaces that one seam (`apiAuthenticator` in `internal/cli/serve.go`). There is no web UI for locks yet either; the UI work adds lock and unlock controls on top of this API.
+The API authenticates through the `api.Authenticator` port, which `serve` implements over the principal that the authentication middleware resolved from an API token or session ([authentication.md](authentication.md)). The principal's actor string, such as `token:ci-blog` or `user:alice`, becomes the lock owner. Create a token with `doorstep token create --name ci --role deployer`.
 
 ## CLI
 

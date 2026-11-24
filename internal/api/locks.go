@@ -44,13 +44,13 @@ const (
 )
 
 func (a *api) registerLocks(mux *http.ServeMux) {
-	mux.Handle("POST "+appLockPath, a.authenticated(a.lockApp))
-	mux.Handle("DELETE "+appLockPath, a.authenticated(a.unlockApp))
+	mux.Handle("POST "+appLockPath, a.authenticated(core.RoleDeployer, a.lockApp))
+	mux.Handle("DELETE "+appLockPath, a.authenticated(core.RoleDeployer, a.unlockApp))
 	mux.HandleFunc(appLockPath, methodNotAllowed(http.MethodPost, http.MethodDelete))
-	mux.Handle("POST "+lockPath, a.authenticated(a.lockGlobal))
-	mux.Handle("DELETE "+lockPath, a.authenticated(a.unlockGlobal))
+	mux.Handle("POST "+lockPath, a.authenticated(core.RoleDeployer, a.lockGlobal))
+	mux.Handle("DELETE "+lockPath, a.authenticated(core.RoleDeployer, a.unlockGlobal))
 	mux.HandleFunc(lockPath, methodNotAllowed(http.MethodPost, http.MethodDelete))
-	mux.Handle("GET "+locksPath, a.authenticated(a.listLocks))
+	mux.Handle("GET "+locksPath, a.authenticated(core.RoleViewer, a.listLocks))
 	mux.HandleFunc(locksPath, methodNotAllowed(http.MethodGet, http.MethodHead))
 }
 

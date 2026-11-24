@@ -29,7 +29,7 @@ var (
 
 type fakeAuth struct{}
 
-func (fakeAuth) Authenticate(r *http.Request) (string, error) {
+func (fakeAuth) Authenticate(r *http.Request, _ core.Role) (string, error) {
 	if r.Header.Get("Authorization") == goodToken {
 		return "alice", nil
 	}
@@ -38,7 +38,7 @@ func (fakeAuth) Authenticate(r *http.Request) (string, error) {
 
 type emptyActorAuth struct{}
 
-func (emptyActorAuth) Authenticate(*http.Request) (string, error) { return "", nil }
+func (emptyActorAuth) Authenticate(*http.Request, core.Role) (string, error) { return "", nil }
 
 type fakeLocks struct {
 	mu        sync.Mutex
@@ -230,6 +230,59 @@ func TestAuthentication(t *testing.T) {
 			}
 			if len(locks.lockReqs) != 0 || len(locks.unlocks) != 0 {
 				t.Errorf("unauthenticated requests reached the service: %v %v", locks.lockReqs, locks.unlocks)
+			}
+		})
+	}
+}
+
+type roleAuth struct{ role core.Role }
+
+func (a roleAuth) Authenticate(_ *http.Request, required core.Role) (string, error) {
+	if !a.role.Allows(required) {
+		return "", ErrForbidden
+	}
+	return "alice", nil
+}
+
+func TestAuthorization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		role       core.Role
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{name: "viewer lists locks", role: core.RoleViewer, method: http.MethodGet, path: "/api/v1/locks", wantStatus: http.StatusOK},
+		{name: "viewer cannot lock an app", role: core.RoleViewer, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusForbidden},
+		{name: "viewer cannot unlock an app", role: core.RoleViewer, method: http.MethodDelete, path: "/api/v1/apps/web/lock", wantStatus: http.StatusForbidden},
+		{name: "viewer cannot lock globally", role: core.RoleViewer, method: http.MethodPost, path: "/api/v1/lock", body: `{"reason":"r"}`, wantStatus: http.StatusForbidden},
+		{name: "viewer cannot unlock globally", role: core.RoleViewer, method: http.MethodDelete, path: "/api/v1/lock", wantStatus: http.StatusForbidden},
+		{name: "deployer locks an app", role: core.RoleDeployer, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusCreated},
+		{name: "admin locks an app", role: core.RoleAdmin, method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`, wantStatus: http.StatusCreated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			locks := &fakeLocks{}
+			h := newHandler(t, locks, roleAuth{role: tt.role}, io.Discard)
+			r := httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, strings.NewReader(tt.body))
+			r.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("%s %s = %d, want %d: %s", tt.method, tt.path, rec.Code, tt.wantStatus, rec.Body)
+			}
+			if tt.wantStatus != http.StatusForbidden {
+				return
+			}
+			if code := errorCode(t, rec); code != "forbidden" {
+				t.Errorf("error code = %q, want forbidden", code)
+			}
+			if len(locks.lockReqs) != 0 || len(locks.unlocks) != 0 {
+				t.Errorf("forbidden request reached the service: %v %v", locks.lockReqs, locks.unlocks)
 			}
 		})
 	}

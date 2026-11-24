@@ -337,7 +337,7 @@ func TestFileApply(t *testing.T) {
 		{
 			name: "all settings",
 			file: File{
-				Server:   FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second)},
+				Server:   FileServer{ListenAddr: strPtr("127.0.0.1:1"), MetricsListenAddr: strPtr("127.0.0.1:2"), ShutdownDelay: durPtr(time.Second), ShutdownTimeout: durPtr(2 * time.Second), PublicURL: strPtr("https://deploy.example.com")},
 				Log:      FileLog{Level: strPtr("warn"), Format: strPtr("text")},
 				Database: FileDatabase{URLFile: strPtr("/secrets/db")},
 				GitHub:   FileGitHub{AppID: strPtr("42"), PrivateKeyFile: strPtr("/secrets/key.pem"), APIURL: strPtr("https://ghe.example.com/api/v3")},
@@ -345,13 +345,23 @@ func TestFileApply(t *testing.T) {
 				Locks:    FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
 			},
 			want: func(c *Config) {
-				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second}
+				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second, PublicURL: "https://deploy.example.com"}
 				c.Log = Log{Level: "warn", Format: "text"}
 				c.Database = Database{URLFile: "/secrets/db"}
 				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3"}
 				c.Registry = Registry{CredentialsFile: "/secrets/config.json"}
 				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
 			},
+		},
+		{
+			name: "public url",
+			file: File{Server: FileServer{PublicURL: strPtr("https://deploy.example.com")}},
+			want: func(c *Config) { c.Server.PublicURL = "https://deploy.example.com" },
+		},
+		{
+			name: "auth does not change runtime settings",
+			file: File{Auth: Auth{GitHub: &GitHubLogin{ClientID: "x"}}},
+			want: func(*Config) {},
 		},
 		{
 			name: "apps do not change runtime settings",

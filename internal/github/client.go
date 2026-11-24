@@ -51,21 +51,26 @@ func newRequest(ctx context.Context, baseURL *url.URL, method, path string, in a
 }
 
 func send(client *http.Client, req *http.Request, out any) error {
+	_, err := sendForHeader(client, req, out)
+	return err
+}
+
+func sendForHeader(client *http.Client, req *http.Request, out any) (http.Header, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body := io.LimitReader(resp.Body, maxResponseBytes)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return newAPIError(resp, body)
+		return nil, newAPIError(resp, body)
 	}
 	if out == nil || resp.StatusCode == http.StatusNoContent {
 		_, _ = io.Copy(io.Discard, body)
-		return nil
+		return resp.Header, nil
 	}
 	if err := json.NewDecoder(body).Decode(out); err != nil {
-		return fmt.Errorf("decode %s %s response: %w", req.Method, req.URL.Path, err)
+		return nil, fmt.Errorf("decode %s %s response: %w", req.Method, req.URL.Path, err)
 	}
-	return nil
+	return resp.Header, nil
 }

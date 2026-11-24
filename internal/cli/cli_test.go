@@ -1067,21 +1067,12 @@ func TestRunServe(t *testing.T) {
 			if code, body := get(t, "http://"+addr+"/readyz"); code != http.StatusOK || !strings.Contains(body, `"postgres":"ok"`) {
 				t.Errorf("GET /readyz = %d %q", code, body)
 			}
-			internalAddr := waitForLogAddr(t, &stderr, done, "metrics listening")
-			wantQueue := http.StatusNotFound
-			if tt.wantApps > 0 {
-				wantQueue = http.StatusOK
+			internalAddr := waitForMetricsAddr(t, &stderr, done)
+			if code, body := get(t, "http://"+addr+"/api/v1/apps/blog/queue"); code != http.StatusUnauthorized || !strings.Contains(body, "unauthenticated") {
+				t.Errorf("GET /api/v1/apps/blog/queue without a token = %d %q, want 401", code, body)
 			}
-			if code, body := get(t, "http://"+internalAddr+"/api/v1/apps/blog/queue"); code != wantQueue {
-				t.Errorf("GET /api/v1/apps/blog/queue = %d %q, want %d", code, body, wantQueue)
-			} else if code == http.StatusOK && body != `{"app":"blog","depth":0,"entries":[]}`+"\n" {
-				t.Errorf("GET /api/v1/apps/blog/queue body = %q", body)
-			}
-			if code, body := get(t, "http://"+internalAddr+"/api/v1/apps/unknown/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
-				t.Errorf("GET /api/v1/apps/unknown/queue = %d %q", code, body)
-			}
-			if code, body := get(t, "http://"+addr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
-				t.Errorf("main listener serves the API: GET /api/v1/apps/blog/queue = %d %q", code, body)
+			if code, body := get(t, "http://"+internalAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("metrics listener serves the API: GET /api/v1/apps/blog/queue = %d %q", code, body)
 			}
 
 			cancel()
@@ -1194,7 +1185,7 @@ func TestRunServeMetrics(t *testing.T) {
 			mainAddr := waitForListening(t, &stderr, done)
 			metricsAddr := mainAddr
 			if tt.wantSeparate {
-				metricsAddr = waitForLogAddr(t, &stderr, done, "metrics listening")
+				metricsAddr = waitForMetricsAddr(t, &stderr, done)
 				if metricsAddr == mainAddr {
 					t.Fatalf("metrics address equals main address %s", mainAddr)
 				}
@@ -1202,12 +1193,12 @@ func TestRunServeMetrics(t *testing.T) {
 				if code != http.StatusNotFound {
 					t.Errorf("main GET /metrics = %d, want %d", code, http.StatusNotFound)
 				}
-				if code, body := get(t, "http://"+metricsAddr+"/api/v1/locks"); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"unauthorized"`) {
-					t.Errorf("metrics GET /api/v1/locks = %d %q, want 401 until API authentication is wired", code, body)
-				}
 			}
-			if code, body := get(t, "http://"+mainAddr+"/api/v1/locks"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
-				t.Errorf("main GET /api/v1/locks = %d %q, want the API unmounted", code, body)
+			if code, body := get(t, "http://"+mainAddr+"/api/v1/locks"); code != http.StatusUnauthorized || !strings.Contains(body, "unauthenticated") {
+				t.Errorf("main GET /api/v1/locks = %d %q, want 401", code, body)
+			}
+			if code, body := get(t, "http://"+metricsAddr+"/api/v1/locks"); tt.wantSeparate && (code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`)) {
+				t.Errorf("metrics GET /api/v1/locks = %d %q, want the API unmounted", code, body)
 			}
 
 			code, body := get(t, "http://"+metricsAddr+"/metrics")
@@ -1217,21 +1208,6 @@ func TestRunServeMetrics(t *testing.T) {
 			if !strings.Contains(body, "\ndoorstep_queue_depth 0\n") {
 				t.Errorf("GET /metrics does not report an empty queue: %.2000q", body)
 			}
-			if code, body := get(t, "http://"+mainAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
-				t.Errorf("main GET /api/v1/apps/blog/queue = %d %q, want the API unmounted", code, body)
-			}
-			apiLogged := hasMessage(parseLogs(t, stderr.String()), "API disabled; it is served only on the metrics listener until API authentication exists")
-			if tt.wantSeparate {
-				if code, body := get(t, "http://"+metricsAddr+"/api/v1/apps/blog/queue"); code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
-					t.Errorf("metrics GET /api/v1/apps/blog/queue = %d %q, want a JSON 404 from the API", code, body)
-				}
-				if apiLogged {
-					t.Errorf("logs report the API disabled with a separate metrics listener: %s", stderr.String())
-				}
-			} else if !apiLogged {
-				t.Errorf("logs do not report the API disabled: %s", stderr.String())
-			}
-
 			cancel()
 			select {
 			case code := <-done:
@@ -1590,12 +1566,12 @@ func hasMessage(entries []map[string]any, msg string) bool {
 	return findMessage(entries, msg) != nil
 }
 
-func waitForLogAddr(t *testing.T, stderr *lockedBuffer, done <-chan int, msg string) string {
+func waitForMetricsAddr(t *testing.T, stderr *lockedBuffer, done <-chan int) string {
 	t.Helper()
-	entry := waitForLog(t, stderr, done, msg)
+	entry := waitForLog(t, stderr, done, "metrics listening")
 	addr, ok := entry["addr"].(string)
 	if !ok {
-		t.Fatalf("%q log has no addr: %v", msg, entry)
+		t.Fatalf("metrics listening log has no addr: %v", entry)
 	}
 	return addr
 }

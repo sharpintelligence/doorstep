@@ -12,15 +12,18 @@ import (
 
 const Prefix = "/api/v1/"
 
-var ErrUnauthenticated = errors.New("unauthenticated")
+var (
+	ErrUnauthenticated = errors.New("unauthenticated")
+	ErrForbidden       = errors.New("forbidden")
+)
 
 type Authenticator interface {
-	Authenticate(r *http.Request) (actor string, err error)
+	Authenticate(r *http.Request, required core.Role) (actor string, err error)
 }
 
 type RejectAll struct{}
 
-func (RejectAll) Authenticate(*http.Request) (string, error) {
+func (RejectAll) Authenticate(*http.Request, core.Role) (string, error) {
 	return "", ErrUnauthenticated
 }
 
@@ -93,9 +96,13 @@ func New(opts Options) http.Handler {
 	return handler
 }
 
-func (a *api) authenticated(next func(w http.ResponseWriter, r *http.Request, actor string)) http.Handler {
+func (a *api) authenticated(required core.Role, next func(w http.ResponseWriter, r *http.Request, actor string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actor, err := a.auth.Authenticate(r)
+		actor, err := a.auth.Authenticate(r, required)
+		if errors.Is(err, ErrForbidden) {
+			writeError(w, http.StatusForbidden, codeForbidden, "your role does not allow this")
+			return
+		}
 		if err != nil || actor == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="doorstep"`)
 			writeError(w, http.StatusUnauthorized, codeUnauthorized, "authentication required")
