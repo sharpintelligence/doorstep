@@ -88,7 +88,7 @@ func deploymentDuration(d *core.Deployment) (time.Duration, bool) {
 }
 
 func describeTarget(t core.Target) string {
-	if t.Environment == "" || t.Environment == t.App {
+	if t.Environment == "" || t.Environment == core.DefaultEnvironment || t.Environment == t.App {
 		return t.App
 	}
 	return t.App + " (" + t.Environment + ")"
