@@ -51,8 +51,7 @@ func NewReminder(opts ReminderOptions) (*Reminder, error) {
 func (r *Reminder) RunOnce(ctx context.Context) error {
 	expired, expireErr := r.repo.DeleteExpiredFreezes(ctx)
 	for _, lock := range expired {
-		r.logger.InfoContext(ctx, "lock expired", slog.String("scope", lock.Scope()), slog.String("owner", lock.Owner))
-		notify(ctx, r.notifier, r.logger, core.LockEvent{Action: core.LockActionExpired, Lock: lock, OccurredAt: r.now()})
+		notifyExpired(ctx, r.notifier, r.logger, lock, r.now())
 	}
 	if r.every == 0 {
 		return expireErr
@@ -62,6 +61,7 @@ func (r *Reminder) RunOnce(ctx context.Context) error {
 		r.logger.InfoContext(ctx, "lock still held",
 			slog.String("scope", lock.Scope()),
 			slog.String("owner", lock.Owner),
+			slog.String("reason", lock.Reason),
 			slog.Time("since", lock.CreatedAt),
 		)
 		notify(ctx, r.notifier, r.logger, core.LockEvent{Action: core.LockActionReminded, Lock: lock, OccurredAt: r.now()})

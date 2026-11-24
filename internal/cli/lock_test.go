@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/api"
 	"github.com/sharpintelligence/doorstep/internal/config"
@@ -379,6 +377,46 @@ func TestDefaultServerURL(t *testing.T) {
 	}
 }
 
+func TestTokenRequiresTransportSecurity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  string
+		token   string
+		wantErr bool
+	}{
+		{name: "https", server: "https://doorstep.example.com", token: "t"},
+		{name: "http loopback IPv4", server: "http://127.0.0.1:8080", token: "t"},
+		{name: "http loopback IPv4 range", server: "http://127.1.2.3:8080", token: "t"},
+		{name: "http loopback IPv6", server: "http://[::1]:8080", token: "t"},
+		{name: "http localhost", server: "http://LocalHost:8080", token: "t"},
+		{name: "http remote without token", server: "http://doorstep.internal:8080"},
+		{name: "http remote host", server: "http://doorstep.internal:8080", token: "t", wantErr: true},
+		{name: "http remote IP", server: "http://10.0.0.5", token: "t", wantErr: true},
+		{name: "http localhost lookalike", server: "http://localhost.example.com", token: "t", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := map[string]string{EnvServerURL: tt.server}
+			if tt.token != "" {
+				env[EnvToken] = tt.token
+			}
+			_, err := newAPIClient(func(string) bool { return false }, "", envFrom(env))
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "plain http") {
+					t.Errorf("newAPIClient(%s) = %v, want a plain http refusal", tt.server, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("newAPIClient(%s): %v", tt.server, err)
+			}
+		})
+	}
+}
+
 func TestServerURLWithPathPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -454,7 +492,7 @@ func TestLockCommandsAgainstAPI(t *testing.T) {
 
 	handler := api.New(api.Options{
 		Locks:         &memoryLocks{locks: map[string]core.Lock{}},
-		Targets:       catalogTargets(oneAppCatalog(t)),
+		KnownApp:      knownApp(oneAppCatalog(t)),
 		Authenticator: staticAuth{},
 	})
 	srv := httptest.NewServer(handler)
@@ -491,35 +529,22 @@ func TestLockCommandsAgainstAPI(t *testing.T) {
 	}
 }
 
-func TestCatalogTargets(t *testing.T) {
+func TestKnownApp(t *testing.T) {
 	t.Parallel()
 
-	lookup := catalogTargets(oneAppCatalog(t))
-	if target, ok := lookup("blog"); !ok || target != (core.Target{App: "blog", Environment: core.DefaultEnvironment}) {
-		t.Errorf("lookup(blog) = %v, %v", target, ok)
+	known := knownApp(oneAppCatalog(t))
+	tests := []struct {
+		app  string
+		want bool
+	}{
+		{app: "blog", want: true},
+		{app: "other", want: false},
+		{app: "", want: false},
 	}
-	if _, ok := lookup("other"); ok {
-		t.Error("lookup(other) found an app")
-	}
-}
-
-func TestLockLogNotifier(t *testing.T) {
-	t.Parallel()
-
-	var logs lockedBuffer
-	n := lockLogNotifier{logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-	expires := time.Date(2026, 11, 23, 14, 0, 0, 0, time.UTC)
-	err := n.NotifyLock(t.Context(), core.LockEvent{
-		Action: core.LockActionUnlocked,
-		Lock:   core.Lock{Target: core.Target{App: "blog", Environment: core.DefaultEnvironment}, Owner: "alice", Reason: "r", ExpiresAt: &expires},
-		Actor:  "bob",
-	})
-	if err != nil {
-		t.Fatalf("NotifyLock: %v", err)
-	}
-	entry := findMessage(parseLogs(t, logs.String()), "lock event")
-	if entry == nil || entry["action"] != "unlocked" || entry["scope"] != "blog" || entry["actor"] != "bob" || entry["owner"] != "alice" || entry["expires_at"] != "2026-11-23T14:00:00Z" {
-		t.Errorf("log entry = %v", entry)
+	for _, tt := range tests {
+		if got := known(tt.app); got != tt.want {
+			t.Errorf("knownApp(%q) = %v, want %v", tt.app, got, tt.want)
+		}
 	}
 }
 

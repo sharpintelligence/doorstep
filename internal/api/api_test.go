@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -81,17 +82,14 @@ func (f *fakeLocks) List(context.Context) ([]core.Lock, error) {
 	return f.listed, f.listErr
 }
 
-func targets(app string) (core.Target, bool) {
-	if app == "web" || app == "api" {
-		return core.Target{App: app, Environment: core.DefaultEnvironment}, true
-	}
-	return core.Target{}, false
+func knownApp(app string) bool {
+	return app == "web" || app == "api"
 }
 
 func newHandler(t *testing.T, locks LockService, auth Authenticator, logs io.Writer) http.Handler {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	return New(Options{Locks: locks, Targets: targets, Authenticator: auth, Logger: logger})
+	return New(Options{Locks: locks, KnownApp: knownApp, Authenticator: auth, Logger: logger})
 }
 
 type request struct {
@@ -143,9 +141,9 @@ func TestLockRoutesNeedEveryDependency(t *testing.T) {
 		opts Options
 	}{
 		{"nothing", Options{}},
-		{"no locks", Options{Targets: targets, Authenticator: RejectAll{}}},
-		{"no targets", Options{Locks: &fakeLocks{}, Authenticator: RejectAll{}}},
-		{"no authenticator", Options{Locks: &fakeLocks{}, Targets: targets}},
+		{"no locks", Options{KnownApp: knownApp, Authenticator: RejectAll{}}},
+		{"no app lookup", Options{Locks: &fakeLocks{}, Authenticator: RejectAll{}}},
+		{"no authenticator", Options{Locks: &fakeLocks{}, KnownApp: knownApp}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -174,7 +172,7 @@ func TestLockRoutesCoexistWithQueueRoutes(t *testing.T) {
 		Queue:         emptyQueue{},
 		Apps:          knownApps{"web": true},
 		Locks:         &fakeLocks{},
-		Targets:       targets,
+		KnownApp:      knownApp,
 		Authenticator: fakeAuth{},
 	})
 	for _, path := range []string{"/api/v1/locks", "/api/v1/apps/web/queue"} {
@@ -377,6 +375,13 @@ func TestLock(t *testing.T) {
 			wantCode:   "invalid_request",
 		},
 		{
+			name:       "contended",
+			req:        request{method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"r"}`},
+			lockErr:    fmt.Errorf("lock web: %w", core.ErrLockContended),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "contended",
+		},
+		{
 			name:       "internal error",
 			req:        request{method: http.MethodPost, path: "/api/v1/lock", body: `{"reason":"r"}`},
 			lockErr:    errBoom,
@@ -403,6 +408,9 @@ func TestLock(t *testing.T) {
 				if code := errorCode(t, rec); code != tt.wantCode {
 					t.Errorf("code = %q, want %q", code, tt.wantCode)
 				}
+			}
+			if tt.wantStatus == http.StatusServiceUnavailable && rec.Header().Get("Retry-After") == "" {
+				t.Error("503 without Retry-After")
 			}
 			if tt.wantCode == "internal" && !strings.Contains(logs.String(), "hunter2") {
 				t.Errorf("internal error not logged: %s", logs.String())
@@ -495,7 +503,8 @@ func TestUnlock(t *testing.T) {
 		{name: "global", path: "/api/v1/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"global by alice"}},
 		{name: "not locked", path: "/api/v1/apps/web/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"web by alice"}},
 		{name: "global not locked", path: "/api/v1/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"global by alice"}},
-		{name: "unknown app", path: "/api/v1/apps/nope/lock", wantStatus: http.StatusNotFound, wantCode: "not_found"},
+		{name: "app removed from the configuration", path: "/api/v1/apps/gone/lock", wantStatus: http.StatusNoContent, wantUnlocks: []string{"gone by alice"}},
+		{name: "unknown app not locked", path: "/api/v1/apps/nope/lock", unlockErr: core.ErrNotFound, wantStatus: http.StatusNotFound, wantCode: "not_found", wantUnlocks: []string{"nope by alice"}},
 		{name: "invalid", path: "/api/v1/lock", unlockErr: core.ErrInvalidLock, wantStatus: http.StatusBadRequest, wantCode: "invalid_request", wantUnlocks: []string{"global by alice"}},
 		{name: "internal error", path: "/api/v1/lock", unlockErr: errBoom, wantStatus: http.StatusInternalServerError, wantCode: "internal", wantUnlocks: []string{"global by alice"}},
 	}

@@ -16,10 +16,12 @@ import (
 const (
 	MaxOwnerLength  = 200
 	MaxReasonLength = 500
+
+	NotifyTimeout = 10 * time.Second
 )
 
 type Repository interface {
-	AcquireFreeze(ctx context.Context, req core.LockRequest) (core.Lock, error)
+	AcquireFreeze(ctx context.Context, req core.LockRequest) (core.Lock, []core.Lock, error)
 	ReleaseFreeze(ctx context.Context, target *core.Target, actor string) (core.Lock, error)
 	ListFreezes(ctx context.Context) ([]core.Lock, error)
 	BlockingFreezes(ctx context.Context, t core.Target) ([]core.Lock, error)
@@ -68,9 +70,12 @@ func (s *Service) Lock(ctx context.Context, req core.LockRequest) (core.Lock, er
 	if err := validate(req); err != nil {
 		return core.Lock{}, err
 	}
-	lock, err := s.repo.AcquireFreeze(ctx, req)
+	lock, expired, err := s.repo.AcquireFreeze(ctx, req)
 	if err != nil {
 		return core.Lock{}, err
+	}
+	for _, old := range expired {
+		notifyExpired(ctx, s.notifier, s.logger, old, s.now())
 	}
 	s.logger.InfoContext(ctx, "locked",
 		slog.String("scope", lock.Scope()),
@@ -151,7 +156,18 @@ func validateOwner(field, owner string) error {
 	return nil
 }
 
+func notifyExpired(ctx context.Context, n Notifier, logger *slog.Logger, lock core.Lock, now time.Time) {
+	logger.InfoContext(ctx, "lock expired",
+		slog.String("scope", lock.Scope()),
+		slog.String("owner", lock.Owner),
+		slog.String("reason", lock.Reason),
+	)
+	notify(ctx, n, logger, core.LockEvent{Action: core.LockActionExpired, Lock: lock, OccurredAt: now})
+}
+
 func notify(ctx context.Context, n Notifier, logger *slog.Logger, ev core.LockEvent) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), NotifyTimeout)
+	defer cancel()
 	if err := n.NotifyLock(ctx, ev); err != nil {
 		logger.WarnContext(ctx, "lock notification failed",
 			slog.String("action", string(ev.Action)),

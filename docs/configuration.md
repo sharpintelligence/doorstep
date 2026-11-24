@@ -195,7 +195,7 @@ Thin clients of the [lock API](locks.md#api) on a running server. `lock` freezes
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--server` | `DOORSTEP_SERVER_URL` | `http://127.0.0.1:8080` | Base URL of the doorstep server (its metrics listener while the API is served only there, see [api.md](api.md)), `http` or `https`, optionally with a path prefix. Must not contain user information, a query or a fragment. Use `https` whenever the connection leaves the host or cluster, since the token is sent with every request. |
+| `--server` | `DOORSTEP_SERVER_URL` | `http://127.0.0.1:8080` | Base URL of the doorstep server (its metrics listener while the API is served only there, see [api.md](api.md)), `http` or `https`, optionally with a path prefix. Must not contain user information, a query or a fragment. The token is sent with every request, so with a token set the client refuses plain `http` to anything but a loopback address (`localhost`, `127.0.0.0/8`, `::1`); use `https` whenever the connection leaves the host. |
 | | `DOORSTEP_TOKEN` | none | API token, sent as `Authorization: Bearer <token>`. There is no flag, so the token never shows up in process listings or shell history. |
 | | `DOORSTEP_TOKEN_FILE` | none | File holding the API token, such as a mounted Secret; surrounding whitespace is trimmed, and the file may be at most 64 KiB. Setting both token variables is an error. |
 

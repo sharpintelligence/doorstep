@@ -12,9 +12,9 @@ Operators need to stop deploys for a while: during a database migration, an inci
 ## Decision
 
 - A live freeze stops only the **start** of an ordinary deploy: the claim skips a queue entry whose deployment is `queued` and of kind `deploy` while an app freeze or the global freeze covers its app. Deployments in an active state stay claimable and finish. Deployments of kind `rollback` are never blocked. Intake is untouched, so locked apps keep queueing.
-- The freeze is one more condition in the claim statement, and the post-claim re-check (a fresh snapshot while the app row is locked) also rejects a claim that a freeze committed a moment earlier now covers. Taking an app freeze locks the app row first, so an app freeze and a claim of that app are strictly ordered. For the global freeze, a claim already mid-statement may complete; it counts as started before the freeze.
+- The freeze is one more condition in the claim statement, and the post-claim re-check (a fresh snapshot while the app row is locked) also rejects a claim that a freeze committed a moment earlier now covers. Taking an app freeze locks the app row first, so an app freeze and a claim of that app are strictly ordered. A global freeze takes an exclusive transaction-level advisory lock that every claim takes in shared mode, so it waits for claims in progress (which count as started before it) and claims that start meanwhile wait for it, without claims serialising against each other. Once a lock request has succeeded, no deploy it covers starts.
 - A global freeze is a `locks` row with a null `app_id` and kind `freeze`. A partial unique index allows one, and a check constraint keeps deployment locks per app. No sentinel app row is needed.
-- Expiry is evaluated against the database clock everywhere. An expired row is treated as absent at once and deleted lazily, by the next lock or unlock of its scope or by a once-a-minute sweep.
+- Expiry is evaluated against the database clock everywhere. An expired row is treated as absent at once and deleted lazily, with an `expired` notification, by the next lock of its scope or by a once-a-minute sweep.
 - Locking a held scope is a conflict that returns the holder; nothing is overwritten. Any authenticated caller may unlock any freeze, and the release is recorded with their identity. The owner is always the authenticated caller.
 - Reminders for long-held locks are claimed with `UPDATE ... SET reminded_at = now() ... RETURNING`, so each is sent by one replica without leader election.
 - Every lock, unlock, expiry and reminder is written to an append-only `lock_events` table in the same transaction.
@@ -23,7 +23,7 @@ Operators need to stop deploys for a while: during a database migration, an inci
 
 ### Block the start of ordinary deploys only (chosen)
 
-Matches what a freeze is for: keep production as it is. A half-finished deployment is left to complete, because stopping it between pinning and syncing would leave Git and the cluster in an intermediate state, and its lease would expire and be re-claimed forever. Rollbacks keep their head-of-line priority, so a bad version can still be reverted during a freeze. Tools such as Shipit and GitHub's deploy locks behave the same way: locks stop new deploys, not recovery. The cost is that "frozen" does not mean "nothing changes": an operator who wants nothing at all to move must also wait for the in-flight deployment, which the UI and `doorstep locks` make visible.
+Matches what a freeze is for: keep production as it is. A half-finished deployment is left to complete, because stopping it between pinning and syncing would leave Git and the cluster in an intermediate state, and its lease would expire and be re-claimed forever. Rollbacks keep their head-of-line priority, so a bad version can still be reverted during a freeze. Tools such as Shipit and GitHub's deploy locks behave the same way: locks stop new deploys, not recovery. The cost is that "frozen" does not mean "nothing changes": an operator who wants nothing at all to move must also wait for the in-flight deployment. Neither the lock API nor `doorstep locks` shows in-flight deployments today; the deployment history and the web UI, which come later, are where they become visible.
 
 ### Block every claim of a locked app
 
@@ -44,3 +44,4 @@ A sentinel app would leak into app listings, history and metrics. A separate tab
 - The engine does not enforce freezes; it reads `locks.Service.Blocking` to show why a deploy is waiting.
 - A reminder can be lost if a replica dies between marking and sending it; the next one follows one interval later.
 - Deployment-kind lock rows and their semantics are left to the engine work.
+- This decision covers the API and the CLI. Lock and unlock controls in the web UI are left to the UI work, and the endpoints answer `401` until API tokens exist, so the feature cannot be used against a running server before both land.

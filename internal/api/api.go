@@ -29,35 +29,35 @@ type LockService interface {
 	List(ctx context.Context) ([]core.Lock, error)
 }
 
-type Targets func(app string) (core.Target, bool)
+type KnownApp func(app string) bool
 
 type Options struct {
 	Logger        *slog.Logger
 	Queue         QueueReader
 	Apps          AppCatalog
 	Locks         LockService
-	Targets       Targets
+	KnownApp      KnownApp
 	Authenticator Authenticator
 	Middleware    func(http.Handler) http.Handler
 }
 
 type api struct {
-	logger  *slog.Logger
-	queue   QueueReader
-	apps    AppCatalog
-	locks   LockService
-	targets Targets
-	auth    Authenticator
+	logger *slog.Logger
+	queue  QueueReader
+	apps   AppCatalog
+	locks  LockService
+	known  KnownApp
+	auth   Authenticator
 }
 
 func New(opts Options) http.Handler {
 	a := &api{
-		logger:  opts.Logger,
-		queue:   opts.Queue,
-		apps:    opts.Apps,
-		locks:   opts.Locks,
-		targets: opts.Targets,
-		auth:    opts.Authenticator,
+		logger: opts.Logger,
+		queue:  opts.Queue,
+		apps:   opts.Apps,
+		locks:  opts.Locks,
+		known:  opts.KnownApp,
+		auth:   opts.Authenticator,
 	}
 	if a.logger == nil {
 		a.logger = slog.New(slog.DiscardHandler)
@@ -67,7 +67,7 @@ func New(opts Options) http.Handler {
 	if a.queue != nil && a.apps != nil {
 		a.registerQueue(mux)
 	}
-	if a.locks != nil && a.targets != nil && a.auth != nil {
+	if a.locks != nil && a.known != nil && a.auth != nil {
 		a.registerLocks(mux)
 	}
 	mux.HandleFunc(Prefix, func(w http.ResponseWriter, r *http.Request) {

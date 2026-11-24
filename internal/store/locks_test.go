@@ -26,7 +26,7 @@ func timePtr(t time.Time) *time.Time { return &t }
 
 func mustFreeze(t *testing.T, st *store.Store, req core.LockRequest) core.Lock {
 	t.Helper()
-	lock, err := st.AcquireFreeze(t.Context(), req)
+	lock, _, err := st.AcquireFreeze(t.Context(), req)
 	if err != nil {
 		t.Fatalf("AcquireFreeze(%s): %v", req.Scope(), err)
 	}
@@ -149,7 +149,7 @@ func TestAcquireFreezeRejects(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			st := storetest.Open(t)
-			_, err := st.AcquireFreeze(t.Context(), tt.req)
+			_, _, err := st.AcquireFreeze(t.Context(), tt.req)
 			if err == nil {
 				t.Fatal("AcquireFreeze succeeded")
 			}
@@ -181,7 +181,7 @@ func TestAcquireFreezeConflict(t *testing.T) {
 			t.Parallel()
 			st := storetest.Open(t)
 			held := mustFreeze(t, st, freeze(tt.target, "alice", "first"))
-			_, err := st.AcquireFreeze(t.Context(), freeze(tt.target, "bob", "second"))
+			_, _, err := st.AcquireFreeze(t.Context(), freeze(tt.target, "bob", "second"))
 			heldErr, ok := errors.AsType[*core.LockHeldError](err)
 			if !ok || !errors.Is(err, core.ErrLockHeld) {
 				t.Fatalf("AcquireFreeze = %v, want LockHeldError", err)
@@ -262,12 +262,18 @@ func TestExpiredFreeze(t *testing.T) {
 			if _, err := st.ReleaseFreeze(t.Context(), tt.target, "carol"); !errors.Is(err, core.ErrNotFound) {
 				t.Errorf("ReleaseFreeze of expired lock = %v, want ErrNotFound", err)
 			}
+			if n := queryInt(t, st, "SELECT count(*) FROM locks"); n != 1 {
+				t.Errorf("ReleaseFreeze of an expired lock left %d rows, want 1 for the sweep to report", n)
+			}
 
 			mustFreeze(t, st, freeze(tt.target, "alice", "old"))
 			mustExec(t, st, expireFreezes)
-			replacement := mustFreeze(t, st, freeze(tt.target, "bob", "new"))
-			if replacement.Owner != "bob" {
-				t.Errorf("replacement = %+v", replacement)
+			replacement, purged, err := st.AcquireFreeze(t.Context(), freeze(tt.target, "bob", "new"))
+			if err != nil || replacement.Owner != "bob" {
+				t.Fatalf("AcquireFreeze over an expired freeze = %+v, %v", replacement, err)
+			}
+			if len(purged) != 1 || purged[0].Owner != "alice" || purged[0].Scope() != replacement.Scope() || purged[0].ExpiresAt == nil {
+				t.Errorf("purged = %+v, want alice's expired freeze", purged)
 			}
 			scope := replacement.Scope()
 			assertStrings(t, "events", eventSummary(lockEvents(t, st)), []string{
@@ -485,7 +491,7 @@ func TestAcquireFreezeConcurrent(t *testing.T) {
 			for i := range 6 {
 				wg.Go(func() {
 					<-start
-					_, err := st.AcquireFreeze(t.Context(), freeze(tt.target, fmt.Sprintf("owner-%d", i), "race"))
+					_, _, err := st.AcquireFreeze(t.Context(), freeze(tt.target, fmt.Sprintf("owner-%d", i), "race"))
 					mu.Lock()
 					defer mu.Unlock()
 					switch {

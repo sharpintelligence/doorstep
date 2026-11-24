@@ -74,10 +74,12 @@ func toLockResponse(l core.Lock) lockResponse {
 }
 
 func (a *api) lockApp(w http.ResponseWriter, r *http.Request, actor string) {
-	target, ok := a.target(w, r)
-	if !ok {
+	app := r.PathValue("app")
+	if !a.known(app) {
+		writeError(w, http.StatusNotFound, codeNotFound, "unknown app "+app)
 		return
 	}
+	target := core.AppTarget(app)
 	a.lock(w, r, actor, &target)
 }
 
@@ -86,25 +88,12 @@ func (a *api) lockGlobal(w http.ResponseWriter, r *http.Request, actor string) {
 }
 
 func (a *api) unlockApp(w http.ResponseWriter, r *http.Request, actor string) {
-	target, ok := a.target(w, r)
-	if !ok {
-		return
-	}
+	target := core.AppTarget(r.PathValue("app"))
 	a.unlock(w, r, actor, &target)
 }
 
 func (a *api) unlockGlobal(w http.ResponseWriter, r *http.Request, actor string) {
 	a.unlock(w, r, actor, nil)
-}
-
-func (a *api) target(w http.ResponseWriter, r *http.Request) (core.Target, bool) {
-	app := r.PathValue("app")
-	target, ok := a.targets(app)
-	if !ok {
-		writeError(w, http.StatusNotFound, codeNotFound, "unknown app "+app)
-		return core.Target{}, false
-	}
-	return target, true
 }
 
 func (a *api) lock(w http.ResponseWriter, r *http.Request, actor string, target *core.Target) {
@@ -137,6 +126,11 @@ func (a *api) lock(w http.ResponseWriter, r *http.Request, actor string, target 
 	}
 	if errors.Is(err, core.ErrInvalidLock) {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	if errors.Is(err, core.ErrLockContended) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, codeContended, "the lock changed while it was being taken; retry")
 		return
 	}
 	if err != nil {

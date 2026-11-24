@@ -17,7 +17,6 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/api"
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
-	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
@@ -151,7 +150,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Queue:         q,
 		Apps:          apps,
 		Locks:         locksService,
-		Targets:       catalogTargets(in.catalog),
+		KnownApp:      knownApp(in.catalog),
 		Authenticator: apiAuthenticator(),
 	})
 
@@ -207,12 +206,11 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 }
 
 func newLocks(st *store.Store, cfg config.Locks, logger *slog.Logger) (*locks.Service, *locks.Reminder, error) {
-	notifier := lockLogNotifier{logger: logger}
-	service, err := locks.New(locks.Options{Repository: st, Notifier: notifier, Logger: logger})
+	service, err := locks.New(locks.Options{Repository: st, Logger: logger})
 	if err != nil {
 		return nil, nil, err
 	}
-	reminder, err := locks.NewReminder(locks.ReminderOptions{Repository: st, Notifier: notifier, Logger: logger, Every: cfg.ReminderInterval})
+	reminder, err := locks.NewReminder(locks.ReminderOptions{Repository: st, Logger: logger, Every: cfg.ReminderInterval})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -223,34 +221,11 @@ func apiAuthenticator() api.Authenticator {
 	return api.RejectAll{}
 }
 
-func catalogTargets(catalog config.Catalog) api.Targets {
-	return func(app string) (core.Target, bool) {
-		if _, ok := catalog.App(app); !ok {
-			return core.Target{}, false
-		}
-		return core.Target{App: app, Environment: core.DefaultEnvironment}, true
+func knownApp(catalog config.Catalog) api.KnownApp {
+	return func(app string) bool {
+		_, ok := catalog.App(app)
+		return ok
 	}
-}
-
-type lockLogNotifier struct {
-	logger *slog.Logger
-}
-
-func (n lockLogNotifier) NotifyLock(ctx context.Context, ev core.LockEvent) error {
-	attrs := []slog.Attr{
-		slog.String("action", string(ev.Action)),
-		slog.String("scope", ev.Lock.Scope()),
-		slog.String("owner", ev.Lock.Owner),
-		slog.String("reason", ev.Lock.Reason),
-	}
-	if ev.Actor != "" {
-		attrs = append(attrs, slog.String("actor", ev.Actor))
-	}
-	if ev.Lock.ExpiresAt != nil {
-		attrs = append(attrs, slog.Time("expires_at", *ev.Lock.ExpiresAt))
-	}
-	n.logger.LogAttrs(ctx, slog.LevelDebug, "lock event", attrs...)
-	return nil
 }
 
 func runServers(ctx context.Context, runs ...func(context.Context) error) error {

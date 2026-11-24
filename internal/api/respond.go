@@ -19,6 +19,7 @@ const (
 	codeNotFound             = "not_found"
 	codeMethodNotAllowed     = "method_not_allowed"
 	codeLocked               = "locked"
+	codeContended            = "contended"
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeInternal             = "internal"
 )

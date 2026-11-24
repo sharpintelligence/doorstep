@@ -12,7 +12,7 @@ The code lives in `internal/locks` (validation, notifications, the reminder loop
 - **Rollbacks are never blocked.** A deployment of kind `rollback` is claimed under a freeze, and since rollbacks are queued at a higher priority it becomes the head of line ahead of the frozen deploys. A freeze is meant to keep production stable, and a rollback is how doorstep restores it ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)).
 - **Other apps are unaffected** by an app freeze. Apps are matched by name and environment.
 
-A lock taken while a worker is already claiming the same app either waits for that claim (an app lock takes the app's row lock, which the claim holds) or is seen by the claim's re-check, so the claim backs off. A global lock committed in the same instant as a claim may let that one claim proceed; it counts as started before the freeze.
+A lock and a claim of the same app are strictly ordered, so once a lock request has answered `201`, no deploy it covers starts afterwards. An app lock takes the app's row lock, which a claim also holds; a global lock takes an advisory lock that every claim holds in shared mode ([database.md](database.md#claiming-work)). A lock taken while a worker is claiming waits for that claim to commit, and that deploy counts as started before the freeze; a claim that starts while a lock is being taken waits for it and then skips the frozen deploy.
 
 ## Scope, owner and reason
 
@@ -35,7 +35,7 @@ Anyone who can call the API may release any freeze, not only its owner, so a loc
 
 ## Expiry
 
-Expiry is compared with the database clock (`now()` in Postgres), the one clock all replicas share ([database.md](database.md#clock)). An expired lock stops blocking deploys at its expiry time and disappears from listings at once, whether or not anything has cleaned it up yet. The row itself is deleted, with an `expired` audit record, by the next lock or unlock of the same scope or by the sweep that every replica runs once a minute; the sweep also sends the `expired` notification.
+Expiry is compared with the database clock (`now()` in Postgres), the one clock all replicas share ([database.md](database.md#clock)). An expired lock stops blocking deploys at its expiry time and disappears from listings at once, whether or not anything has cleaned it up yet. The row itself is deleted, with an `expired` audit record and an `expired` notification, by whichever comes first: the next lock of the same scope or the sweep that every replica runs once a minute. Unlocking a scope whose freeze has already expired answers `404` and leaves the row to the sweep.
 
 ## Reminders
 
@@ -54,7 +54,9 @@ Every change is a `core.LockEvent` with an action, the lock, the actor and the t
 | `expired` | an expired freeze was cleaned up | none |
 | `reminded` | a freeze has been held for another reminder interval | none |
 
-`internal/locks` hands each event to a `locks.Notifier` after the change has committed. A notifier error is logged and never fails the request or the sweep. Until the notification channels are wired in, `serve` logs each event at debug level as `lock event`.
+`internal/locks` hands each event to a `locks.Notifier` after the change has committed. The notifier gets a context that is detached from the request, so a client that disconnects does not cancel the notification of a change that has already happened, and bounded by `locks.NotifyTimeout` (10 seconds), so a slow channel cannot hold a request or the sweep indefinitely. A notifier error is logged and never fails the request or the sweep.
+
+Every event is also logged at info level, the default, whether or not a notifier is configured: `locked` and `unlocked` (with scope, owner, reason or actor), `lock expired` and `lock still held` (with scope, owner and reason). Until the notification channels (Slack, ntfy, webhooks) are wired in, `serve` configures no notifier, and these log lines are where lock events, including reminders, appear.
 
 Independently of notifications, every change is written to the append-only `lock_events` table in the same transaction as the change itself ([database.md](database.md#lock_events)), so who locked or unlocked what, when and why survives after the lock row is gone. `Store.ListLockEvents` reads it newest first; the history and UI work exposes it.
 
@@ -70,8 +72,9 @@ All lock endpoints are under `/api/v1`, are served on the metrics listener only 
 | --- | --- | --- |
 | `invalid_request` | `400`, `413` | malformed body, unknown field, invalid reason or expiry; `413` when the body is over 64 KiB |
 | `unauthorized` | `401` | missing or rejected credentials |
-| `not_found` | `404` | unknown app (not in the configuration file), or nothing to unlock |
+| `not_found` | `404` | locking an unknown app (not in the configuration file), or nothing to unlock |
 | `locked` | `409` | the scope is already locked; the body also carries `lock` |
+| `contended` | `503` | the scope's lock was released and retaken repeatedly while this request tried to take it; retry (the answer carries `Retry-After`) |
 | `unsupported_media_type` | `415` | a `POST` without `Content-Type: application/json` |
 | `internal` | `500` | an unexpected error, logged on the server and not described in the response |
 
@@ -92,7 +95,7 @@ curl -sS -X POST https://doorstep.example.com/api/v1/apps/blog/lock \
 | `expires_in` | no | Go duration until the lock expires |
 | `expires_at` | no | RFC 3339 time at which the lock expires; not together with `expires_in` |
 
-`{app}` must be an app in the configuration file. The answer is `201` with the lock:
+`{app}` must be an app in the configuration file; it is matched as that app in the default environment (`core.AppTarget`), the same mapping used wherever doorstep turns an app name into a target. The answer is `201` with the lock:
 
 ```json
 {"scope": "app", "app": "blog", "owner": "alice", "reason": "database migration", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"}
@@ -108,7 +111,7 @@ When the scope is already locked the answer is `409`:
 
 ### `DELETE /api/v1/apps/{app}/lock` and `DELETE /api/v1/lock`
 
-Releases the freeze and answers `204` without a body, or `404` when the scope has no live freeze.
+Releases the freeze and answers `204` without a body, or `404` when the scope has no live freeze. Unlike locking, unlocking does not require `{app}` to be in the configuration file, so a freeze on an app that has since been removed from it can still be released; otherwise it would stay listed and would come back into force if the app were added again.
 
 ### `GET /api/v1/locks`
 
@@ -123,7 +126,7 @@ Lists live freezes, the global one first, then apps by name:
 
 ### Authentication
 
-The API authenticates every request through the `api.Authenticator` port. API tokens are not issued yet; until they are, `serve` wires an authenticator that rejects every request, so the lock endpoints answer `401` and cannot be used remotely. The token work replaces that one seam (`apiAuthenticator` in `internal/cli/serve.go`).
+The API authenticates every request through the `api.Authenticator` port. API tokens are not issued yet; until they are, `serve` wires an authenticator that rejects every request, so **the lock endpoints answer `401` and locks cannot yet be taken or released through a running server** (the CLI and the API are complete and tested against an in-process server). The token work replaces that one seam (`apiAuthenticator` in `internal/cli/serve.go`). There is no web UI for locks yet either; the UI work adds lock and unlock controls on top of this API.
 
 ## CLI
 

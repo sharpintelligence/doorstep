@@ -15,6 +15,19 @@ import (
 type Claim struct {
 	Attempt        int
 	LeaseExpiresAt time.Time
+	Skipped        []SkippedTarget
+}
+
+type SkipReason string
+
+const (
+	SkipLeased SkipReason = "leased"
+	SkipFrozen SkipReason = "frozen"
+)
+
+type SkippedTarget struct {
+	AppID  AppID
+	Reason SkipReason
 }
 
 const claimSQL = `
@@ -85,7 +98,13 @@ SELECT
           )
     )`
 
-var errClaimRejected = errors.New("target is leased by another worker or frozen")
+type claimRejectedError struct {
+	reason SkipReason
+}
+
+func (e *claimRejectedError) Error() string {
+	return "target was " + string(e.reason) + " while claiming"
+}
 
 type claimResult struct {
 	deployment core.Deployment
@@ -116,12 +135,15 @@ func validateClaimArgs(workerID string, lease time.Duration) error {
 
 func (s *Store) claimRetrying(ctx context.Context, workerID string, lease time.Duration, limit BatchLimit) (claimResult, error) {
 	excluded := []AppID{}
+	var skipped []SkippedTarget
 	for {
 		r, err := s.claimOnce(ctx, workerID, lease, excluded, limit)
-		if errors.Is(err, errClaimRejected) {
+		if rejected, ok := errors.AsType[*claimRejectedError](err); ok {
 			excluded = append(excluded, r.appID)
+			skipped = append(skipped, SkippedTarget{AppID: r.appID, Reason: rejected.reason})
 			continue
 		}
+		r.claim.Skipped = skipped
 		return r, err
 	}
 }
@@ -129,6 +151,9 @@ func (s *Store) claimRetrying(ctx context.Context, workerID string, lease time.D
 func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Duration, excluded []AppID, limit BatchLimit) (claimResult, error) {
 	var r claimResult
 	err := s.InTx(ctx, func(tx *Store) error {
+		if _, err := tx.db.Exec(ctx, lockGlobalFreezeSharedSQL); err != nil {
+			return fmt.Errorf("wait for global freeze: %w", err)
+		}
 		var id core.DeploymentID
 		err := tx.db.QueryRow(ctx, claimSQL, workerID, lease, core.ClaimableStates(), excluded,
 			core.StateQueued, core.KindRollback, core.LockFreeze).
@@ -146,8 +171,11 @@ func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Durat
 		if err != nil {
 			return fmt.Errorf("recheck claim of deployment %d: %w", id, err)
 		}
-		if contended || frozen {
-			return errClaimRejected
+		switch {
+		case contended:
+			return &claimRejectedError{reason: SkipLeased}
+		case frozen:
+			return &claimRejectedError{reason: SkipFrozen}
 		}
 
 		r.deployment, err = tx.GetDeployment(ctx, id)
@@ -160,7 +188,7 @@ func (s *Store) claimOnce(ctx context.Context, workerID string, lease time.Durat
 		}
 		return tx.batch(ctx, &r, workerID, lease, limit)
 	})
-	if errors.Is(err, errClaimRejected) {
+	if _, ok := errors.AsType[*claimRejectedError](err); ok {
 		return claimResult{appID: r.appID}, err
 	}
 	if err != nil {

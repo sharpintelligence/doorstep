@@ -25,16 +25,26 @@ const (
 	lockOrder = `ORDER BY l.app_id IS NULL DESC, a.name, a.environment`
 )
 
+const globalFreezeKey = `hashtextextended('doorstep:global-freeze:' || current_schema(), 0)`
+
+const (
+	lockGlobalFreezeSQL       = `SELECT pg_advisory_xact_lock(` + globalFreezeKey + `)`
+	lockGlobalFreezeSharedSQL = `SELECT pg_advisory_xact_lock_shared(` + globalFreezeKey + `)`
+)
+
 const purgeExpiredFreezeSQL = `
-WITH expired AS (
+WITH l AS (
     DELETE FROM locks
     WHERE kind = 'freeze'
       AND app_id IS NOT DISTINCT FROM $1::bigint
       AND expires_at <= now()
-    RETURNING app_id, owner, reason, expires_at
+    RETURNING *
+), event AS (
+    INSERT INTO lock_events (app_id, action, owner, reason, expires_at)
+    SELECT app_id, 'expired', owner, reason, expires_at FROM l
 )
-INSERT INTO lock_events (app_id, action, owner, reason, expires_at)
-SELECT app_id, 'expired', owner, reason, expires_at FROM expired`
+SELECT ` + lockColumns + `
+FROM l LEFT JOIN apps a ON a.id = l.app_id`
 
 const insertFreezeSQL = `
 WITH l AS (
@@ -61,6 +71,7 @@ WITH l AS (
     DELETE FROM locks
     WHERE kind = 'freeze'
       AND app_id IS NOT DISTINCT FROM $1::bigint
+      AND (expires_at IS NULL OR expires_at > now())
     RETURNING *
 ), event AS (
     INSERT INTO lock_events (app_id, action, owner, actor, reason, expires_at)
@@ -123,20 +134,22 @@ LIMIT $1`
 
 const findAppSQL = `SELECT id FROM apps WHERE name = $1 AND environment = $2`
 
-var errFreezeVanished = errors.New("the conflicting freeze was released while acquiring")
+var errFreezeVanished = fmt.Errorf("%w: the conflicting freeze was released while acquiring", core.ErrLockContended)
 
-func (s *Store) AcquireFreeze(ctx context.Context, req core.LockRequest) (core.Lock, error) {
+func (s *Store) AcquireFreeze(ctx context.Context, req core.LockRequest) (core.Lock, []core.Lock, error) {
 	if err := validateFreezeRequest(req); err != nil {
-		return core.Lock{}, err
+		return core.Lock{}, nil, err
 	}
 	var lock core.Lock
+	var expired []core.Lock
 	err := s.InTx(ctx, func(tx *Store) error {
 		appID, err := tx.lockScope(ctx, req.Target)
 		if err != nil {
 			return err
 		}
-		if err := tx.purgeExpiredFreeze(ctx, appID); err != nil {
-			return err
+		expired, err = tx.queryLocks(ctx, purgeExpiredFreezeSQL, appID)
+		if err != nil {
+			return fmt.Errorf("delete expired freeze: %w", err)
 		}
 		for range acquireFreezeAttempts {
 			lock, err = tx.insertFreeze(ctx, appID, req)
@@ -147,9 +160,9 @@ func (s *Store) AcquireFreeze(ctx context.Context, req core.LockRequest) (core.L
 		return err
 	})
 	if err != nil {
-		return core.Lock{}, fmt.Errorf("lock %s: %w", req.Scope(), err)
+		return core.Lock{}, nil, fmt.Errorf("lock %s: %w", req.Scope(), err)
 	}
-	return lock, nil
+	return lock, expired, nil
 }
 
 func validateFreezeRequest(req core.LockRequest) error {
@@ -171,6 +184,9 @@ func validateFreezeRequest(req core.LockRequest) error {
 
 func (s *Store) lockScope(ctx context.Context, target *core.Target) (*AppID, error) {
 	if target == nil {
+		if _, err := s.db.Exec(ctx, lockGlobalFreezeSQL); err != nil {
+			return nil, fmt.Errorf("wait for in-flight claims: %w", err)
+		}
 		return nil, nil
 	}
 	id, err := s.EnsureApp(ctx, *target)
@@ -181,13 +197,6 @@ func (s *Store) lockScope(ctx context.Context, target *core.Target) (*AppID, err
 		return nil, fmt.Errorf("lock app %s: %w", target, err)
 	}
 	return &id, nil
-}
-
-func (s *Store) purgeExpiredFreeze(ctx context.Context, appID *AppID) error {
-	if _, err := s.db.Exec(ctx, purgeExpiredFreezeSQL, appID); err != nil {
-		return fmt.Errorf("delete expired freeze: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) insertFreeze(ctx context.Context, appID *AppID, req core.LockRequest) (core.Lock, error) {
@@ -222,9 +231,6 @@ func (s *Store) ReleaseFreeze(ctx context.Context, target *core.Target, actor st
 	err := s.InTx(ctx, func(tx *Store) error {
 		appID, err := tx.findApp(ctx, target)
 		if err != nil {
-			return err
-		}
-		if err := tx.purgeExpiredFreeze(ctx, appID); err != nil {
 			return err
 		}
 		lock, err = scanLock(tx.db.QueryRow(ctx, deleteFreezeSQL, appID, actor))

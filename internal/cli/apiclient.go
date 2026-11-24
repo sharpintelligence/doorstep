@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,6 +70,9 @@ func newAPIClient(changed func(name string) bool, serverFlag string, lookupEnv L
 	if err != nil {
 		return nil, err
 	}
+	if token != "" && !protectsToken(base) {
+		return nil, fmt.Errorf("%s: refusing to send the API token over plain http to %s; use https, or http only to a loopback address", source, base.Hostname())
+	}
 	return &apiClient{
 		base:      base,
 		token:     token,
@@ -97,6 +101,18 @@ func parseServerURL(raw string) (*url.URL, error) {
 		return nil, errors.New("must not include a query or fragment")
 	}
 	return u, nil
+}
+
+func protectsToken(u *url.URL) bool {
+	if u.Scheme == "https" {
+		return true
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func readToken(lookupEnv LookupEnv) (string, error) {

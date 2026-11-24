@@ -7,8 +7,9 @@ import (
 )
 
 var (
-	ErrLockHeld    = errors.New("lock is held")
-	ErrInvalidLock = errors.New("invalid lock")
+	ErrLockHeld      = errors.New("lock is held")
+	ErrInvalidLock   = errors.New("invalid lock")
+	ErrLockContended = errors.New("lock is changing concurrently; retry")
 )
 
 type LockRequest struct {

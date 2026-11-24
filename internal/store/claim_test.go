@@ -303,7 +303,7 @@ func (e *claimEnv) freeze(app string) {
 	if app != "" {
 		target = &core.Target{App: app, Environment: "prod"}
 	}
-	if _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: target, Owner: "ops", Reason: "test"}); err != nil {
+	if _, _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: target, Owner: "ops", Reason: "test"}); err != nil {
 		e.t.Fatalf("AcquireFreeze(%q): %v", app, err)
 	}
 }
@@ -439,7 +439,7 @@ func TestClaimHonoursFreezes(t *testing.T) {
 			name: "freeze on another environment does not block",
 			run: func(e *claimEnv) {
 				e.enqueue("web", 0)
-				if _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: &core.Target{App: "web", Environment: "staging"}, Owner: "ops", Reason: "staging"}); err != nil {
+				if _, _, err := e.st.AcquireFreeze(e.t.Context(), core.LockRequest{Target: &core.Target{App: "web", Environment: "staging"}, Owner: "ops", Reason: "staging"}); err != nil {
 					e.t.Fatalf("AcquireFreeze: %v", err)
 				}
 				e.expectClaim("w1", 0, 1)
@@ -474,14 +474,137 @@ func TestClaimRecheckRejectsFreezeCommittedDuringClaim(t *testing.T) {
 			mustExec(t, st, "CREATE TRIGGER freeze_on_lease AFTER UPDATE OF lease_owner ON queue_entries FOR EACH ROW WHEN (NEW.lease_owner IS NOT NULL) EXECUTE FUNCTION freeze_on_lease()")
 
 			d, ok, err := store.ClaimExcluding(t.Context(), st, "w1", testLease, []store.AppID{})
-			if !errors.Is(err, store.ErrClaimRejected) || ok {
-				t.Fatalf("ClaimExcluding = %d, %v, %v; want the claim rejected", d.ID, ok, err)
+			if reason, rejected := store.ClaimRejectReason(err); !rejected || reason != store.SkipFrozen || ok {
+				t.Fatalf("ClaimExcluding = %d, %v, %v; want the claim rejected as frozen", d.ID, ok, err)
 			}
 			if n := queryInt(t, st, "SELECT count(*) FROM queue_entries WHERE lease_owner IS NOT NULL"); n != 0 {
 				t.Errorf("rejected claim left %d leases", n)
 			}
 		})
 	}
+}
+
+func TestClaimReportsSkippedTargets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		trigger string
+		want    store.SkipReason
+	}{
+		{
+			name:    "frozen",
+			trigger: "INSERT INTO locks (app_id, kind, owner) VALUES (NEW.app_id, 'freeze', 'ops') ON CONFLICT DO NOTHING",
+			want:    store.SkipFrozen,
+		},
+		{
+			name:    "leased",
+			trigger: "UPDATE queue_entries SET lease_owner = 'other', lease_expires_at = now() + interval '1 minute' WHERE app_id = NEW.app_id AND deployment_id <> NEW.deployment_id AND lease_owner IS NULL",
+			want:    store.SkipLeased,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			web := mustCreate(t, st, newDeployment("web"), 1)
+			mustCreate(t, st, newDeployment("web"), 0)
+			api := mustCreate(t, st, newDeployment("api"), 0)
+			webAppID := queryInt(t, st, "SELECT app_id FROM queue_entries WHERE deployment_id = $1", web.ID)
+			mustExec(t, st, "CREATE FUNCTION skip_on_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "+tt.trigger+"; RETURN NEW; END $$")
+			mustExec(t, st, fmt.Sprintf("CREATE TRIGGER skip_on_lease AFTER UPDATE OF lease_owner ON queue_entries FOR EACH ROW WHEN (NEW.lease_owner = 'w1' AND NEW.deployment_id = %d) EXECUTE FUNCTION skip_on_lease()", web.ID))
+
+			d, c, ok, err := st.Claim(t.Context(), "w1", testLease)
+			if err != nil || !ok || d.ID != api.ID {
+				t.Fatalf("Claim = %d, %v, %v; want deployment %d", d.ID, ok, err, api.ID)
+			}
+			want := []store.SkippedTarget{{AppID: store.AppID(webAppID), Reason: tt.want}}
+			if fmt.Sprint(c.Skipped) != fmt.Sprint(want) {
+				t.Errorf("Skipped = %+v, want %+v", c.Skipped, want)
+			}
+		})
+	}
+}
+
+func TestClaimAndGlobalFreezeAreOrdered(t *testing.T) {
+	t.Parallel()
+
+	t.Run("freeze waits for an open claim", func(t *testing.T) {
+		t.Parallel()
+		st := storetest.Open(t)
+		created := mustCreate(t, st, newDeployment("web"), 0)
+		frozen := make(chan error, 1)
+		err := st.InTx(t.Context(), func(tx *store.Store) error {
+			d, ok, err := store.ClaimExcluding(t.Context(), tx, "w1", testLease, []store.AppID{})
+			if err != nil || !ok || d.ID != created.ID {
+				t.Fatalf("ClaimExcluding = %d, %v, %v", d.ID, ok, err)
+			}
+			go func() {
+				_, _, err := st.AcquireFreeze(t.Context(), freeze(nil, "ops", "freeze"))
+				frozen <- err
+			}()
+			waitForGlobalFreezeWaiter(t, st)
+			select {
+			case err := <-frozen:
+				t.Fatalf("AcquireFreeze returned %v before the claim committed", err)
+			default:
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("InTx: %v", err)
+		}
+		if err := <-frozen; err != nil {
+			t.Fatalf("AcquireFreeze: %v", err)
+		}
+		if n := queryInt(t, st, "SELECT count(*) FROM queue_entries WHERE lease_owner = 'w1'"); n != 1 {
+			t.Errorf("claim leases = %d, want 1", n)
+		}
+	})
+
+	t.Run("claim waits for an open freeze", func(t *testing.T) {
+		t.Parallel()
+		st := storetest.Open(t)
+		mustCreate(t, st, newDeployment("web"), 0)
+		type claimed struct {
+			ok  bool
+			err error
+		}
+		done := make(chan claimed, 1)
+		err := st.InTx(t.Context(), func(tx *store.Store) error {
+			if _, _, err := tx.AcquireFreeze(t.Context(), freeze(nil, "ops", "freeze")); err != nil {
+				t.Fatalf("AcquireFreeze: %v", err)
+			}
+			go func() {
+				_, _, ok, err := st.Claim(t.Context(), "w1", testLease)
+				done <- claimed{ok: ok, err: err}
+			}()
+			waitForGlobalFreezeWaiter(t, st)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("InTx: %v", err)
+		}
+		if got := <-done; got.err != nil || got.ok {
+			t.Errorf("Claim after a global freeze = %v, %v; want nothing claimed", got.ok, got.err)
+		}
+	})
+}
+
+func waitForGlobalFreezeWaiter(t *testing.T, st *store.Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := store.GlobalFreezeWaiters(t.Context(), st)
+		if err != nil {
+			t.Fatalf("GlobalFreezeWaiters: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("nothing waited for the global freeze lock")
 }
 
 func TestClaimTakesOnlyClaimableStates(t *testing.T) {

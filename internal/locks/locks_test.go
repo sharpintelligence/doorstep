@@ -37,22 +37,23 @@ type fakeRepo struct {
 	listed   []core.Lock
 	blocking []core.Lock
 	expired  []core.Lock
+	purged   []core.Lock
 	due      []core.Lock
 	blockArg core.Target
 }
 
-func (f *fakeRepo) AcquireFreeze(_ context.Context, req core.LockRequest) (core.Lock, error) {
+func (f *fakeRepo) AcquireFreeze(_ context.Context, req core.LockRequest) (core.Lock, []core.Lock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acquired = append(f.acquired, req)
 	if f.acquireErr != nil {
-		return core.Lock{}, f.acquireErr
+		return core.Lock{}, nil, f.acquireErr
 	}
 	l := core.Lock{Global: req.Target == nil, Kind: core.LockFreeze, Owner: req.Owner, Reason: req.Reason, CreatedAt: fixedTime}
 	if req.Target != nil {
 		l.Target = *req.Target
 	}
-	return l, nil
+	return l, f.purged, nil
 }
 
 func (f *fakeRepo) ReleaseFreeze(_ context.Context, target *core.Target, actor string) (core.Lock, error) {
@@ -270,6 +271,78 @@ func TestLockErrorsPassThrough(t *testing.T) {
 	_, err := s.Lock(t.Context(), core.LockRequest{Target: &web, Owner: "alice", Reason: "second"})
 	if got, ok := errors.AsType[*core.LockHeldError](err); !ok || got.Lock.Owner != "bob" {
 		t.Errorf("Lock = %v, want the held lock", err)
+	}
+}
+
+func TestLockNotifiesPurgedExpiredFreezes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		target *core.Target
+		purged []core.Lock
+		want   []string
+	}{
+		{name: "nothing purged", target: &web, want: []string{"locked web actor=alice"}},
+		{
+			name:   "app freeze purged",
+			target: &web,
+			purged: []core.Lock{{Target: web, Owner: "bob", Reason: "old"}},
+			want:   []string{"expired web actor=", "locked web actor=alice"},
+		},
+		{
+			name:   "global freeze purged",
+			purged: []core.Lock{{Global: true, Owner: "bob", Reason: "old"}},
+			want:   []string{"expired global actor=", "locked global actor=alice"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			n := &recordingNotifier{}
+			s := newService(t, &fakeRepo{purged: tt.purged}, n, &logs)
+			if _, err := s.Lock(t.Context(), core.LockRequest{Target: tt.target, Owner: "alice", Reason: "new"}); err != nil {
+				t.Fatalf("Lock: %v", err)
+			}
+			if !slices.Equal(n.summary(), tt.want) {
+				t.Errorf("notifications = %q, want %q", n.summary(), tt.want)
+			}
+			if got := strings.Count(logs.String(), "msg=\"lock expired\""); got != len(tt.purged) {
+				t.Errorf("logged %d expiries, want %d:\n%s", got, len(tt.purged), logs.String())
+			}
+		})
+	}
+}
+
+type contextNotifier struct {
+	err         error
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (n *contextNotifier) NotifyLock(ctx context.Context, _ core.LockEvent) error {
+	n.err = ctx.Err()
+	n.deadline, n.hasDeadline = ctx.Deadline()
+	return nil
+}
+
+func TestNotifyOutlivesTheRequest(t *testing.T) {
+	t.Parallel()
+
+	n := &contextNotifier{}
+	s := newService(t, &fakeRepo{}, n, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	before := time.Now()
+	if _, err := s.Unlock(ctx, &web, "bob"); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if n.err != nil {
+		t.Errorf("notifier context error = %v, want none after the request was cancelled", n.err)
+	}
+	if !n.hasDeadline || n.deadline.Before(before) || n.deadline.After(time.Now().Add(NotifyTimeout)) {
+		t.Errorf("notifier deadline = %v (set %v), want within %s", n.deadline, n.hasDeadline, NotifyTimeout)
 	}
 }
 
