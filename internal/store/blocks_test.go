@@ -125,6 +125,14 @@ func TestCreateBlockMergesCommitAndDigest(t *testing.T) {
 			wantRepo:   "acme/blog",
 		},
 		{
+			name:     "digest blocked with another commit gives the commit its own block",
+			first:    newBlock(testDigest, testSHA),
+			second:   newBlock(testDigest, otherSHA),
+			wantNew:  true,
+			wantSHA:  otherSHA,
+			wantRepo: "acme/blog",
+		},
+		{
 			name:     "another commit is a new block",
 			first:    newBlock("", testSHA),
 			second:   newBlock("", otherSHA),
@@ -149,6 +157,32 @@ func TestCreateBlockMergesCommitAndDigest(t *testing.T) {
 				t.Errorf("CreateBlock = %+v, want digest %q commit %s@%s", got, tt.wantDigest, tt.wantRepo, tt.wantSHA)
 			}
 		})
+	}
+}
+
+func TestCreateBlockKeepsEveryCommitOfABlockedDigest(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	first := mustBlock(t, st, newBlock(testDigest, testSHA))
+	second := mustBlock(t, st, newBlock(testDigest, otherSHA))
+	again, isNew, err := st.CreateBlock(t.Context(), newBlock(testDigest, otherSHA))
+	if err != nil || isNew || again.ID != second.ID {
+		t.Fatalf("CreateBlock(again) = block %d new %v, %v, want block %d", again.ID, isNew, err, second.ID)
+	}
+
+	blocks, err := st.ListBlocks(t.Context(), blogProd, false)
+	if err != nil || len(blocks) != 2 || blocks[1].ID != first.ID || blocks[1].Digest != testDigest || blocks[1].Commit.SHA != testSHA ||
+		blocks[0].Digest != "" || blocks[0].Commit.SHA != otherSHA {
+		t.Errorf("blocks = %+v, %v, want the first block unchanged and a commit-only block of %s", blocks, err, otherSHA)
+	}
+	for _, sha := range []string{testSHA, otherSHA} {
+		if _, found, err := st.Blocked(t.Context(), blogProd, core.Commit{Repository: "acme/blog", SHA: sha}); err != nil || !found {
+			t.Errorf("Blocked(%s) = %v, %v, want blocked", sha, found, err)
+		}
+	}
+	if got, found, err := st.ActiveBlock(t.Context(), blogProd, core.BlockRef{Digest: testDigest}); err != nil || !found || got.ID != first.ID {
+		t.Errorf("ActiveBlock(digest) = %+v, %v, %v, want block %d", got, found, err, first.ID)
 	}
 }
 

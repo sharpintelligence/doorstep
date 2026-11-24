@@ -46,11 +46,9 @@ func (a *api) rollbackApp(w http.ResponseWriter, r *http.Request, caller Caller)
 		return
 	}
 	var body rollbackRequest
-	if r.ContentLength != 0 {
-		if reqErr := decodeJSON(w, r, &body); reqErr != nil {
-			writeError(w, reqErr.status, reqErr.code, reqErr.message)
-			return
-		}
+	if reqErr := decodeOptionalJSON(w, r, &body); reqErr != nil {
+		writeError(w, reqErr.status, reqErr.code, reqErr.message)
+		return
 	}
 	req := rollback.Request{
 		Target:       core.AppTarget(app),

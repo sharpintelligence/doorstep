@@ -1,6 +1,6 @@
 # 0009: Blocks live in Postgres and are mirrored to git
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

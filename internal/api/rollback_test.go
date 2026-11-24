@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -352,5 +353,46 @@ func TestRollbackAndBlockAuthorization(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized || !strings.HasPrefix(rec.Header().Get("WWW-Authenticate"), "Bearer") {
 			t.Errorf("unauthenticated POST %s = %d", path, rec.Code)
 		}
+	}
+}
+
+func TestRollbackBodyOfUnknownLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		body        string
+		contentType string
+		wantStatus  int
+		wantReason  string
+	}{
+		{name: "empty without a content type", wantStatus: http.StatusCreated},
+		{name: "empty with a JSON content type", contentType: "application/json", wantStatus: http.StatusCreated},
+		{name: "JSON object", body: `{"reason":"5xx"}`, contentType: "application/json", wantStatus: http.StatusCreated, wantReason: "5xx"},
+		{name: "JSON without a content type", body: `{"reason":"5xx"}`, wantStatus: http.StatusUnsupportedMediaType},
+		{name: "malformed JSON", body: `{"reason":`, contentType: "application/json", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeRollbacks{}
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/apps/web/rollback", io.NopCloser(strings.NewReader(tt.body)))
+			r.ContentLength = -1
+			r.Header.Set("Authorization", goodToken)
+			if tt.contentType != "" {
+				r.Header.Set("Content-Type", tt.contentType)
+			}
+			rec := httptest.NewRecorder()
+			newRollbackHandler(t, f, fakeAuth{}, io.Discard).ServeHTTP(rec, r)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tt.wantStatus, rec.Body)
+			}
+			if tt.wantStatus != http.StatusCreated {
+				return
+			}
+			if len(f.requests) != 1 || f.requests[0].Reason != tt.wantReason {
+				t.Errorf("requests = %+v, want one with reason %q", f.requests, tt.wantReason)
+			}
+		})
 	}
 }

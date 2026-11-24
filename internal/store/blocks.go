@@ -181,6 +181,12 @@ func (s *Store) CreateBlock(ctx context.Context, b core.Block) (core.Block, bool
 		if err != nil {
 			return err
 		}
+		if found && existing.Commit.SHA != "" && b.Commit.SHA != "" && existing.Commit.SHA != b.Commit.SHA {
+			b.Digest = ""
+			if existing, found, err = tx.findBlockToExtend(ctx, appID, b); err != nil {
+				return err
+			}
+		}
 		id := existing.ID
 		if found {
 			_, err = tx.db.Exec(ctx, completeBlockSQL, id, b.Digest, b.Commit.SHA, b.Commit.Repository, b.DeploymentID, b.RollbackID)

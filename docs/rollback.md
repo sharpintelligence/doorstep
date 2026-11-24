@@ -35,10 +35,11 @@ A block says "do not deploy this version of this app automatically". It is keyed
 - A rollback blocks the current deployment's digest and, unless it equals the target's commit, its commit SHA. A deploy cancelled before its digest was resolved gets a commit-only block. A cancelled rebuild of the target's own commit that never resolved blocks nothing.
 - `doorstep block <app> <digest|commit> --reason <text>` blocks by hand. The reason is required.
 - Lookups match either key: a block on a digest stops that digest, a block on a commit stops that commit.
+- An app has at most one active block per digest and one active commit-only block per commit. Blocking a version that already has an active block extends that block: a digest is added to a commit-only block of the same commit, and a commit is added to a digest block that has none. When the digest is already blocked together with a different commit (two commits built the same image), the new commit gets its own commit-only block instead, so both commits stay blocked; a rollback then reports and audits that commit-only block, since the digest was already blocked.
 
 Blocks never stop rollbacks. They stop automatic deploys at two places:
 
-- **Intake** refuses a green commit that has an active block on its commit SHA. The check runs inside the same transaction that would enqueue the deploy ([architecture.md](architecture.md#merge-and-ci-detection)), so it cannot race with a rollback request. The evaluation is saved, nothing is queued, the tracked commit stays open and `intake.Result.Blocked` names the block; intake logs `commit is blocked; not enqueued`.
+- **Intake** refuses a green commit that has an active block on its commit SHA. The check runs inside the same transaction that would enqueue the deploy ([architecture.md](architecture.md#merge-and-ci-detection)), which takes the app row lock before it reads blocks, so it cannot race with a rollback request: either the rollback commits first and intake sees its block, or intake queues first and the rollback cancels that queued deploy. The evaluation is saved, nothing is queued, the tracked commit stays open and `intake.Result.Blocked` names the block; intake logs `commit is blocked; not enqueued`.
 - **The engine** refuses a deploy whose resolved digest is blocked, after resolving and before pinning, and fails the deployment with a reason naming the block. This covers deploys requested by other paths and rebuilt images of an unblocked commit. Rollbacks skip the check.
 
 A rollback target is never a blocked digest, and the default target selection skips blocked digests, so "v3 succeeded, v3 rolled back, then v2 rolled back" picks v1, not the blocked v3.
@@ -53,7 +54,7 @@ doorstep unblock blog 0123456789abcdef0123456789abcdef01234567
 
 `unblock` clears every active block that matches the digest or commit given (a commit can have several digest blocks), records who cleared it and writes a `block.clear` audit row. Clearing does not deploy anything. A commit that intake refused stays open, so once unblocked it is queued by the next check event or poll while it is still the branch head and green. To deploy an older version explicitly, roll back to it with `--to`, or push it again.
 
-`doorstep block` on a version that is already blocked returns the existing block (`200` instead of `201`) and writes no audit row.
+`doorstep block` on a version that is already blocked returns the existing block (`200` instead of `201`) and writes no audit row: a request names a single digest or commit, so it never changes the existing block.
 
 ### Blocks in git
 
@@ -88,7 +89,7 @@ All endpoints are under `/api/v1/apps/{app}`, use the [error envelope](api.md#co
 
 ### `POST /api/v1/apps/{app}/rollback`
 
-Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback):
+Role `deployer`. Body (optional; an empty body or `{}` is a one-click rollback, whether the request sends `Content-Length: 0` or a chunked body with no bytes; a non-empty body must be `application/json`):
 
 ```json
 {"to_deployment_id": 41, "reason": "checkout errors"}
