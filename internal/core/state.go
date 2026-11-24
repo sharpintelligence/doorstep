@@ -87,7 +87,7 @@ func transitions() map[State][]State {
 		StateQueued:    {StateResolving, StateFailed, StateCancelled, StateSuperseded},
 		StateResolving: {StatePinning, StateFailed, StateCancelled, StateSuperseded},
 		StatePinning:   {StateSyncing, StateFailed, StateCancelled},
-		StateSyncing:   {StateVerifying, StateFailed, StateCancelled},
+		StateSyncing:   {StateSyncing, StateVerifying, StateFailed, StateCancelled},
 		StateVerifying: {StateSucceeded, StateFailed, StateCancelled},
 	}
 }

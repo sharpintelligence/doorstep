@@ -123,6 +123,8 @@ func outcome(n core.Notification) string {
 		return deploymentNoun(n.Deployment) + " queued"
 	case core.NotificationDeployStarted:
 		return deploymentNoun(n.Deployment) + " started"
+	case core.NotificationDeployRetrying:
+		return deploymentNoun(n.Deployment) + " failed an attempt, retrying"
 	case core.NotificationDeploySucceeded:
 		return deploymentNoun(n.Deployment) + " succeeded"
 	case core.NotificationDeployFailed:

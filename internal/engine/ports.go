@@ -27,6 +27,7 @@ type Transition struct {
 	Data          json.RawMessage
 	FailureReason string
 	Lineage       core.Lineage
+	ExpectRetries *int
 }
 
 type PinRequest struct {
@@ -48,6 +49,13 @@ type DeploymentStore interface {
 	Transition(ctx context.Context, t Transition) (core.Deployment, error)
 	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
 	TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error)
+	RetryState(ctx context.Context, id core.DeploymentID) (RetryState, error)
+}
+
+type RetryState struct {
+	Retries     int
+	Delay       time.Duration
+	MaxAttempts int
 }
 
 type DigestResolver interface {
@@ -83,6 +91,7 @@ type Notifier interface {
 type Metrics interface {
 	DeploymentStarted(app string)
 	DeploymentFinished(app string, outcome Outcome, duration time.Duration)
+	DeploymentRetried(app string, class core.FailureClass)
 }
 
 type Outcome string
@@ -105,3 +114,5 @@ type nopMetrics struct{}
 func (nopMetrics) DeploymentStarted(string) {}
 
 func (nopMetrics) DeploymentFinished(string, Outcome, time.Duration) {}
+
+func (nopMetrics) DeploymentRetried(string, core.FailureClass) {}

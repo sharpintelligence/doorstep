@@ -346,7 +346,10 @@ func TestWaitSyncedFailsFast(t *testing.T) {
 
 	failed := with(synced(pinSHA), func(a *argocdtest.Application) {
 		a.Sync = "OutOfSync"
-		a.Operation = &argocdtest.Operation{Phase: "Failed", Message: "hook migrate failed", Revision: pinSHA}
+		a.Operation = &argocdtest.Operation{
+			Phase: "Failed", Message: "hook migrate failed", Revision: pinSHA,
+			Resources: []argocdtest.SyncResource{{Group: "batch", Kind: "Job", Namespace: "blog", Name: "migrate", Status: "Synced", HookPhase: "Failed", Message: "job failed"}},
+		}
 	})
 	tests := []struct {
 		name       string

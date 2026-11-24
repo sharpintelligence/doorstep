@@ -445,7 +445,7 @@ func runFailureCase(t *testing.T, tt failureCase) {
 		}
 	}
 	last := h.store.recorded()[len(h.store.recorded())-1]
-	var data map[string]string
+	var data map[string]any
 	if err := json.Unmarshal(last.Data, &data); err != nil || data["stage"] != string(tt.wantStage) || data["failure_class"] != string(tt.wantClass) {
 		t.Errorf("failure event data = %s (%v)", last.Data, err)
 	}
@@ -533,7 +533,7 @@ func TestHandleSyncFailures(t *testing.T) {
 			if len(decided) != 1 || decided[0].Class != tt.wantClass || decided[0].Sync == nil || decided[0].Sync.Reason != tt.wantSync {
 				t.Fatalf("policy saw %+v, want class %s sync reason %s", decided, tt.wantClass, tt.wantSync)
 			}
-			var data map[string]string
+			var data map[string]any
 			recorded := h.store.recorded()
 			if err := json.Unmarshal(recorded[len(recorded)-1].Data, &data); err != nil || data["sync_reason"] != string(tt.wantSync) || data["stage"] != "syncing" {
 				t.Errorf("event data = %v (%v)", data, err)
@@ -1325,13 +1325,15 @@ func TestFailurePolicy(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		action engine.FailureAction
-		err    error
+		name         string
+		action       engine.FailureAction
+		err          error
+		wantDecision engine.DecisionReason
 	}{
-		{name: "fail", action: engine.FailureActionFail},
-		{name: "unknown action", action: "retry"},
-		{name: "policy error", err: errors.New("policy unavailable")},
+		{name: "fail", action: engine.FailureActionFail, wantDecision: engine.DecisionNotRetryable},
+		{name: "unknown action", action: "explode", wantDecision: engine.DecisionNotRetryable},
+		{name: "retry outside syncing", action: engine.FailureActionRetry, wantDecision: engine.DecisionNotRetryable},
+		{name: "policy error", err: errors.New("policy unavailable"), wantDecision: engine.DecisionNotRetryable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1349,8 +1351,12 @@ func TestFailurePolicy(t *testing.T) {
 				t.Fatalf("state = %s, want failed", got.State)
 			}
 			decided := h.policy.decided()
-			if len(decided) != 1 || decided[0].Gates == nil || decided[0].Gates.Status != core.GateFailed || decided[0].Stage != core.StateVerifying {
+			if len(decided) != 1 || decided[0].Gates == nil || decided[0].Gates.Status != core.GateFailed || decided[0].Stage != core.StateVerifying || decided[0].Attempt != 1 {
 				t.Errorf("policy saw %+v", decided)
+			}
+			data := lastEventData(t, h)
+			if data.Decision != tt.wantDecision || data.Attempts != 1 || !data.RollbackEligible || data.FailureClass != core.FailureVersion {
+				t.Errorf("failure data = %+v, want decision %s, one attempt, eligible for rollback", data, tt.wantDecision)
 			}
 		})
 	}
@@ -1359,9 +1365,9 @@ func TestFailurePolicy(t *testing.T) {
 func TestFailPolicyAlwaysFails(t *testing.T) {
 	t.Parallel()
 
-	action, err := engine.FailPolicy{}.Decide(t.Context(), engine.Failure{})
-	if action != engine.FailureActionFail || err != nil {
-		t.Fatalf("Decide = %s, %v", action, err)
+	decision, err := engine.FailPolicy{}.Decide(t.Context(), engine.Failure{Class: core.FailureTransient})
+	if err != nil || decision.Action != engine.FailureActionFail || decision.Reason != engine.DecisionNotRetryable || decision.Class != core.FailureTransient {
+		t.Fatalf("Decide = %+v, %v", decision, err)
 	}
 }
 

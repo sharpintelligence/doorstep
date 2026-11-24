@@ -22,6 +22,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0014](0014-external-gates-and-commit-status-mirror.md) | External gates and the commit status mirror | Proposed | 2026-11-24 |
 | [0015](0015-migration-aware-releases.md) | Migration-aware releases | Proposed | 2026-11-24 |
 | [0016](0016-validation-job-gate.md) | The validation Job gate reads a PostSync hook | Proposed | 2026-11-24 |
+| [0017](0017-retry-before-rollback.md) | Retry before rollback | Proposed | 2026-11-24 |
 
 ## When to write one
 

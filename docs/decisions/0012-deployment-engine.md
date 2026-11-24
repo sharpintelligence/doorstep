@@ -5,7 +5,7 @@
 
 ## Context
 
-Every adapter a deployment needs existed (queue and runner, registry, GitOps pin writer, Argo CD watcher, gates, blocks, notifications, metrics), but nothing drove a deployment from `queued` to a final state. The engine has to do that across several replicas, survive restarts at any point, never wedge a target (one active deployment per target), keep rollbacks and urgent deploys moving, and leave hooks for retries (doorstep-ehl.6.2) and automatic rollback (doorstep-ehl.6.5). The claim orders in-flight deployments ahead of everything else for a target, and a `schedule` or `lock` gate can keep a deploy waiting for days. See [engine.md](../engine.md).
+Every adapter a deployment needs existed (queue and runner, registry, GitOps pin writer, Argo CD watcher, gates, blocks, notifications, metrics), but nothing drove a deployment from `queued` to a final state. The engine has to do that across several replicas, survive restarts at any point, never wedge a target (one active deployment per target), keep rollbacks and urgent deploys moving, and leave hooks for retries (doorstep-ehl.6.5) and automatic rollback (doorstep-ehl.6.2). The claim orders in-flight deployments ahead of everything else for a target, and a `schedule` or `lock` gate can keep a deploy waiting for days. See [engine.md](../engine.md).
 
 ## Decision
 
@@ -30,7 +30,7 @@ Every adapter a deployment needs existed (queue and runner, registry, GitOps pin
 ## Consequences
 
 - A deployment held by a before gate is visible as `queued` with its gate results, not as in flight, and the newest commit wins when a deploy window opens.
-- A dependency outage of any length cannot wedge a target: past its deadline the deployment fails with the last error and the queue moves on. The cost is a failed deployment that a person may have to queue again until retries (doorstep-ehl.6.2) exist.
+- A dependency outage of any length cannot wedge a target: past its deadline the deployment fails with the last error and the queue moves on. The cost is a failed deployment that a person may have to queue again until retries (doorstep-ehl.6.5) exist.
 - A crash between a transition and its notification loses that notification; the history is the durable record.
-- A failed deploy that already pinned stays pinned until someone requests a rollback, until automatic rollback (doorstep-ehl.6.5) uses the failure policy hook.
+- A failed deploy that already pinned stays pinned until someone requests a rollback, until automatic rollback (doorstep-ehl.6.2) uses the failure policy hook.
 - `serve` refuses to start with apps configured but without the GitHub App or a Kubernetes connection, so tests and installations that configure apps must provide both.

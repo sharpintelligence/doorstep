@@ -85,6 +85,22 @@ doorstep_migration_detection_failures_total{app="web"} 2
 `,
 		},
 		{
+			name: "deployment retries per app and class",
+			calls: func(r *Recorder) {
+				r.DeploymentRetried("web", FailureClassTransient)
+				r.DeploymentRetried("web", FailureClassTransient)
+				r.DeploymentRetried("web", FailureClassUnknown)
+				r.DeploymentRetried("api", FailureClass("odd"))
+			},
+			want: `
+# HELP doorstep_deployment_retries_total Failed deployment attempts that doorstep retried on the same version, by application and failure class.
+# TYPE doorstep_deployment_retries_total counter
+doorstep_deployment_retries_total{app="api",class="unknown"} 1
+doorstep_deployment_retries_total{app="web",class="transient"} 2
+doorstep_deployment_retries_total{app="web",class="unknown"} 1
+`,
+		},
+		{
 			name: "rollbacks per app and reason",
 			calls: func(r *Recorder) {
 				r.Rollback("web", RollbackReasonGateFailed)

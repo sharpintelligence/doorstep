@@ -7,7 +7,9 @@ doorstep ships a [kustomize](https://kustomize.io) base under `deploy/kustomize`
 | `deploy/kustomize/base` | The install base: ServiceAccount, RBAC, ConfigMap, Deployment and Service |
 | `deploy/kustomize/components/registry-credentials` | Optional component that mounts registry credentials |
 | `deploy/kustomize/components/job-gate` | Optional component that lets doorstep read validation Jobs for the [`job` gate](#validation-jobs) |
-| `deploy/kustomize/examples/homelab` | A complete example overlay with a namespace and an example configuration file |
+| `deploy/kustomize/components/pod-diagnostics` | Optional component that lets doorstep list pods to tell flaky nodes from bad versions before [retrying](#pod-diagnostics) |
+| `deploy/kustomize/components/pod-diagnostics-cluster-wide` | Optional component that grants the pod read in every namespace instead of the namespaces you bind |
+| `deploy/kustomize/examples/homelab` | A complete example overlay with a namespace, an example configuration file, registry credentials and pod diagnostics |
 
 ## Prerequisites
 
@@ -248,6 +250,44 @@ subjects:
     namespace: doorstep
 ```
 
+## Pod diagnostics
+
+When a deploy does not become healthy, doorstep [retries it on the same pin](engine.md#retry-before-rollback) unless the failure looks caused by the version. Telling a slow or broken node from a bad build needs the pods' nodes, waiting reasons and exit codes, which the Argo CD Application does not carry. The component `components/pod-diagnostics` defines that read and turns it on, but grants it nowhere by itself:
+
+| Object | Name | Purpose |
+| --- | --- | --- |
+| ClusterRole | `doorstep-pods-reader` | `list` on core `pods`, nothing else: no `get`, `watch`, logs, `exec` or Secrets |
+| Deployment patch | `doorstep` | Sets `DOORSTEP_KUBE_POD_DIAGNOSTICS=true` |
+
+```yaml kubernetes
+components:
+  - github.com/sharpintelligence/doorstep//deploy/kustomize/components/pod-diagnostics?ref=vX.Y.Z
+```
+
+Then grant the read only in the namespaces your apps' workloads run in, with a RoleBinding to the ClusterRole in each of them. Apply these from your apps' GitOps manifests or from a kustomization without an overlay-wide `namespace:` (kustomize would otherwise move them into doorstep's namespace):
+
+```yaml kubernetes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: doorstep-pods-reader
+  namespace: web-prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: doorstep-pods-reader
+subjects:
+  - kind: ServiceAccount
+    name: doorstep
+    namespace: doorstep
+```
+
+To grant it in every namespace instead, add `components/pod-diagnostics-cluster-wide` as well. It adds the ClusterRoleBinding `doorstep-pods-reader` to the `doorstep` ServiceAccount; add it in the overlay that sets `namespace:`, so kustomize fills in the subject namespace. The homelab example enables only the namespaced component.
+
+**What crosses the wire.** The Kubernetes API has no field filter for list responses, so each list returns whole pod objects: metadata, the full spec, including container commands, arguments and literal `env` values (which may hold secrets when they are not taken from a Secret), and the status. doorstep decodes only the node, images, owner references, the `pod-template-hash` labels, phase, conditions and container states, so the rest is never kept, stored or logged, but it does reach doorstep's memory over TLS. Keep secrets in Secrets referenced with `valueFrom`, and keep the grant to the namespaces you need.
+
+doorstep lists pods only after a failed attempt, in at most five namespaces taken from the Application's workloads, in pages of 500 pods, reading at most 10 pages per namespace (a warning is logged when a namespace has more) and keeping at most 200 pods. It still never writes to the cluster. Without the component, or when a list returns `403`, failures are classified from the Application alone and retries still happen.
+
 ## Exposing the HTTP port
 
 The Service has two ports. Route only `http` (8080) from an Ingress or Gateway; never route `metrics`.
@@ -294,7 +334,7 @@ spec:
 
 ## Security posture
 
-The pod meets the restricted Pod Security Standard: non-root user 65532, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped and a read-only root filesystem. The service writes nothing to disk, so there is no writable volume. The only Kubernetes permissions are the read-only Applications grant above and, with the `job-gate` component, `get` on Jobs.
+The pod meets the restricted Pod Security Standard: non-root user 65532, `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped and a read-only root filesystem. The service writes nothing to disk, so there is no writable volume. The only Kubernetes permissions are the read-only Applications grant above, with the `job-gate` component `get` on Jobs, and with the `pod-diagnostics` component `list` on pods in the namespaces you bind.
 
 ## Scaling
 

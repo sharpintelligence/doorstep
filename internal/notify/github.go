@@ -290,7 +290,7 @@ func githubState(kind core.NotificationKind) (github.DeploymentState, bool) {
 		return github.DeploymentFailure, true
 	case core.NotificationDeployCancelled, core.NotificationDeploySuperseded:
 		return github.DeploymentInactive, true
-	case core.NotificationLockChanged, core.NotificationLockReminder:
+	case core.NotificationDeployRetrying, core.NotificationLockChanged, core.NotificationLockReminder:
 		return "", false
 	}
 	return "", false
@@ -301,7 +301,7 @@ func isTerminal(kind core.NotificationKind) bool {
 	case core.NotificationDeploySucceeded, core.NotificationDeployRolledBack, core.NotificationDeployFailed,
 		core.NotificationDeployCancelled, core.NotificationDeploySuperseded:
 		return true
-	case core.NotificationDeployQueued, core.NotificationDeployStarted, core.NotificationLockChanged, core.NotificationLockReminder:
+	case core.NotificationDeployQueued, core.NotificationDeployStarted, core.NotificationDeployRetrying, core.NotificationLockChanged, core.NotificationLockReminder:
 		return false
 	}
 	return false
@@ -343,7 +343,7 @@ func statusDescription(n core.Notification) string {
 			return "Superseded by " + deploymentRef(*d.SupersededByID)
 		}
 		return "Superseded"
-	case core.NotificationLockChanged, core.NotificationLockReminder:
+	case core.NotificationDeployRetrying, core.NotificationLockChanged, core.NotificationLockReminder:
 		return ""
 	}
 	return ""

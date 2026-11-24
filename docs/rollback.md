@@ -137,6 +137,10 @@ Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollba
 
 ### Automatic rollbacks
 
+Automatic rollback is bead doorstep-ehl.6.2. A deploy that does not become healthy is first [retried on the same pin](engine.md#retry-before-rollback); only once the retry budget is spent, or the failure is classified as caused by the version (or an after gate failed), does its `failed` event carry `"rollback_eligible": true` with the `decision` that led there. Automatic rollback acts only on such failures; configuration failures and deploys failed because a newer release was waiting are never eligible. A manual rollback is available for any failure.
+
+Retrying is passive: doorstep waits again, it does not move pods or re-run syncs. A pod that crash-loops on a bad node stays there, and Argo CD does not re-run a failed sync on its own, so for those failures the retry budget mostly delays the rollback rather than avoiding it. See [What a retry cannot fix](engine.md#what-a-retry-cannot-fix).
+
 > **Not active yet.** Nothing runs automatic rollbacks or gates until the engine (bead doorstep-ehl.4.4) lands; this section and the next describe what it must do. Until then flags, the confirmation prompt and the configuration are live, but no backup is taken.
 
 An automatic rollback after a failed gate must never cross a migration unattended. Before queuing one, the engine calls `MigrationsBetween` (or `(*rollback.Service).MigrationsCrossed`) with the target it picked and the failing deploy; when the answer is not empty it does not roll back and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, and notifies as for any failure. A person then decides.
@@ -152,7 +156,8 @@ The [engine](engine.md) executes queued rollbacks like deploys and calls the `Bl
 
 - For kind `deploy`, it calls `Blocked(target, commit, digest)` right after resolving the digest; when it reports a block, it fails the deployment with a reason that names the block.
 - Before `Pin`, it calls `PendingTrailers(target)` and passes them as `gitops.Request.Blocks` and `Unblocks`; after a `Pin` whose result has `Changed`, it calls `MarkMirrored(target, trailers, result.Commit)`. A `MarkMirrored` error is logged at `warn` and the trailers ride on the next pin commit again.
-- For kind `rollback`, it uses the preset digest without resolving, the `checks`, `lock` and `soak` gates (and `schedule` without `apply_to_rollbacks`) record `skipped` ([gates.md](gates.md#rollbacks)), and it still waits for Argo CD to report synced and healthy.
+- For kind `rollback`, it uses the preset digest without resolving, the `checks`, `lock` and `soak` gates (and `schedule` without `apply_to_rollbacks`) record `skipped` ([gates.md](gates.md#rollbacks)), and it still waits for Argo CD to report synced and healthy, [retrying](engine.md#retry-before-rollback) the same pin within the app's budget when it does not.
+- It marks every failure with `decision` and `rollback_eligible` in the `failed` event's data, so automatic rollback can act on a durable, machine-readable verdict.
 - Before queuing an automatic rollback after a failed gate, it calls `MigrationsBetween(target, to, failing)` on the transaction-bound store (`to` is the `LastSuccessfulDeployment` it picked). When that returns any deployment, it queues nothing and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, then notifies.
 - It stops as soon as a transition returns `core.ErrStateConflict` or the context is cancelled.
 - `deploy.queued` for the rollback and `deploy.cancelled` for the deployments the request cancelled are announced by `cli` right after the request commits, through `Engine.Queued` and `Engine.Cancelled`; `Cancelled` also closes the pull request of a cancelled deployment that had started pinning.

@@ -16,6 +16,7 @@ func NotificationEvents() []string {
 	return []string{
 		"deploy.queued",
 		"deploy.started",
+		"deploy.retrying",
 		"deploy.succeeded",
 		"deploy.failed",
 		"deploy.rolled_back",
@@ -29,6 +30,7 @@ func NotificationEvents() []string {
 func DefaultNotificationEvents() []string {
 	return []string{
 		"deploy.started",
+		"deploy.retrying",
 		"deploy.succeeded",
 		"deploy.failed",
 		"deploy.rolled_back",
@@ -263,6 +265,7 @@ func validateApp(r reporter, a App, notifications map[string]bool, servers []str
 
 	validateGates(r, a.Gates, servers)
 	validateMigrations(r, a.Migrations)
+	validateRetry(r, a.RetryPolicy())
 
 	seen := make(map[string]bool, len(a.Notify))
 	for i, name := range a.Notify {
@@ -479,6 +482,21 @@ func validateMigrations(r reporter, m *Migrations) {
 			continue
 		}
 		seen[key] = i
+	}
+}
+
+func validateRetry(r reporter, p RetryPolicy) {
+	if p.MaxAttempts < 1 || p.MaxAttempts > MaxRetryAttempts {
+		r.addf("retry.max_attempts", "%d is out of range (want 1 to %d)", p.MaxAttempts, MaxRetryAttempts)
+	}
+	if p.Backoff < 0 || p.Backoff > MaxRetryBackoff {
+		r.addf("retry.backoff", "%s is out of range (want 0s to %s)", p.Backoff, MaxRetryBackoff)
+	}
+	switch {
+	case p.MaxBackoff < p.Backoff:
+		r.addf("retry.max_backoff", "%s must not be shorter than retry.backoff (%s)", p.MaxBackoff, p.Backoff)
+	case p.MaxBackoff > MaxRetryMaxBackoff:
+		r.addf("retry.max_backoff", "%s is longer than the limit of %s", p.MaxBackoff, MaxRetryMaxBackoff)
 	}
 }
 

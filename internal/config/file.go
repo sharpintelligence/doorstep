@@ -64,8 +64,9 @@ type FileLocks struct {
 }
 
 type FileKubernetes struct {
-	Kubeconfig *string `yaml:"kubeconfig"`
-	Context    *string `yaml:"context"`
+	Kubeconfig     *string `yaml:"kubeconfig"`
+	Context        *string `yaml:"context"`
+	PodDiagnostics *bool   `yaml:"pod_diagnostics"`
 }
 
 type FileIntake struct {
@@ -156,6 +157,9 @@ func (f File) Apply(base Config) Config {
 	}
 	if f.Kubernetes.Context != nil {
 		cfg.Kubernetes.Context = *f.Kubernetes.Context
+	}
+	if f.Kubernetes.PodDiagnostics != nil {
+		cfg.Kubernetes.PodDiagnostics = *f.Kubernetes.PodDiagnostics
 	}
 	if f.Intake.PollInterval != nil {
 		cfg.Intake.PollInterval = f.Intake.PollInterval.Std()

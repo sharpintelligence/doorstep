@@ -161,6 +161,7 @@ func TestRenderedExamples(t *testing.T) {
 				"DOORSTEP_CONFIG":                    "/etc/doorstep/config/config.yaml",
 				"DOORSTEP_DATABASE_URL_FILE":         "/etc/doorstep/secrets/database-url",
 				"DOORSTEP_REGISTRY_CREDENTIALS_FILE": "/etc/doorstep/registry/.dockerconfigjson",
+				"DOORSTEP_KUBE_POD_DIAGNOSTICS":      "true",
 			})
 			assertBindingSubjectsNamespaced(t, documents, "doorstep", "doorstep-applications-reader")
 		})
@@ -203,6 +204,91 @@ func TestJobGateComponentRenders(t *testing.T) {
 	slices.Sort(roles)
 	if want := []string{"doorstep-applications-reader", "doorstep-jobs-reader"}; !slices.Equal(roles, want) {
 		t.Errorf("cluster roles = %v, want %v", roles, want)
+	}
+}
+
+func TestPodDiagnosticsComponentsRender(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		components   []string
+		wantBindings []string
+	}{
+		{
+			name:         "namespaced by default",
+			components:   []string{"../components/pod-diagnostics"},
+			wantBindings: []string{"doorstep-applications-reader"},
+		},
+		{
+			name:         "cluster-wide opt-in",
+			components:   []string{"../components/pod-diagnostics", "../components/pod-diagnostics-cluster-wide"},
+			wantBindings: []string{"doorstep-applications-reader", "doorstep-pods-reader"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := writeOverlay(t, map[string]any{
+				"apiVersion": "kustomize.config.k8s.io/v1beta1",
+				"kind":       "Kustomization",
+				"namespace":  "doorstep",
+				"resources":  []string{"../base"},
+				"components": tt.components,
+			})
+			documents := render(t, dir)
+			assertBindingSubjectsNamespaced(t, documents, "doorstep", tt.wantBindings...)
+			var roles []string
+			for _, role := range renderedOfKind(documents, "ClusterRole") {
+				roles = append(roles, role.lookup(t, "metadata", "name").(string))
+			}
+			slices.Sort(roles)
+			if want := []string{"doorstep-applications-reader", "doorstep-pods-reader"}; !slices.Equal(roles, want) {
+				t.Errorf("cluster roles = %v, want %v", roles, want)
+			}
+			if got := envValues(t, renderedPodSpec(t, documents))["DOORSTEP_KUBE_POD_DIAGNOSTICS"]; got != "true" {
+				t.Errorf("DOORSTEP_KUBE_POD_DIAGNOSTICS = %q, want true", got)
+			}
+		})
+	}
+}
+
+func TestDocumentedPodsRoleBindingMatchesComponent(t *testing.T) {
+	t.Parallel()
+
+	blocks := documentedKubernetesBlocks(t, "doorstep-pods-reader")
+	if len(blocks) != 1 {
+		t.Fatalf("got %d documented blocks naming doorstep-pods-reader, want 1", len(blocks))
+	}
+	var binding map[string]any
+	if err := yaml.Unmarshal([]byte(blocks[0]), &binding); err != nil {
+		t.Fatal(err)
+	}
+	doc := document(binding)
+	if kind := doc.lookup(t, "kind"); kind != "RoleBinding" {
+		t.Errorf("documented kind = %v, want RoleBinding", kind)
+	}
+	if ref := doc.lookup(t, "roleRef", "name"); ref != findDocument(t, "components/pod-diagnostics/rbac.yaml", "ClusterRole", "doorstep-pods-reader").lookup(t, "metadata", "name") {
+		t.Errorf("documented roleRef = %v", ref)
+	}
+	if subject := doc.lookup(t, "subjects", 0, "name"); subject != "doorstep" {
+		t.Errorf("documented subject = %v, want doorstep", subject)
+	}
+}
+
+func TestBaseDoesNotReadPods(t *testing.T) {
+	t.Parallel()
+
+	documents := render(t, "base")
+	for _, role := range renderedOfKind(documents, "ClusterRole") {
+		for _, rule := range role.lookup(t, "rules").([]any) {
+			if slices.Contains(namesFromStrings(rule.(map[string]any)["resources"]), "pods") {
+				t.Errorf("base role %v grants pods", role.lookup(t, "metadata", "name"))
+			}
+		}
+	}
+	if _, ok := envValues(t, renderedPodSpec(t, documents))["DOORSTEP_KUBE_POD_DIAGNOSTICS"]; ok {
+		t.Error("base turns pod diagnostics on")
 	}
 }
 

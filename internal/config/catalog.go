@@ -99,6 +99,53 @@ type App struct {
 	Gates      Gates       `yaml:"gates"`
 	Notify     []string    `yaml:"notify"`
 	Migrations *Migrations `yaml:"migrations"`
+	Retry      *Retry      `yaml:"retry"`
+}
+
+const (
+	DefaultRetryMaxAttempts = 3
+	DefaultRetryBackoff     = time.Minute
+	DefaultRetryMaxBackoff  = 10 * time.Minute
+	MaxRetryAttempts        = 10
+	MaxRetryBackoff         = time.Hour
+	MaxRetryMaxBackoff      = 6 * time.Hour
+)
+
+type Retry struct {
+	Enabled     *bool     `yaml:"enabled"`
+	MaxAttempts *int      `yaml:"max_attempts"`
+	Backoff     *Duration `yaml:"backoff"`
+	MaxBackoff  *Duration `yaml:"max_backoff"`
+}
+
+type RetryPolicy struct {
+	Enabled     bool
+	MaxAttempts int
+	Backoff     time.Duration
+	MaxBackoff  time.Duration
+}
+
+func (a App) RetryPolicy() RetryPolicy {
+	p := RetryPolicy{Enabled: true, MaxAttempts: DefaultRetryMaxAttempts, Backoff: DefaultRetryBackoff, MaxBackoff: DefaultRetryMaxBackoff}
+	r := a.Retry
+	if r == nil {
+		return p
+	}
+	if r.Enabled != nil {
+		p.Enabled = *r.Enabled
+	}
+	if r.MaxAttempts != nil {
+		p.MaxAttempts = *r.MaxAttempts
+	}
+	if r.Backoff != nil {
+		p.Backoff = r.Backoff.Std()
+	}
+	if r.MaxBackoff != nil {
+		p.MaxBackoff = r.MaxBackoff.Std()
+	} else if p.Backoff > p.MaxBackoff {
+		p.MaxBackoff = p.Backoff
+	}
+	return p
 }
 
 const (
@@ -428,7 +475,27 @@ func (a App) withDefaults() App {
 		m := Migrations{Labels: slices.Clone(a.Migrations.Labels), Trailer: new(a.Migrations.TrailerEnabled())}
 		a.Migrations = &m
 	}
+	if a.Retry != nil {
+		a.Retry = a.Retry.clone()
+	}
 	return a
+}
+
+func (r Retry) clone() *Retry {
+	out := Retry{}
+	if r.Enabled != nil {
+		out.Enabled = new(*r.Enabled)
+	}
+	if r.MaxAttempts != nil {
+		out.MaxAttempts = new(*r.MaxAttempts)
+	}
+	if r.Backoff != nil {
+		out.Backoff = new(*r.Backoff)
+	}
+	if r.MaxBackoff != nil {
+		out.MaxBackoff = new(*r.MaxBackoff)
+	}
+	return &out
 }
 
 func (p Pin) withDefaults(repository string) Pin {

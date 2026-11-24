@@ -19,6 +19,7 @@ func TestNotificationKinds(t *testing.T) {
 	}{
 		{kind: NotificationDeployQueued, deploy: true},
 		{kind: NotificationDeployStarted, deploy: true, byDefault: true},
+		{kind: NotificationDeployRetrying, deploy: true, byDefault: true},
 		{kind: NotificationDeploySucceeded, deploy: true, byDefault: true},
 		{kind: NotificationDeployFailed, deploy: true, byDefault: true},
 		{kind: NotificationDeployRolledBack, deploy: true, byDefault: true},

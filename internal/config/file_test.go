@@ -35,6 +35,7 @@ locks:
 kubernetes:
   kubeconfig: /etc/doorstep/kube/config
   context: homelab
+  pod_diagnostics: true
 intake:
   poll_interval: 2m
 engine:
@@ -87,6 +88,11 @@ apps:
           name: e2e
           reporters: [token:ci-e2e]
     notify: [ops, hook]
+    retry:
+      enabled: true
+      max_attempts: 4
+      backoff: 30s
+      max_backoff: 5m
 `
 
 func strPtr(s string) *string { return &s }
@@ -121,7 +127,7 @@ func TestParse(t *testing.T) {
 		Locks:      FileLocks{ReminderInterval: durPtr(12 * time.Hour)},
 		Intake:     FileIntake{PollInterval: durPtr(2 * time.Minute)},
 		Engine:     FileEngine{Concurrency: intPtr(8)},
-		Kubernetes: FileKubernetes{Kubeconfig: strPtr("/etc/doorstep/kube/config"), Context: strPtr("homelab")},
+		Kubernetes: FileKubernetes{Kubeconfig: strPtr("/etc/doorstep/kube/config"), Context: strPtr("homelab"), PodDiagnostics: new(true)},
 		Notifications: []Notification{
 			{Name: "ops", Type: NotifySlack, WebhookURLEnv: "SLACK_WEBHOOK_URL"},
 			{
@@ -146,6 +152,7 @@ func TestParse(t *testing.T) {
 				},
 			},
 			Notify: []string{"ops", "hook"},
+			Retry:  &Retry{Enabled: new(true), MaxAttempts: intPtr(4), Backoff: durPtr(30 * time.Second), MaxBackoff: durPtr(5 * time.Minute)},
 		}},
 	}
 
@@ -382,7 +389,7 @@ func TestFileApply(t *testing.T) {
 				Locks:      FileLocks{ReminderInterval: durPtr(6 * time.Hour)},
 				Intake:     FileIntake{PollInterval: durPtr(30 * time.Second)},
 				Engine:     FileEngine{Concurrency: intPtr(12)},
-				Kubernetes: FileKubernetes{Kubeconfig: strPtr("/kube/config"), Context: strPtr("lab")},
+				Kubernetes: FileKubernetes{Kubeconfig: strPtr("/kube/config"), Context: strPtr("lab"), PodDiagnostics: new(true)},
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: "127.0.0.1:1", MetricsListenAddr: "127.0.0.1:2", ShutdownDelay: time.Second, ShutdownTimeout: 2 * time.Second, PublicURL: "https://deploy.example.com"}
@@ -391,7 +398,7 @@ func TestFileApply(t *testing.T) {
 				c.GitHub = GitHub{AppID: "42", PrivateKeyFile: "/secrets/key.pem", APIURL: "https://ghe.example.com/api/v3", WebhookSecretFile: "/secrets/webhook"}
 				c.Registry = Registry{CredentialsFile: "/secrets/config.json"}
 				c.Locks = Locks{ReminderInterval: 6 * time.Hour}
-				c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "lab"}
+				c.Kubernetes = Kubernetes{Kubeconfig: "/kube/config", Context: "lab", PodDiagnostics: true}
 				c.Intake = Intake{PollInterval: 30 * time.Second}
 				c.Engine = Engine{Concurrency: 12}
 			},
@@ -744,6 +751,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.ArgoCD.SyncTimeout = durPtr(time.Minute)
 	app.Migrations = &Migrations{Labels: []string{"db-migration"}}
 	app.Gates.Before = append(app.Gates.Before, Gate{Type: GateBackup, Webhook: &GateWebhook{URLEnv: "BACKUP_URL"}})
+	app.Retry = &Retry{Enabled: new(true), MaxAttempts: intPtr(4), Backoff: durPtr(time.Minute), MaxBackoff: durPtr(time.Hour)}
 	file := File{
 		Apps:          []App{app},
 		Notifications: []Notification{{Name: "ops", Type: NotifySlack, WebhookURLEnv: "X", Events: []string{"deploy.failed"}}},
@@ -764,8 +772,15 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	*catalog.Apps[0].ArgoCD.SyncTimeout = 0
 	catalog.Apps[0].Migrations.Labels[0] = "changed"
 	catalog.Apps[0].Gates.Before[2].Webhook.URLEnv = "CHANGED"
+	*catalog.Apps[0].Retry.Enabled = false
+	*catalog.Apps[0].Retry.MaxAttempts = 9
+	*catalog.Apps[0].Retry.Backoff = 0
+	*catalog.Apps[0].Retry.MaxBackoff = 0
 
 	original := file.Apps[0]
+	if want := (RetryPolicy{Enabled: true, MaxAttempts: 4, Backoff: time.Minute, MaxBackoff: time.Hour}); original.RetryPolicy() != want {
+		t.Errorf("Catalog() shares retry settings with the file: %+v", original.RetryPolicy())
+	}
 	if original.Migrations.Labels[0] != "db-migration" || original.Migrations.Trailer != nil || original.Gates.Before[2].Webhook.URLEnv != "BACKUP_URL" {
 		t.Errorf("Catalog() shares migration or backup settings with the file: %+v", original)
 	}

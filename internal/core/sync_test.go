@@ -97,7 +97,7 @@ func TestSyncFailureReasonClass(t *testing.T) {
 		{SyncReasonOutOfSync, FailureUnknown, FailureConfiguration},
 		{SyncReasonRunning, FailureUnknown, FailureUnknown},
 		{SyncReasonError, FailureTransient, FailureTransient},
-		{SyncReasonFailed, FailureVersion, FailureVersion},
+		{SyncReasonFailed, FailureUnknown, FailureUnknown},
 		{SyncReasonDegraded, FailureVersion, FailureVersion},
 		{SyncReasonProgressing, FailureUnknown, FailureUnknown},
 		{SyncReasonSuspended, FailureUnknown, FailureUnknown},

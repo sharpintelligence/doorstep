@@ -2,6 +2,7 @@ package kustomize_test
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"io"
 	"io/fs"
@@ -135,6 +136,7 @@ func TestDeploymentEnvironmentNamesAreKnownSettings(t *testing.T) {
 		config.EnvGitHubWebhookSecret,
 		config.EnvGitHubWebhookSecretFile,
 		config.EnvPollInterval,
+		config.EnvKubePodDiagnostics,
 	}
 	tests := []struct {
 		name      string
@@ -153,6 +155,14 @@ func TestDeploymentEnvironmentNamesAreKnownSettings(t *testing.T) {
 				return registryPatch(t).lookup(t, "spec", "template", "spec", "containers", 0).(map[string]any)
 			},
 			required: []string{config.EnvRegistryCredentialsFile},
+		},
+		{
+			name: "pod diagnostics component",
+			container: func(t *testing.T) map[string]any {
+				t.Helper()
+				return findDocument(t, "components/pod-diagnostics/deployment-patch.yaml", "Deployment", "doorstep").lookup(t, "spec", "template", "spec", "containers", 0).(map[string]any)
+			},
+			required: []string{config.EnvKubePodDiagnostics},
 		},
 	}
 	for _, tt := range tests {
@@ -337,9 +347,10 @@ func TestClusterRolesAreReadOnly(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		file string
-		name string
-		rule map[string][]string
+		file        string
+		bindingFile string
+		name        string
+		rule        map[string][]string
 	}{
 		{
 			file: "base/rbac.yaml",
@@ -351,12 +362,24 @@ func TestClusterRolesAreReadOnly(t *testing.T) {
 			name: "doorstep-jobs-reader",
 			rule: map[string][]string{"apiGroups": {"batch"}, "resources": {"jobs"}, "verbs": {"get"}},
 		},
+		{
+			file:        "components/pod-diagnostics/rbac.yaml",
+			bindingFile: "components/pod-diagnostics-cluster-wide/rbac.yaml",
+			name:        "doorstep-pods-reader",
+			rule:        map[string][]string{"apiGroups": {""}, "resources": {"pods"}, "verbs": {"list"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := len(readDocuments(t, tt.file)); got != 2 {
-				t.Errorf("%s has %d documents, want a ClusterRole and its binding", tt.file, got)
+			bindingFile := cmp.Or(tt.bindingFile, tt.file)
+			files := slices.Compact([]string{tt.file, bindingFile})
+			documents := 0
+			for _, file := range files {
+				documents += len(readDocuments(t, file))
+			}
+			if documents != 2 {
+				t.Errorf("%v hold %d documents, want a ClusterRole and its binding", files, documents)
 			}
 			role := findDocument(t, tt.file, "ClusterRole", tt.name)
 			rules := role.lookup(t, "rules").([]any)
@@ -373,7 +396,7 @@ func TestClusterRolesAreReadOnly(t *testing.T) {
 				}
 			}
 
-			binding := findDocument(t, tt.file, "ClusterRoleBinding", tt.name)
+			binding := findDocument(t, bindingFile, "ClusterRoleBinding", tt.name)
 			if got := binding.lookup(t, "roleRef", "name"); got != tt.name {
 				t.Errorf("binding roleRef = %v", got)
 			}

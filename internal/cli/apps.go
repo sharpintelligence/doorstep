@@ -8,6 +8,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/gitops"
 	"github.com/sharpintelligence/doorstep/internal/intake"
+	"github.com/sharpintelligence/doorstep/internal/retry"
 )
 
 type appWiring struct {
@@ -78,6 +79,11 @@ func (w appWiring) syncTimeout() time.Duration {
 	return w.app.ArgoCD.Timeout()
 }
 
+func (w appWiring) retry() retry.Settings {
+	p := w.app.RetryPolicy()
+	return retry.Settings{Enabled: p.Enabled, MaxAttempts: p.MaxAttempts, Backoff: p.Backoff, MaxBackoff: p.MaxBackoff}
+}
+
 type catalogApps map[string]appWiring
 
 func newCatalogApps(catalog config.Catalog) catalogApps {
@@ -115,6 +121,14 @@ func (c catalogApps) SyncTimeout(t core.Target) (time.Duration, bool) {
 		return 0, false
 	}
 	return a.syncTimeout(), true
+}
+
+func (c catalogApps) RetrySettings(t core.Target) (retry.Settings, bool) {
+	a, ok := c.byTarget(t)
+	if !ok {
+		return retry.Settings{}, false
+	}
+	return a.retry(), true
 }
 
 func intakeApps(catalog config.Catalog) []intake.App {

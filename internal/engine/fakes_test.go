@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -64,6 +65,7 @@ type fakeStore struct {
 	transitions []engine.Transition
 	lineage     []core.Lineage
 	failGet     error
+	failRetry   error
 }
 
 func newFakeStore(c *clock) *fakeStore {
@@ -148,6 +150,8 @@ func (s *fakeStore) Transition(_ context.Context, t engine.Transition) (core.Dep
 		return core.Deployment{}, core.ErrNotFound
 	case d.State != t.From:
 		return core.Deployment{}, fmt.Errorf("%w: deployment %d is %s, expected %s", core.ErrStateConflict, t.ID, d.State, t.From)
+	case t.ExpectRetries != nil && s.retryState(t.ID).Retries != *t.ExpectRetries:
+		return core.Deployment{}, fmt.Errorf("%w: deployment %d has %d retries, expected %d", core.ErrStateConflict, t.ID, s.retryState(t.ID).Retries, *t.ExpectRetries)
 	}
 	if err := t.From.Transition(t.To); err != nil {
 		return core.Deployment{}, err
@@ -202,6 +206,37 @@ func (s *fakeStore) TimeInState(_ context.Context, id core.DeploymentID, state c
 		return 0, core.ErrNotFound
 	}
 	return s.clock.Now().Sub(at), nil
+}
+
+func (s *fakeStore) RetryState(_ context.Context, id core.DeploymentID) (engine.RetryState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failRetry != nil {
+		return engine.RetryState{}, s.failRetry
+	}
+	return s.retryState(id), nil
+}
+
+func (s *fakeStore) retryState(id core.DeploymentID) engine.RetryState {
+	var state engine.RetryState
+	for _, tr := range s.transitions {
+		if tr.ID != id || tr.From != tr.To {
+			continue
+		}
+		var data struct {
+			Retry *struct {
+				DelayMS     int64 `json:"delay_ms"`
+				MaxAttempts int   `json:"max_attempts"`
+			} `json:"retry"`
+		}
+		if err := json.Unmarshal(tr.Data, &data); err != nil || data.Retry == nil {
+			continue
+		}
+		state.Retries++
+		state.Delay = time.Duration(data.Retry.DelayMS) * time.Millisecond
+		state.MaxAttempts = data.Retry.MaxAttempts
+	}
+	return state
 }
 
 func applyLineage(d *core.Deployment, l core.Lineage) {
@@ -511,6 +546,19 @@ type fakeMetrics struct {
 	mu       sync.Mutex
 	started  []string
 	finished []finished
+	retried  []core.FailureClass
+}
+
+func (m *fakeMetrics) DeploymentRetried(_ string, class core.FailureClass) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.retried = append(m.retried, class)
+}
+
+func (m *fakeMetrics) retries() []core.FailureClass {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]core.FailureClass(nil), m.retried...)
 }
 
 func (m *fakeMetrics) DeploymentStarted(app string) {
@@ -546,16 +594,23 @@ type fakePolicy struct {
 	failures []engine.Failure
 	action   engine.FailureAction
 	err      error
+	decide   func(f engine.Failure) engine.Decision
 }
 
-func (p *fakePolicy) Decide(_ context.Context, f engine.Failure) (engine.FailureAction, error) {
+func (p *fakePolicy) Decide(ctx context.Context, f engine.Failure) (engine.Decision, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.failures = append(p.failures, f)
-	if p.action == "" && p.err == nil {
-		return engine.FailureActionFail, nil
+	switch {
+	case p.err != nil:
+		return engine.Decision{}, p.err
+	case p.decide != nil:
+		return p.decide(f), nil
+	case p.action != "":
+		return engine.Decision{Action: p.action}, nil
+	default:
+		return engine.FailPolicy{}.Decide(ctx, f)
 	}
-	return p.action, p.err
 }
 
 func (p *fakePolicy) decided() []engine.Failure {

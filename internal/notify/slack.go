@@ -228,7 +228,7 @@ func slackColor(n core.Notification) string {
 			return colorCritical
 		}
 		return colorFailure
-	case core.NotificationDeployRolledBack:
+	case core.NotificationDeployRolledBack, core.NotificationDeployRetrying:
 		return colorWarning
 	case core.NotificationDeployCancelled, core.NotificationDeploySuperseded:
 		return colorNeutral
