@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,9 @@ const (
 	codeMethodNotAllowed     = "method_not_allowed"
 	codeLocked               = "locked"
 	codeContended            = "contended"
+	codeNoRollbackTarget     = "no_rollback_target"
+	codeRollbackInProgress   = "rollback_in_progress"
+	codeBlocked              = "blocked"
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeInternal             = "internal"
 )
@@ -94,6 +98,21 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) *requestError {
 		return badRequest("request body must contain a single JSON object")
 	}
 	return nil
+}
+
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) *requestError {
+	if r.ContentLength == 0 {
+		return nil
+	}
+	body := bufio.NewReader(r.Body)
+	if _, err := body.Peek(1); errors.Is(err, io.EOF) {
+		return nil
+	}
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{body, r.Body}
+	return decodeJSON(w, r, dst)
 }
 
 func decodeError(err error) *requestError {

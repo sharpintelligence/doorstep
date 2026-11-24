@@ -16,13 +16,14 @@ type fakeCommits struct {
 	mu        sync.Mutex
 	rows      []core.TrackedCommit
 	queue     *fakeQueue
+	blocks    *fakeBlocks
 	trackErr  map[core.Target]error
 	settleErr error
 	openCalls [][]core.FollowedBranch
 }
 
 func newFakeCommits() *fakeCommits {
-	return &fakeCommits{queue: &fakeQueue{}, trackErr: map[core.Target]error{}}
+	return &fakeCommits{queue: &fakeQueue{}, blocks: &fakeBlocks{}, trackErr: map[core.Target]error{}}
 }
 
 func (f *fakeCommits) Track(ctx context.Context, c core.TrackedCommit, isHead intake.HeadCheck) (core.TrackedCommit, core.TrackOutcome, error) {
@@ -98,7 +99,11 @@ func (f *fakeCommits) Settle(ctx context.Context, id core.TrackedCommitID, eval 
 		f.rows[id-1] = row
 		return row, false, nil
 	}
-	deploymentID, err := enqueue(ctx, f.queue)
+	deploymentID, err := enqueue(ctx, f.queue, f.blocks)
+	if errors.Is(err, core.ErrBlocked) {
+		f.rows[id-1] = row
+		return row, false, nil
+	}
 	if err != nil {
 		return core.TrackedCommit{}, false, err
 	}
@@ -169,6 +174,51 @@ func (q *fakeQueue) fail(err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.err = err
+}
+
+type fakeBlocks struct {
+	mu      sync.Mutex
+	blocked map[string]core.Block
+	err     error
+	calls   int
+}
+
+func (f *fakeBlocks) Blocked(_ context.Context, t core.Target, commit core.Commit) (core.Block, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return core.Block{}, false, f.err
+	}
+	b, ok := f.blocked[t.String()+"@"+commit.SHA]
+	return b, ok, nil
+}
+
+func (f *fakeBlocks) block(b core.Block) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.blocked == nil {
+		f.blocked = map[string]core.Block{}
+	}
+	f.blocked[b.Target.String()+"@"+b.Commit.SHA] = b
+}
+
+func (f *fakeBlocks) unblock(t core.Target, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.blocked, t.String()+"@"+sha)
+}
+
+func (f *fakeBlocks) fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+func (f *fakeBlocks) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 type checksCall struct {

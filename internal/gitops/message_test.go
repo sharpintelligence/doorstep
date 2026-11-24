@@ -94,6 +94,26 @@ func TestFormatMessage(t *testing.T) {
 				"Doorstep-Block: " + string(digestB) + "\n" +
 				"Doorstep-Block: " + string(digestC),
 		},
+		{
+			name: "deploy carrying pending unblocks and blocks",
+			req: func() Request {
+				req := deployRequest()
+				req.Blocks = []core.Digest{digestC}
+				req.Unblocks = []core.Digest{digestA, digestB}
+				return req
+			}(),
+			wantSubject: "deploy(blog): pin ghcr.io/acme/blog@sha256:bbbbbbbbbbbb",
+			wantBody: "Deploy ghcr.io/acme/blog@" + string(digestB) + " to blog, built from acme/blog@" + appSHA + ".\n\n" +
+				"Doorstep-App: blog\n" +
+				"Doorstep-Deployment: 42\n" +
+				"Doorstep-Kind: deploy\n" +
+				"Doorstep-App-Commit: acme/blog@" + appSHA + "\n" +
+				"Doorstep-Image: ghcr.io/acme/blog\n" +
+				"Doorstep-Digest: " + string(digestB) + "\n" +
+				"Doorstep-Block: " + string(digestC) + "\n" +
+				"Doorstep-Unblock: " + string(digestA) + "\n" +
+				"Doorstep-Unblock: " + string(digestB),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

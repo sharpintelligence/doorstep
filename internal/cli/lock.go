@@ -172,8 +172,8 @@ func newLocksCommand(lookupEnv LookupEnv) *cobra.Command {
 		Short: "List active freezes",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if output != outputTable && output != outputJSON {
-				return fmt.Errorf("--%s: must be %s or %s, got %q", flagOutput, outputTable, outputJSON, output)
+			if err := validateOutput(output); err != nil {
+				return err
 			}
 			client, err := newAPIClient(cmd.Flags().Changed, server, lookupEnv)
 			if err != nil {

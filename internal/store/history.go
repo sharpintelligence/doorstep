@@ -72,7 +72,22 @@ WHERE a.name = $1
   AND d.finished_at IS NOT NULL
   AND d.image_digest IS NOT NULL
   AND ($3::text = '' OR d.image_digest IS DISTINCT FROM $3)
+  AND NOT EXISTS (
+      SELECT 1 FROM blocks b
+      WHERE b.app_id = d.app_id AND b.digest = d.image_digest AND b.cleared_at IS NULL
+  )
 ORDER BY d.finished_at DESC, d.id DESC
+LIMIT 1`
+
+const currentDeploymentSQL = `SELECT` + deploymentColumns + deploymentTables + `
+WHERE a.name = $1
+  AND a.environment = $2
+  AND (
+      d.state = ANY($3::text[])
+      OR d.state = 'succeeded'
+      OR (d.state IN ('failed', 'cancelled') AND d.pin_commit_sha IS NOT NULL)
+  )
+ORDER BY COALESCE(d.started_at, d.created_at) DESC, d.id DESC
 LIMIT 1`
 
 func (f DeploymentFilter) validate() error {
@@ -226,6 +241,20 @@ func (s *Store) LastSuccessfulDeployment(ctx context.Context, t core.Target, exc
 	}
 	if err != nil {
 		return core.Deployment{}, fmt.Errorf("last successful deployment of %s: %w", t, err)
+	}
+	return d, nil
+}
+
+func (s *Store) CurrentDeployment(ctx context.Context, t core.Target) (core.Deployment, error) {
+	if err := t.Validate(); err != nil {
+		return core.Deployment{}, fmt.Errorf("current deployment: %w", err)
+	}
+	d, err := scanDeployment(s.db.QueryRow(ctx, currentDeploymentSQL, t.App, t.Environment, core.ActiveStates()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.Deployment{}, fmt.Errorf("current deployment of %s: %w", t, core.ErrNotFound)
+	}
+	if err != nil {
+		return core.Deployment{}, fmt.Errorf("current deployment of %s: %w", t, err)
 	}
 	return d, nil
 }

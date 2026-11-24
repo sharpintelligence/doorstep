@@ -14,7 +14,7 @@ Roles are ordered, and each includes everything the lower ones may do:
 | Role | May |
 | --- | --- |
 | `viewer` | read the UI and API: queue, locks, history, gate results, audit log |
-| `deployer` | everything a viewer may, plus request a manual deploy or rollback, cancel a deployment, and take or release a freeze lock |
+| `deployer` | everything a viewer may, plus request a manual deploy or rollback, create or clear any block, cancel a deployment, and take or release a freeze lock |
 | `admin` | everything a deployer may, plus administer API tokens over HTTP |
 
 Roles govern operating doorstep, never what ships. A merge to the deployed branch is still the approval for a deploy ([ADR 0001](decisions/0001-go-and-core-design.md)); no role is needed for a webhook-triggered deploy, and no role can make doorstep deploy a commit that was not merged.
@@ -217,10 +217,12 @@ The `audit_log` table records who asked doorstep to do something. It complements
 | `auth.login`, `auth.logout` | the sign-in handler |
 | `token.create`, `token.revoke` | `doorstep token`, and later the token API |
 | `session.revoke` | `doorstep session revoke` |
-| `deploy.request`, `deploy.cancel`, `rollback.request` | the API and UI, when they land |
+| `rollback.request` | `POST /api/v1/apps/{app}/rollback` ([rollback.md](rollback.md)), in the same transaction as the rollback deployment and its block |
+| `block.create`, `block.clear` | `POST /api/v1/apps/{app}/blocks` (only when a new block is created) and `DELETE /api/v1/apps/{app}/blocks/{ref}` |
+| `deploy.request`, `deploy.cancel` | the API and UI, when they land |
 | `lock.acquire`, `lock.release` | the locks feature, when it lands |
 
-The `deploy`, `rollback` and `lock` actions are reserved constants only: nothing records them yet, because their endpoints do not exist. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
+Rollback and block requests need the `deployer` role and record the caller's actor and role. Blocks have no owner: any deployer may create a block or clear any active block, including one a rollback or an admin created. That is deliberate, because unblocking is how a team returns a fixed version to automatic deploys and it never deploys anything by itself; the `block.clear` audit row and the block's `cleared_by` record who did it. The `deploy` and `lock` actions are reserved constants only: nothing records them yet. The features that add those endpoints own both halves of the requirement: wrapping each route in `RequireRole`, and recording the audit row in the same transaction as the action.
 
 Each row holds the time, the actor (kind, ID and display name), the actor's role when known, the action, the target app and environment and the deployment ID when they apply, and a JSON object with details. Actions are dot-separated lowercase words; new features add constants to `core` without a schema change.
 

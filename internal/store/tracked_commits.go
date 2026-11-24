@@ -232,7 +232,15 @@ func (s *Store) SettleTrackedCommit(ctx context.Context, id core.TrackedCommitID
 		if current.ChecksState != core.ChecksSuccess {
 			return nil
 		}
-		deploymentID, err := enqueue(tx)
+		var deploymentID core.DeploymentID
+		err = tx.InTx(ctx, func(sp *Store) error {
+			var err error
+			deploymentID, err = enqueue(sp)
+			return err
+		})
+		if errors.Is(err, core.ErrBlocked) {
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("enqueue: %w", err)
 		}

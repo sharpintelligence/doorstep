@@ -59,6 +59,7 @@ type Request struct {
 	AppCommit  core.Commit
 	RollbackOf *core.DeploymentID
 	Blocks     []core.Digest
+	Unblocks   []core.Digest
 }
 
 type Result struct {
@@ -155,6 +156,11 @@ func (r Request) Validate() error {
 	for _, block := range r.Blocks {
 		if _, err := core.ParseDigest(string(block)); err != nil {
 			errs = append(errs, fmt.Errorf("block: %w", err))
+		}
+	}
+	for _, unblock := range r.Unblocks {
+		if _, err := core.ParseDigest(string(unblock)); err != nil {
+			errs = append(errs, fmt.Errorf("unblock: %w", err))
 		}
 	}
 	return errors.Join(errs...)

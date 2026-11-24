@@ -434,11 +434,11 @@ func TestServerURLWithPathPrefix(t *testing.T) {
 
 type staticAuth struct{}
 
-func (staticAuth) Authenticate(r *http.Request, _ core.Role) (string, error) {
+func (staticAuth) Authenticate(r *http.Request, required core.Role) (api.Caller, error) {
 	if r.Header.Get("Authorization") == "Bearer tok-123" {
-		return "alice", nil
+		return api.Caller{Actor: core.Actor{Kind: core.ActorUser, ID: "alice"}, Role: required}, nil
 	}
-	return "", api.ErrUnauthenticated
+	return api.Caller{}, api.ErrUnauthenticated
 }
 
 type memoryLocks struct {
@@ -505,10 +505,10 @@ func TestLockCommandsAgainstAPI(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-		{args: []string{"lock", "blog", "--reason", "migration"}, wantStdout: "locked blog by alice until released: migration\n"},
-		{args: []string{"lock", "blog", "--reason", "again"}, wantCode: 1, wantStderr: "blog is already locked by alice: migration"},
+		{args: []string{"lock", "blog", "--reason", "migration"}, wantStdout: "locked blog by user:alice until released: migration\n"},
+		{args: []string{"lock", "blog", "--reason", "again"}, wantCode: 1, wantStderr: "blog is already locked by user:alice: migration"},
 		{args: []string{"lock", "other", "--reason", "x"}, wantCode: 1, wantStderr: "unknown app other"},
-		{args: []string{"lock", "--global", "--reason", "holiday"}, wantStdout: "locked global by alice until released: holiday\n"},
+		{args: []string{"lock", "--global", "--reason", "holiday"}, wantStdout: "locked global by user:alice until released: holiday\n"},
 		{args: []string{"locks", "-o", "json"}, wantStdout: `"scope": "global"`},
 		{args: []string{"unlock", "blog"}, wantStdout: "unlocked blog\n"},
 		{args: []string{"unlock", "blog"}, wantCode: 1, wantStderr: "blog is not locked"},

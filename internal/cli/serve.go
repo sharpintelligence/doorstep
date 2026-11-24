@@ -24,6 +24,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/metrics"
 	"github.com/sharpintelligence/doorstep/internal/queue"
 	"github.com/sharpintelligence/doorstep/internal/registry"
+	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/server"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -159,6 +160,17 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	defer stopProbe()
 	probeAuth(probeCtx, &background, logger, authService)
 
+	build := buildinfo.Read()
+	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
+	rollbacks, err := rollback.New(rollback.Options{
+		Repository: rollback.NewRepository(st),
+		Observer:   rollbackMetrics{recorder: m.Recorder()},
+		Logger:     logger,
+	})
+	if err != nil {
+		return err
+	}
+
 	authenticator := authService.Authenticator()
 	apiHandler := api.New(api.Options{
 		Logger:        logger,
@@ -166,13 +178,13 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Queue:         q,
 		Apps:          apps,
 		Locks:         locksService,
+		Rollbacks:     rollbacks,
+		Blocks:        rollbacks,
 		KnownApp:      knownApp(in.catalog),
 		Authenticator: principalAuthenticator{},
 		Middleware:    authenticator.RequireRole(core.RoleViewer),
 	})
 
-	build := buildinfo.Read()
-	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
 	metricsRoutes := map[string]http.Handler{"GET /metrics": m.Handler()}
 	appRoutes := map[string]http.Handler{api.Prefix: apiHandler}
 	if h := authService.Handler(); h != nil {
@@ -238,15 +250,23 @@ func newLocks(st *store.Store, cfg config.Locks, logger *slog.Logger) (*locks.Se
 
 type principalAuthenticator struct{}
 
-func (principalAuthenticator) Authenticate(r *http.Request, required core.Role) (string, error) {
+func (principalAuthenticator) Authenticate(r *http.Request, required core.Role) (api.Caller, error) {
 	principal, ok := auth.PrincipalFrom(r.Context())
 	switch {
 	case !ok:
-		return "", api.ErrUnauthenticated
+		return api.Caller{}, api.ErrUnauthenticated
 	case !principal.Allows(required):
-		return "", api.ErrForbidden
+		return api.Caller{}, api.ErrForbidden
 	}
-	return principal.Actor.String(), nil
+	return api.Caller{Actor: principal.Actor, Role: principal.Role}, nil
+}
+
+type rollbackMetrics struct {
+	recorder *metrics.Recorder
+}
+
+func (o rollbackMetrics) RollbackRequested(app string) {
+	o.recorder.Rollback(app, metrics.RollbackReasonManual)
 }
 
 func knownApp(catalog config.Catalog) api.KnownApp {
