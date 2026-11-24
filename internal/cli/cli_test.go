@@ -225,6 +225,30 @@ func TestRunErrors(t *testing.T) {
 			wantStderr:   []string{"doorstep: open database"},
 			forbidStderr: []string{password, "postgres://"},
 		},
+		{
+			name:       "incomplete github configuration",
+			args:       []string{"serve"},
+			env:        map[string]string{config.EnvGitHubAppID: "123"},
+			wantStderr: []string{"doorstep: invalid configuration", "github app private key: required"},
+		},
+		{
+			name: "malformed github private key fails startup",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0"},
+			env: map[string]string{
+				config.EnvGitHubAppID:         "123",
+				config.EnvGitHubAppPrivateKey: "not-a-pem-supersecret",
+			},
+			wantStderr: []string{"doorstep: github app private key", "invalid github app private key"},
+		},
+		{
+			name: "missing github private key file fails startup",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0"},
+			env: map[string]string{
+				config.EnvGitHubAppID:             "123",
+				config.EnvGitHubAppPrivateKeyFile: "/nonexistent/doorstep/private-key.pem",
+			},
+			wantStderr: []string{"doorstep: read github app private key", "/nonexistent/doorstep/private-key.pem"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -247,6 +271,9 @@ func TestRunErrors(t *testing.T) {
 			}
 			if strings.Contains(stderr.String(), "Usage:") {
 				t.Errorf("stderr prints usage on error: %q", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "supersecret") {
+				t.Errorf("stderr leaks key material: %q", stderr.String())
 			}
 		})
 	}
@@ -402,16 +429,19 @@ func TestResolveServeConfig(t *testing.T) {
 func TestRunServe(t *testing.T) {
 	t.Parallel()
 
+	keyPEM := string(testKeyPEM(t))
 	tests := []struct {
 		name     string
 		args     []string
 		env      map[string]string
 		database databaseSource
+		wantLogs []string
 	}{
 		{
 			name:     "flags",
 			args:     []string{"serve", "--listen-addr", "127.0.0.1:0", "--log-level", "debug", "--shutdown-delay", "0s"},
 			database: databaseFileFlag,
+			wantLogs: []string{"github app not configured"},
 		},
 		{
 			name:     "database URL file from environment",
@@ -432,6 +462,16 @@ func TestRunServe(t *testing.T) {
 				config.EnvLogFormat:     "text",
 				config.EnvLogLevel:      "debug",
 			},
+		},
+		{
+			name: "github app configured",
+			args: []string{"serve", "--listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s"},
+			env: map[string]string{
+				config.EnvLogLevel:            "debug",
+				config.EnvGitHubAppID:         "123456",
+				config.EnvGitHubAppPrivateKey: keyPEM,
+			},
+			wantLogs: []string{"github app configured"},
 		},
 	}
 
@@ -466,7 +506,10 @@ func TestRunServe(t *testing.T) {
 			}
 
 			logs := parseLogs(t, stderr.String())
-			for _, msg := range []string{"database ready", "listening", "request", "shutting down", "stopped"} {
+			if strings.Contains(stderr.String(), "PRIVATE KEY") {
+				t.Errorf("logs leak the private key: %s", stderr.String())
+			}
+			for _, msg := range append([]string{"database ready", "listening", "request", "shutting down", "stopped"}, tt.wantLogs...) {
 				if !hasMessage(logs, msg) {
 					t.Errorf("logs missing %q: %s", msg, stderr.String())
 				}

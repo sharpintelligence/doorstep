@@ -60,7 +60,8 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/queue` | durable work queue: `SELECT ... FOR UPDATE SKIP LOCKED` claims with leases and heartbeats | planned |
 | `internal/locks` | per-target deployment locks and manual freeze locks | planned |
 | `internal/history` | append-only transition log and its read models | planned |
-| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | planned |
+| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
+| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, authenticates extra handlers with installation tokens | built |
 | `internal/intake` | turns GitHub webhooks, registry polls, API and CLI requests into queued deployments | planned |
 | `internal/registry` | OCI tag to digest resolution | planned |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, committed through the GitHub API | planned |
@@ -185,9 +186,34 @@ Postgres is the only stateful dependency. Running more than one replica is safe.
 | Web UI | `html/template` and htmx vendored through `embed` | no CDN, no JavaScript build step, works offline |
 | UI auth | `github.com/coreos/go-oidc` and `golang.org/x/oauth2`, plus hashed API tokens in Postgres | OIDC discovery and token verification are not hand-rolled |
 
+## GitHub access
+
+`internal/github` is the only package that talks to GitHub. It is a small client on `net/http`; callers think in repositories, not installations or tokens.
+
+```
+App.RepoClient(ctx, owner, repo)
+   │  validate owner/repo names
+   ▼
+installation lookup: GET /repos/{owner}/{repo}/installation   (App JWT; cached 1 h per repo)
+   ▼
+Client ── installation transport ── token cache: POST /app/installations/{id}/access_tokens
+   │                                 (App JWT; one token per installation, refreshed 5 min early)
+   ▼
+Client.Do(ctx, method, path, in, out)   JSON in/out, non-2xx → *APIError
+```
+
+- One App, many owners. Installation IDs come from the repository lookup, so repositories under different organizations and personal accounts are served by their own installation's token with no configuration per owner.
+- `RepoClient` rejects owner and repository names that are not valid GitHub names (`ErrInvalidRepository`), so names from configuration or webhooks cannot reach other API routes. A missing or suspended installation is `ErrNotInstalled` / `ErrInstallationSuspended` and is never cached.
+- The token cache has one entry per installation with a one-slot semaphore: one caller mints, the others wait under their own context and reuse the result. A `401` drops the cached token; a `404` while minting evicts every lookup that pointed at that installation. Nothing retries automatically; engine steps are idempotent and retried by the engine.
+- The installation transport only attaches credentials when the request's scheme and host match the configured API URL and refuses anything else with `ErrForeignHost`, including redirects. Tokens are never exported from the package.
+- Responses are read through a 10 MiB limit, and the default HTTP client times out after 30 s. Later beads add typed methods (contents, pull requests, statuses, checks) on top of `Client.Do`.
+- `VerifySignature` checks `X-Hub-Signature-256` webhook signatures against the raw body with a constant-time comparison.
+
+Setup, permissions and the least-privilege model are described in [github-app.md](github-app.md).
+
 ## Security posture
 
-- GitHub access is through a GitHub App: short-lived installation tokens, cached and refreshed before expiry, scoped to the repositories and permissions doorstep needs. Commits are attributed to and verified as the App.
+- GitHub access is through one GitHub App installed on each owner with *Only select repositories*: one-hour installation tokens, held in memory only, refreshed five minutes before expiry, and only ever sent to the configured API host (requests and redirects to any other host are refused). GitHub applies the App's permissions to every selected repository, so the repository selection is what limits reach. Commits are attributed to and verified as the App.
 - Pins are written through the GitHub Contents/Git Data API using the blob SHA for optimistic concurrency: no local clone, no git binary, no SSH keys, no writable volume.
 - Webhook payloads are verified with HMAC-SHA256 and a constant-time comparison before they are parsed.
 - Kubernetes RBAC is `get`, `list` and `watch` on Argo CD `Application` resources only. doorstep never patches or syncs Applications.

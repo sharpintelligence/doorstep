@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -60,6 +61,11 @@ func serve(ctx context.Context, logOutput io.Writer, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	githubApp, err := newGitHubApp(cfg.GitHub, os.ReadFile, logger)
+	if err != nil {
+		return err
+	}
+	logGitHubApp(ctx, logger, cfg.GitHub, githubApp)
 
 	st, err := openStore(ctx, cfg.Database)
 	if err != nil {

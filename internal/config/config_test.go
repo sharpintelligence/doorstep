@@ -25,6 +25,7 @@ func TestDefault(t *testing.T) {
 	want := Config{
 		Server: Server{ListenAddr: ":8080", ShutdownDelay: 5 * time.Second, ShutdownTimeout: 15 * time.Second},
 		Log:    Log{Level: "info", Format: "json"},
+		GitHub: GitHub{APIURL: "https://api.github.com"},
 	}
 	got := Default()
 	if got != want {
