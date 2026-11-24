@@ -153,4 +153,6 @@ Flags and environment variables are listed in [configuration.md](configuration.m
 
 ## For the engine
 
-`locks.Service.Blocking(ctx, target)` returns the live freezes that block a target (its app freeze and the global freeze, global first). The engine uses it to record the `lock` gate as pending with the owner and reason as evidence. The claim already skips frozen deploys, so the engine does not have to enforce the freeze itself. Deployment-kind lock rows are reserved for the engine.
+`locks.Service.Blocking(ctx, target)` returns the live freezes that block a target (its app freeze and the global freeze, global first). It satisfies `gates.FreezeReader`, which the opt-in [`lock` gate](gates.md#lock) reads to hold a deployment as `pending` with the owner and reason as evidence. The claim already skips frozen deploys, so neither the gate nor the engine has to enforce the freeze itself. Deployment-kind lock rows are reserved for the engine.
+
+Freezes that recur on a timetable, such as weekends or a holiday period, do not need someone to lock and unlock by hand: a [`schedule` gate](gates.md#schedule) with `deny` windows holds deploys during those periods ([configuration.md](configuration.md#deploy-windows)).

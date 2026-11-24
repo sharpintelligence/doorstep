@@ -425,12 +425,80 @@ The place being pinned must already exist in the GitOps repository: the `images`
 | `type` | Phase | Settings | Passes when |
 | --- | --- | --- | --- |
 | `checks` | `before` | `timeout`, default `30m` | The checks in `source.required_checks` (or all checks) succeeded on the commit. |
-| `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. The deploy already waited for this for up to `argocd.sync_timeout`, so the gate's timeout only matters when health is lost again afterwards. |
-| `soak` | `after` | `duration`, required | The Application stays healthy for `duration`. |
+| `lock` | `before` | none | No manual freeze ([locks.md](locks.md)) blocks the app and environment. |
+| `schedule` | `before` | `windows`, required; `timezone`, default `UTC`; `apply_to_rollbacks`, default `false` | No deny window is active and, if the gate has allow windows, one of them is; see [Deploy windows](#deploy-windows). |
+| `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced and healthy, and not degraded for a minute or more. |
+| `soak` | `after` | `duration`, required; `timeout`, default `duration` + `10m` | The Application stays synced and healthy for `duration` from when it was first seen healthy; a `Degraded` observation restarts the clock. |
 
-A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)).
+The default gates are `checks` before and `health` after; `lock`, `schedule` and `soak` run only when listed. Rollbacks skip `checks`, `lock` and `soak`, and skip `schedule` unless it sets `apply_to_rollbacks: true`; `health` always runs. [gates.md](gates.md#built-in-gates) describes every verdict and the evidence each gate records.
 
-A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` on `soak`, `duration` on `checks` or `health`) are errors, even when zero. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
+A gate's `timeout` is measured from its first evaluation for the deployment; a gate still pending when it runs out fails, which fails the phase (see [gates.md](gates.md#timeouts)). `lock` and `schedule` have no timeout: a freeze can last days, and the deployment waits at the head of its queue until it lifts. A `soak` timeout must be longer than its `duration`.
+
+A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` or `duration` on `lock` or `schedule`, `duration` on `checks` or `health`, `windows`, `timezone` or `apply_to_rollbacks` on anything but `schedule`) are errors, even when zero or empty. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
+
+#### Deploy windows
+
+A `schedule` gate holds deploys outside allowed periods or inside denied ones. Each entry in `windows` is one recurring period:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `effect` | required | `allow` or `deny`. |
+| `cron` | required | When the window opens, as a five-field cron expression: minute, hour, day of month, month, day of week (`0 17 * * 5` is Fridays at 17:00). Ranges (`1-5`), lists (`9,13`), steps (`*/15`) and names (`MON-FRI`, `JAN`) are allowed. Seconds, descriptors such as `@daily` or `@every 1h`, and `TZ=` or `CRON_TZ=` prefixes are not. |
+| `duration` | required | How long the window stays open after each opening, such as `8h` or `63h`. Positive and at most 366 days. |
+| `timezone` | the gate's `timezone` | IANA time zone the cron expression is read in, such as `Europe/London`. |
+| `name` | none | Shown in messages and evidence. At most 100 characters, no control characters. |
+
+The gate's `timezone` defaults to `UTC`; `Local` is rejected, so the behaviour does not depend on the host. Time zone data is built into the binary, so zone names resolve the same on a laptop and in the container. A gate holds at most 100 windows.
+
+Any active `deny` window holds the deploy. Otherwise, if the gate has at least one `allow` window, one must be active; a gate with only `deny` windows passes whenever none is active. A held deployment waits at the head of its queue and starts once the window opens. A deploy that already passed its before gates is not stopped when a window closes. Rollbacks pass through unless `apply_to_rollbacks: true`.
+
+Business hours on weekdays, no deploys over the holidays, and the same windows shared through a YAML anchor:
+
+```yaml
+apps:
+  - name: shop
+    source:
+      repo: example-org/shop
+    image:
+      repository: ghcr.io/example-org/shop
+    gitops:
+      repo: example-org/platform
+      path: apps/shop
+    gates:
+      before:
+        - type: checks
+        - type: lock
+        - type: schedule
+          timezone: Europe/London
+          windows: &office-hours
+            - effect: allow
+              name: business hours
+              cron: "0 9 * * 1-5"
+              duration: 8h
+            - effect: deny
+              name: christmas
+              cron: "0 0 24 12 *"
+              duration: 72h
+
+  - name: checkout
+    source:
+      repo: example-org/checkout
+    image:
+      repository: ghcr.io/example-org/checkout
+    gitops:
+      repo: example-org/platform
+      path: apps/checkout
+    gates:
+      before:
+        - type: checks
+        - type: schedule
+          name: office-hours
+          timezone: Europe/London
+          apply_to_rollbacks: true
+          windows: *office-hours
+```
+
+A weekend freeze is a single deny window from Friday 17:00 to Monday 08:00: `{effect: deny, cron: "0 17 * * 5", duration: 63h}`. A window's `duration` is elapsed time, so across a daylight saving change it covers one hour more or less of wall-clock time. A firing time that falls in the hour skipped when clocks go forward does not fire that day, and one in the hour repeated when clocks go back fires twice: `cron: "30 2 * * *"` in `America/New_York` opens no window on 2026-03-08 (an allow window holds deploys an extra day; a deny window does not apply), and `cron: "30 1 * * *"` opens two windows on 2026-11-01. Keep firings outside 01:00-03:00 local time, or use `UTC`, to avoid this; see [gates.md](gates.md#schedule).
 
 #### Rules across apps
 
@@ -441,7 +509,7 @@ A gate type is rejected in the other phase, and settings that do not belong to a
 
 ### Full example
 
-Two owners, both pin strategies, both deploy modes, a soak gate and both notification types:
+Two owners, both pin strategies, both deploy modes, freeze and soak gates and both notification types:
 
 ```yaml
 server:
@@ -529,6 +597,13 @@ apps:
       before:
         - type: checks
           timeout: 1h
+        - type: lock
+        - type: schedule
+          name: weekend-freeze
+          windows:
+            - effect: deny
+              cron: "0 17 * * 5"
+              duration: 63h
       after:
         - type: health
         - type: soak

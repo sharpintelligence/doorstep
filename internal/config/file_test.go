@@ -534,9 +534,9 @@ func TestFileCatalogDefaults(t *testing.T) {
 		},
 		{
 			name:   "only after gates given keeps default before gates",
-			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateSoak, Duration: Duration(time.Minute)}} },
+			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateHealth}} },
 			want: func(a *App) {
-				a.Gates.After = []Gate{{Type: GateSoak, Name: "soak", Duration: Duration(time.Minute)}}
+				a.Gates.After = []Gate{{Type: GateHealth, Name: "health", Timeout: durPtr(10 * time.Minute)}}
 			},
 		},
 		{
@@ -563,10 +563,57 @@ func TestFileCatalogDefaults(t *testing.T) {
 			},
 		},
 		{
-			name:   "soak gate gets no default timeout",
-			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateSoak, Duration: Duration(time.Minute)}} },
+			name:   "soak gate timeout defaults to duration plus allowance",
+			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateSoak, Duration: Duration(time.Hour)}} },
 			want: func(a *App) {
-				a.Gates.After = []Gate{{Type: GateSoak, Name: "soak", Duration: Duration(time.Minute)}}
+				a.Gates.After = []Gate{{Type: GateSoak, Name: "soak", Duration: Duration(time.Hour), Timeout: durPtr(70 * time.Minute)}}
+			},
+		},
+		{
+			name: "soak gate explicit timeout kept",
+			mutate: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateSoak, Duration: Duration(time.Hour), Timeout: durPtr(3 * time.Hour)}}
+			},
+			want: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateSoak, Name: "soak", Duration: Duration(time.Hour), Timeout: durPtr(3 * time.Hour)}}
+			},
+		},
+		{
+			name:   "lock gate gets no timeout",
+			mutate: func(a *App) { a.Gates.Before = []Gate{{Type: GateLock}} },
+			want:   func(a *App) { a.Gates.Before = []Gate{{Type: GateLock, Name: "lock"}} },
+		},
+		{
+			name: "schedule gate time zones default to UTC",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateSchedule, Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(63 * time.Hour)}}}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = []Gate{{
+					Type: GateSchedule, Name: "schedule", Timezone: "UTC",
+					Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(63 * time.Hour), Timezone: "UTC"}},
+				}}
+			},
+		},
+		{
+			name: "schedule windows inherit the gate time zone",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{
+					Type: GateSchedule, Timezone: "Europe/London", ApplyToRollbacks: true,
+					Windows: []Window{
+						{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour)},
+						{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York", Name: "holidays"},
+					},
+				}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = []Gate{{
+					Type: GateSchedule, Name: "schedule", Timezone: "Europe/London", ApplyToRollbacks: true,
+					Windows: []Window{
+						{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour), Timezone: "Europe/London"},
+						{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York", Name: "holidays"},
+					},
+				}}
 			},
 		},
 		{
@@ -612,6 +659,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app.Source.RequiredChecks = []string{"test"}
 	app.Pin.YAML = &YAMLPin{File: "values.yaml", Path: "image.digest"}
 	app.Gates.Before = []Gate{{Type: GateChecks, Timeout: durPtr(time.Hour)}}
+	app.Gates.Before = append(app.Gates.Before, Gate{Type: GateSchedule, Windows: []Window{{Effect: WindowDeny, Cron: "0 17 * * 5", Duration: Duration(time.Hour)}}})
 	app.Gates.After = []Gate{{Type: GateHealth}}
 	app.Notify = []string{"ops"}
 	app.Source.Deployments = new(true)
@@ -626,6 +674,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	catalog.Apps[0].Pin.YAML.Path = "changed"
 	catalog.Apps[0].Gates.After[0].Name = "changed"
 	*catalog.Apps[0].Gates.Before[0].Timeout = 0
+	catalog.Apps[0].Gates.Before[1].Windows[0].Cron = "changed"
 	catalog.Apps[0].Notify[0] = "changed"
 	catalog.Notifications[0].Name = "changed"
 	catalog.Notifications[0].Events[0] = "changed"
@@ -634,9 +683,82 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 
 	original := file.Apps[0]
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
-		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
+		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) ||
+		original.Gates.Before[1].Windows[0].Cron != "0 17 * * 5" || original.Gates.Before[1].Windows[0].Timezone != "" ||
+		original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" ||
 		file.Notifications[0].Events[0] != "deploy.failed" || !*original.Source.Deployments || *original.ArgoCD.SyncTimeout != Duration(time.Minute) {
 		t.Errorf("Catalog() shares memory with the file: %+v", file)
+	}
+}
+
+func TestParseScheduleWindowsWithAnchors(t *testing.T) {
+	t.Parallel()
+
+	const yaml = `
+apps:
+  - name: blog
+    source: {repo: example-user/blog}
+    image: {repository: ghcr.io/example-user/blog}
+    gitops: {repo: example-user/homelab, path: apps/blog}
+    gates:
+      before:
+        - type: checks
+        - type: schedule
+          timezone: Europe/London
+          windows: &business-hours
+            - effect: allow
+              cron: "0 9 * * 1-5"
+              duration: 8h
+              name: business hours
+            - effect: deny
+              cron: "0 0 24 12 *"
+              duration: 48h
+              timezone: America/New_York
+  - name: api
+    source: {repo: example-user/api}
+    image: {repository: ghcr.io/example-user/api}
+    gitops: {repo: example-user/homelab, path: apps/api}
+    gates:
+      before:
+        - type: schedule
+          apply_to_rollbacks: true
+          windows: *business-hours
+`
+	f, err := Parse(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	c := f.Catalog()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	blog := c.Apps[0].Gates.Before[1]
+	api := c.Apps[1].Gates.Before[0]
+	wantBlog := []Window{
+		{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour), Timezone: "Europe/London", Name: "business hours"},
+		{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York"},
+	}
+	wantAPI := []Window{
+		{Effect: WindowAllow, Cron: "0 9 * * 1-5", Duration: Duration(8 * time.Hour), Timezone: "UTC", Name: "business hours"},
+		{Effect: WindowDeny, Cron: "0 0 24 12 *", Duration: Duration(48 * time.Hour), Timezone: "America/New_York"},
+	}
+	if !reflect.DeepEqual(blog.Windows, wantBlog) {
+		t.Errorf("blog windows = %+v, want %+v", blog.Windows, wantBlog)
+	}
+	if !reflect.DeepEqual(api.Windows, wantAPI) {
+		t.Errorf("api windows = %+v, want %+v", api.Windows, wantAPI)
+	}
+	if blog.ApplyToRollbacks || !api.ApplyToRollbacks {
+		t.Errorf("apply_to_rollbacks = %v, %v; want false, true", blog.ApplyToRollbacks, api.ApplyToRollbacks)
+	}
+}
+
+func TestParseRejectsUnknownWindowField(t *testing.T) {
+	t.Parallel()
+
+	const yaml = "apps:\n  - name: blog\n    gates:\n      before:\n        - type: schedule\n          windows:\n            - effect: deny\n              schedule: \"0 17 * * 5\"\n"
+	if _, err := Parse(strings.NewReader(yaml)); err == nil || !strings.Contains(err.Error(), "schedule") {
+		t.Errorf("Parse() error = %v, want unknown field schedule", err)
 	}
 }
 

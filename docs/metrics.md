@@ -65,7 +65,7 @@ The other labels are fixed sets. Any other value is recorded as `unknown`, excep
 | `outcome` | `succeeded`, `failed` (failed before anything was pinned, nothing to roll back), `rolled_back`, `rollback_failed`, `cancelled`, `superseded`, `unknown` |
 | `reason` | `gate_failed`, `sync_failed`, `manual`, `unknown` |
 | `phase` | `deploy` (verifying a deployment), `rollback` (verifying a rollback), `unknown` |
-| `gate` | `ci`, `lock`, `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
+| `gate` | `ci`, `lock` (a manual freeze), `schedule` (a deploy window), `argocd` (Argo CD synced and healthy), `soak`, `metrics` (a metric query), `manual` (a manual hold), `unknown` |
 | `result` | gates: `passed`, `failed`, `error` (the gate could not be evaluated), `unknown`; notifications: `sent`, `failed`, `dropped`, `unknown`; webhooks: `processed`, `ignored`, `duplicate`, `rejected`, `unauthorized`, `failed`, `unknown`; poll cycles: `succeeded`, `failed`, `unknown` |
 | `event` | `push`, `check_run`, `check_suite`, `status`, `installation`, `installation_repositories`, `ping`, `other` |
 | `type` | `slack`, `webhook`, `github` (deployment statuses), `unknown` |

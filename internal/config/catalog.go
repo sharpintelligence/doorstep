@@ -183,10 +183,14 @@ func (a ArgoCD) Timeout() time.Duration {
 type GateType string
 
 const (
-	GateChecks GateType = "checks"
-	GateHealth GateType = "health"
-	GateSoak   GateType = "soak"
+	GateChecks   GateType = "checks"
+	GateLock     GateType = "lock"
+	GateSchedule GateType = "schedule"
+	GateHealth   GateType = "health"
+	GateSoak     GateType = "soak"
 )
+
+const DefaultSoakTimeoutAllowance = 10 * time.Minute
 
 type GatePhase string
 
@@ -201,25 +205,54 @@ type Gates struct {
 }
 
 type Gate struct {
-	Type     GateType  `yaml:"type"`
-	Name     string    `yaml:"name"`
-	Timeout  *Duration `yaml:"timeout"`
-	Duration Duration  `yaml:"duration"`
+	Type             GateType  `yaml:"type"`
+	Name             string    `yaml:"name"`
+	Timeout          *Duration `yaml:"timeout"`
+	Duration         Duration  `yaml:"duration"`
+	Timezone         string    `yaml:"timezone"`
+	ApplyToRollbacks bool      `yaml:"apply_to_rollbacks"`
+	Windows          []Window  `yaml:"windows"`
+}
+
+type WindowEffect string
+
+const (
+	WindowAllow WindowEffect = "allow"
+	WindowDeny  WindowEffect = "deny"
+)
+
+type Window struct {
+	Effect   WindowEffect `yaml:"effect"`
+	Cron     string       `yaml:"cron"`
+	Duration Duration     `yaml:"duration"`
+	Timezone string       `yaml:"timezone"`
+	Name     string       `yaml:"name"`
 }
 
 type gateSpec struct {
 	phase            GatePhase
 	allowsTimeout    bool
-	defaultTimeout   time.Duration
+	defaultTimeout   func(Gate) time.Duration
 	requiresDuration bool
+	requiresWindows  bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
 	return map[GateType]gateSpec{
-		GateChecks: {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: 30 * time.Minute},
-		GateHealth: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: 10 * time.Minute},
-		GateSoak:   {phase: PhaseAfter, requiresDuration: true},
+		GateChecks:   {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: fixedTimeout(30 * time.Minute)},
+		GateLock:     {phase: PhaseBefore},
+		GateSchedule: {phase: PhaseBefore, requiresWindows: true},
+		GateHealth:   {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: fixedTimeout(10 * time.Minute)},
+		GateSoak:     {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
 	}
+}
+
+func fixedTimeout(d time.Duration) func(Gate) time.Duration {
+	return func(Gate) time.Duration { return d }
+}
+
+func soakTimeout(g Gate) time.Duration {
+	return g.Duration.Std() + DefaultSoakTimeoutAllowance
 }
 
 type NotificationType string
@@ -319,12 +352,20 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 	out := make([]Gate, 0, len(gates))
 	for _, g := range gates {
 		g.Name = orDefault(g.Name, string(g.Type))
-		if spec, ok := specs[g.Type]; ok && spec.allowsTimeout && g.Timeout == nil {
-			timeout := Duration(spec.defaultTimeout)
+		spec, known := specs[g.Type]
+		if known && spec.allowsTimeout && g.Timeout == nil {
+			timeout := Duration(spec.defaultTimeout(g))
 			g.Timeout = &timeout
 		} else if g.Timeout != nil {
 			timeout := *g.Timeout
 			g.Timeout = &timeout
+		}
+		if known && spec.requiresWindows {
+			g.Timezone = orDefault(g.Timezone, DefaultScheduleZone)
+		}
+		g.Windows = slices.Clone(g.Windows)
+		for i := range g.Windows {
+			g.Windows[i].Timezone = orDefault(g.Windows[i].Timezone, g.Timezone)
 		}
 		out = append(out, g)
 	}
