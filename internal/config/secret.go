@@ -3,8 +3,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
+
+const MaxSecretBytes = 64 << 10
 
 type SecretRef struct {
 	Label string
@@ -57,4 +62,20 @@ func (c Catalog) CheckSecrets(lookupEnv func(string) (string, bool), readFile fu
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func ReadSecretFile(name string) ([]byte, error) {
+	f, err := os.Open(filepath.Clean(name))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, MaxSecretBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxSecretBytes {
+		return nil, fmt.Errorf("file %s is larger than the %d byte limit", name, MaxSecretBytes)
+	}
+	return data, nil
 }

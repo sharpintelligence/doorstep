@@ -105,7 +105,7 @@ func TestParse(t *testing.T) {
 			Deploy: Deploy{Mode: DeployPullRequest},
 			ArgoCD: ArgoCD{Application: "blog-prod", Namespace: "gitops"},
 			Gates: Gates{
-				Before: []Gate{{Type: GateChecks, Timeout: Duration(45 * time.Minute)}},
+				Before: []Gate{{Type: GateChecks, Timeout: durPtr(45 * time.Minute)}},
 				After: []Gate{
 					{Type: GateHealth, Name: "argo-health"},
 					{Type: GateSoak, Duration: Duration(15 * time.Minute)},
@@ -370,8 +370,8 @@ func defaultedApp() App {
 		Deploy: Deploy{Mode: DeployCommit},
 		ArgoCD: ArgoCD{Application: "blog", Namespace: "argocd"},
 		Gates: Gates{
-			Before: []Gate{{Type: GateChecks, Name: "checks", Timeout: Duration(30 * time.Minute)}},
-			After:  []Gate{{Type: GateHealth, Name: "health", Timeout: Duration(10 * time.Minute)}},
+			Before: []Gate{{Type: GateChecks, Name: "checks", Timeout: durPtr(30 * time.Minute)}},
+			After:  []Gate{{Type: GateHealth, Name: "health", Timeout: durPtr(10 * time.Minute)}},
 		},
 	}
 }
@@ -466,10 +466,26 @@ func TestFileCatalogDefaults(t *testing.T) {
 		{
 			name: "gate names and timeouts kept",
 			mutate: func(a *App) {
-				a.Gates.Before = []Gate{{Type: GateChecks, Name: "ci", Timeout: Duration(time.Hour)}}
+				a.Gates.Before = []Gate{{Type: GateChecks, Name: "ci", Timeout: durPtr(time.Hour)}}
 			},
 			want: func(a *App) {
-				a.Gates.Before = []Gate{{Type: GateChecks, Name: "ci", Timeout: Duration(time.Hour)}}
+				a.Gates.Before = []Gate{{Type: GateChecks, Name: "ci", Timeout: durPtr(time.Hour)}}
+			},
+		},
+		{
+			name: "explicit zero timeout is kept for validation",
+			mutate: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateChecks, Timeout: durPtr(0)}}
+			},
+			want: func(a *App) {
+				a.Gates.Before = []Gate{{Type: GateChecks, Name: "checks", Timeout: durPtr(0)}}
+			},
+		},
+		{
+			name:   "soak gate gets no default timeout",
+			mutate: func(a *App) { a.Gates.After = []Gate{{Type: GateSoak, Duration: Duration(time.Minute)}} },
+			want: func(a *App) {
+				a.Gates.After = []Gate{{Type: GateSoak, Name: "soak", Duration: Duration(time.Minute)}}
 			},
 		},
 		{
@@ -509,6 +525,7 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	app := minimalApp()
 	app.Source.RequiredChecks = []string{"test"}
 	app.Pin.YAML = &YAMLPin{File: "values.yaml", Path: "image.digest"}
+	app.Gates.Before = []Gate{{Type: GateChecks, Timeout: durPtr(time.Hour)}}
 	app.Gates.After = []Gate{{Type: GateHealth}}
 	app.Notify = []string{"ops"}
 	file := File{
@@ -520,12 +537,13 @@ func TestFileCatalogDoesNotAlias(t *testing.T) {
 	catalog.Apps[0].Source.RequiredChecks[0] = "changed"
 	catalog.Apps[0].Pin.YAML.Path = "changed"
 	catalog.Apps[0].Gates.After[0].Name = "changed"
+	*catalog.Apps[0].Gates.Before[0].Timeout = 0
 	catalog.Apps[0].Notify[0] = "changed"
 	catalog.Notifications[0].Name = "changed"
 
 	original := file.Apps[0]
 	if original.Source.RequiredChecks[0] != "test" || original.Pin.YAML.Path != "image.digest" ||
-		original.Gates.After[0].Name != "" || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" {
+		original.Gates.After[0].Name != "" || *original.Gates.Before[0].Timeout != Duration(time.Hour) || original.Notify[0] != "ops" || file.Notifications[0].Name != "ops" {
 		t.Errorf("Catalog() shares memory with the file: %+v", file)
 	}
 }

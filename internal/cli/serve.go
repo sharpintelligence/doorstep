@@ -96,7 +96,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	if err != nil {
 		return err
 	}
-	if err := in.catalog.CheckSecrets(in.lookupEnv, os.ReadFile); err != nil {
+	if err := in.catalog.CheckSecrets(in.lookupEnv, config.ReadSecretFile); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	if in.configPath != "" {

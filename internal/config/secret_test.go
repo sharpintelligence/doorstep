@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -171,4 +174,52 @@ func TestSecretRefReadNeverLeaksValue(t *testing.T) {
 			t.Errorf("Read(%+v) error leaks the secret: %v", ref, err)
 		}
 	}
+}
+
+func TestReadSecretFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	write := func(name string, size int) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, bytes.Repeat([]byte("s"), size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	tests := []struct {
+		name     string
+		path     string
+		wantSize int
+		wantErr  []string
+	}{
+		{name: "small", path: write("small", 32), wantSize: 32},
+		{name: "empty", path: write("empty", 0), wantSize: 0},
+		{name: "at the limit", path: write("limit", MaxSecretBytes), wantSize: MaxSecretBytes},
+		{name: "over the limit", path: write("over", MaxSecretBytes+1), wantErr: []string{"is larger than the 65536 byte limit"}},
+		{name: "missing", path: filepath.Join(dir, "missing"), wantErr: []string{"no such file or directory"}},
+		{name: "directory", path: dir, wantErr: []string{dir}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ReadSecretFile(tt.path)
+			assertErrorContains(t, err, tt.wantErr)
+			if len(got) != tt.wantSize {
+				t.Errorf("ReadSecretFile() read %d bytes, want %d", len(got), tt.wantSize)
+			}
+		})
+	}
+}
+
+func TestReadSecretFileStopsAtLimitOnEndlessFile(t *testing.T) {
+	t.Parallel()
+
+	if _, err := os.Stat("/dev/zero"); err != nil {
+		t.Skip("no /dev/zero")
+	}
+	_, err := ReadSecretFile("/dev/zero")
+	assertErrorContains(t, err, []string{"/dev/zero is larger than the 65536 byte limit"})
 }

@@ -172,10 +172,10 @@ type Gates struct {
 }
 
 type Gate struct {
-	Type     GateType `yaml:"type"`
-	Name     string   `yaml:"name"`
-	Timeout  Duration `yaml:"timeout"`
-	Duration Duration `yaml:"duration"`
+	Type     GateType  `yaml:"type"`
+	Name     string    `yaml:"name"`
+	Timeout  *Duration `yaml:"timeout"`
+	Duration Duration  `yaml:"duration"`
 }
 
 type gateSpec struct {
@@ -276,8 +276,12 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 	out := make([]Gate, 0, len(gates))
 	for _, g := range gates {
 		g.Name = orDefault(g.Name, string(g.Type))
-		if spec, ok := specs[g.Type]; ok && spec.allowsTimeout && g.Timeout == 0 {
-			g.Timeout = Duration(spec.defaultTimeout)
+		if spec, ok := specs[g.Type]; ok && spec.allowsTimeout && g.Timeout == nil {
+			timeout := Duration(spec.defaultTimeout)
+			g.Timeout = &timeout
+		} else if g.Timeout != nil {
+			timeout := *g.Timeout
+			g.Timeout = &timeout
 		}
 		out = append(out, g)
 	}
@@ -320,4 +324,21 @@ func (p Pin) target(gitops GitOps) (string, bool) {
 		path.Join(gitops.Path, file),
 		key,
 	}, "\x00"), true
+}
+
+func (a App) kustomizationDir() (string, bool) {
+	var dir string
+	switch a.Pin.Strategy() {
+	case PinKustomize:
+		dir = path.Clean(a.GitOps.Path)
+	case PinYAML:
+		file := path.Join(a.GitOps.Path, a.Pin.YAML.File)
+		if base := path.Base(file); base != "kustomization.yaml" && base != "kustomization.yml" {
+			return "", false
+		}
+		dir = path.Dir(file)
+	default:
+		return "", false
+	}
+	return strings.Join([]string{strings.ToLower(string(a.GitOps.Repo)), a.GitOps.Branch, dir}, "\x00"), true
 }

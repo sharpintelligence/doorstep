@@ -47,6 +47,15 @@ func (c Catalog) Validate() error {
 		validateNotification(r, n)
 	}
 
+	kustomizePins := make(map[string]int, len(c.Apps))
+	for i, a := range c.Apps {
+		if dir, ok := a.kustomizationDir(); ok && a.Pin.Strategy() == PinKustomize {
+			if _, seen := kustomizePins[dir]; !seen {
+				kustomizePins[dir] = i
+			}
+		}
+	}
+
 	firstApp := make(map[string]int, len(c.Apps))
 	pinOwners := make(map[string]int, len(c.Apps))
 	for i, a := range c.Apps {
@@ -63,6 +72,11 @@ func (c Catalog) Validate() error {
 				r.addf("pin", "writes the same image pin as apps[%d] (%s) in %s on branch %s", first, other.Name, a.GitOps.Repo, a.GitOps.Branch)
 			} else {
 				pinOwners[target] = i
+			}
+		}
+		if dir, ok := a.kustomizationDir(); ok && a.Pin.Strategy() == PinYAML {
+			if owner, found := kustomizePins[dir]; found {
+				r.addf("pin.yaml.file", "writes the kustomization that apps[%d] (%s) pins with kustomize; use pin.kustomize instead", owner, c.Apps[owner].Name)
 			}
 		}
 	}
@@ -204,8 +218,8 @@ func validatePin(r reporter, p Pin) {
 		}
 		if y.Path == "" {
 			r.addf("pin.yaml.path", "is required")
-		} else if slices.Contains(y.Segments(), "") {
-			r.addf("pin.yaml.path", "%q must be dot-separated keys without empty segments", y.Path)
+		} else if slices.ContainsFunc(y.Segments(), isBlankOrPadded) {
+			r.addf("pin.yaml.path", "%q must be dot-separated keys without empty segments or surrounding whitespace", y.Path)
 		}
 		switch y.Format {
 		case PinFormatDigest, PinFormatReference:
@@ -215,6 +229,10 @@ func validatePin(r reporter, p Pin) {
 	default:
 		r.addf("pin", "set exactly one of kustomize or yaml")
 	}
+}
+
+func isBlankOrPadded(segment string) bool {
+	return segment == "" || strings.TrimSpace(segment) != segment
 }
 
 func validateGates(r reporter, g Gates) {
@@ -247,10 +265,10 @@ func validateGates(r reporter, g Gates) {
 			if spec.phase != phase.phase {
 				r.addf(field+".type", "%s gates run only in gates.%s", gate.Type, spec.phase)
 			}
-			if spec.allowsTimeout && gate.Timeout <= 0 {
+			if spec.allowsTimeout && (gate.Timeout == nil || *gate.Timeout <= 0) {
 				r.addf(field+".timeout", "must be positive")
 			}
-			if !spec.allowsTimeout && gate.Timeout != 0 {
+			if !spec.allowsTimeout && gate.Timeout != nil {
 				r.addf(field+".timeout", "not allowed for type %s", gate.Type)
 			}
 			if spec.requiresDuration && gate.Duration <= 0 {

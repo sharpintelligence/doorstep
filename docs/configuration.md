@@ -247,7 +247,7 @@ Named notification targets. Apps refer to them by name in `notify`.
 | `name` | yes | Unique name; a DNS label (lowercase letters, digits and `-`, starting and ending with a letter or digit, at most 63 characters). |
 | `type` | yes | `slack` or `webhook`. |
 | `webhook_url_env` / `webhook_url_file` | `slack`: exactly one | Environment variable or absolute file path holding the Slack incoming webhook URL. Slack webhook URLs are credentials, so there is no inline form. |
-| `url` / `url_env` / `url_file` | `webhook`: exactly one | The endpoint doorstep posts to: inline (`http` or `https`, with a host and no `user:password@`), or from an environment variable or absolute file path when the URL itself carries a token. |
+| `url` / `url_env` / `url_file` | `webhook`: exactly one | The endpoint doorstep posts to: inline (`http` or `https`, with a host, and without `user:password@`, a query string or a fragment, since those often carry tokens), or from an environment variable or absolute file path when the URL itself carries a token. |
 | `secret_env` / `secret_file` | `webhook`: optional, at most one | Secret used to sign webhook payloads. |
 
 Keys that belong to the other type are rejected. Environment variable names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and file paths must be absolute. See [Secrets](#secrets) for how they are read.
@@ -285,7 +285,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `pin.yaml.path` | required | Location of the value to set; see below. |
 | `pin.yaml.format` | `digest` | `digest` writes `sha256:...`, for Helm values with a separate digest field; `reference` writes `repository@sha256:...`, for an `image:` field in a plain manifest. |
 
-`pin.yaml.path` is a list of keys separated by `.`; a segment made only of digits is an index into a sequence. `image.digest` addresses `digest` under `image`, and `spec.template.spec.containers.0.image` addresses the image of the first container. Keys that contain a `.` cannot be addressed.
+`pin.yaml.path` is a list of keys separated by `.`; segments must not be empty or start or end with whitespace, and a segment made only of digits is an index into a sequence. `image.digest` addresses `digest` under `image`, and `spec.template.spec.containers.0.image` addresses the image of the first container. Keys that contain a `.` cannot be addressed.
 
 #### Gates
 
@@ -297,12 +297,13 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `health` | `after` | `timeout`, default `10m` | The Argo CD Application is synced to the pin commit and healthy. |
 | `soak` | `after` | `duration`, required | The Application stays healthy for `duration`. |
 
-A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` on `soak`, `duration` on `checks` or `health`) are errors. Timeouts and durations must be positive. Deploys of one app are always serialised by a lock; that is not configurable.
+A gate type is rejected in the other phase, and settings that do not belong to a type (`timeout` on `soak`, `duration` on `checks` or `health`) are errors, even when zero. Timeouts and durations must be positive: leave `timeout` out to use the default, because an explicit `timeout: 0s` is an error rather than a way to ask for the default. Deploys of one app are always serialised by a lock; that is not configurable. A `metrics` gate that holds a deploy on a Prometheus query is planned (see [ADR 0001](decisions/0001-go-and-core-design.md)) and is not accepted yet.
 
 #### Rules across apps
 
 - App names and notification names are unique.
 - Two apps must not write the same pin: the same GitOps repository (compared case-insensitively), branch and file, and the same kustomize image name or YAML path. They would overwrite each other's digests.
+- A `yaml` pin must not target a `kustomization.yaml` or `kustomization.yml` that a `kustomize` pin of another app writes (same GitOps repository, branch and directory); pin that file with `kustomize` instead.
 - Apps may share a source repository, a GitOps repository and an Argo CD Application.
 
 ### Full example
@@ -446,14 +447,16 @@ Restart the Deployment after changing the ConfigMap.
 doorstep config validate --config config.yaml
 ```
 
-Parses and validates the configuration file as `serve` does, without starting a server, without reading secrets or environment variables, and without requiring a database URL source (it may come from the environment), so it can run in the GitOps repository's CI before a configuration change merges. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
+Parses the configuration file and validates the values in it with the same rules as `serve`, without starting a server, so it can run in the GitOps repository's CI before a configuration change merges. It does not read secrets, and it does not apply or check `DOORSTEP_*` environment overrides or flags, so `serve` can still reject an invalid environment variable that `config validate` never saw. It does not require a database URL source either, since that usually comes from the environment. The path comes from `--config` or `DOORSTEP_CONFIG`; one of them is required. On success it prints `ok: N apps, M notification targets` and exits 0; otherwise it prints every error and exits 1.
 
 ## Secrets
 
-Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file. Notification secrets are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. Exactly one of the pair is set. One trailing newline is removed from the value, and an empty value is an error.
+Secrets (GitHub App private key, webhook secret, database password, OIDC client secret, registry credentials, notification tokens) are never written inline in the configuration file.
+
+Notification secrets are referenced by a pair of settings: `*_env` names an environment variable that holds the value, and `*_file` names an absolute path to a file that holds it, which maps directly to a mounted Kubernetes Secret. At most one of the pair is set, and exactly one where the setting is required. One trailing newline is removed from the value, and an empty value is an error. A secret file may be at most 64 KiB; a larger file (or a wrong path such as `/dev/zero`) is an error rather than being read into memory.
+
+`doorstep serve` checks every referenced notification secret at startup by reading it, and refuses to start if any is unset, unreadable, too large or empty, reporting all of them together. The values read by that check are discarded. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
 The database URL, the GitHub App private key and registry credentials are referenced only by path in the file (`database.url_file`, `github.private_key_file`, `registry.credentials_file`); to pass the value itself, use the environment variable described in [Database](#database) or [GitHub App](#github-app). Those files are read as described in their sections.
-
-`doorstep serve` reads every referenced notification secret once at startup and refuses to start if any is unset, unreadable or empty, reporting all of them together. Errors name the setting and the variable or path, never the value. Secrets are read again each time they are used, so a rotated mounted Secret takes effect without a restart. `doorstep config validate` only checks that references are well formed, because secrets are usually not available where the file is validated.
 
 Settings for the remaining secrets arrive with the features that need them.

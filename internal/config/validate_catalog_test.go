@@ -182,6 +182,21 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"url: must not include credentials"},
 		},
 		{
+			name:    "webhook url with query token",
+			mutate:  func(c *Catalog) { c.Notifications[1].URL = "https://hooks.example.com/x?token=abc" },
+			wantErr: []string{"url: must not include a query string or fragment, which often carry tokens; use url_env or url_file"},
+		},
+		{
+			name:    "webhook url with empty query",
+			mutate:  func(c *Catalog) { c.Notifications[1].URL = "https://hooks.example.com/x?" },
+			wantErr: []string{"url: must not include a query string or fragment"},
+		},
+		{
+			name:    "webhook url with fragment",
+			mutate:  func(c *Catalog) { c.Notifications[1].URL = "https://hooks.example.com/x#token=abc" },
+			wantErr: []string{"url: must not include a query string or fragment"},
+		},
+		{
 			name:    "plain http webhook url",
 			mutate:  func(c *Catalog) { c.Notifications[1].URL = "http://ntfy.local:8080/doorstep" },
 			wantErr: nil,
@@ -475,6 +490,26 @@ func TestCatalogValidate(t *testing.T) {
 			wantErr: []string{"pin.yaml.path:"},
 		},
 		{
+			name:    "yaml pin path whitespace-only segment",
+			mutate:  func(c *Catalog) { c.Apps[1].Pin.YAML.Path = "image. " },
+			wantErr: []string{`pin.yaml.path: "image. " must be dot-separated keys without empty segments or surrounding whitespace`},
+		},
+		{
+			name:    "yaml pin path segment with leading space",
+			mutate:  func(c *Catalog) { c.Apps[1].Pin.YAML.Path = "image. digest" },
+			wantErr: []string{"pin.yaml.path:", "surrounding whitespace"},
+		},
+		{
+			name:    "yaml pin path segment with trailing tab",
+			mutate:  func(c *Catalog) { c.Apps[1].Pin.YAML.Path = "image\t.digest" },
+			wantErr: []string{"pin.yaml.path:", "surrounding whitespace"},
+		},
+		{
+			name:    "yaml pin path key with inner space",
+			mutate:  func(c *Catalog) { c.Apps[1].Pin.YAML.Path = "my image.digest" },
+			wantErr: nil,
+		},
+		{
 			name:    "yaml pin path with index",
 			mutate:  func(c *Catalog) { c.Apps[1].Pin.YAML.Path = "spec.template.spec.containers.0.image" },
 			wantErr: nil,
@@ -544,14 +579,14 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name: "checks gate after deploy",
 			mutate: func(c *Catalog) {
-				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateChecks, Name: "ci", Timeout: Duration(time.Minute)})
+				c.Apps[0].Gates.After = append(c.Apps[0].Gates.After, Gate{Type: GateChecks, Name: "ci", Timeout: durPtr(time.Minute)})
 			},
 			wantErr: []string{"gates.after[1].type: checks gates run only in gates.before"},
 		},
 		{
 			name: "health gate before deploy",
 			mutate: func(c *Catalog) {
-				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateHealth, Name: "early", Timeout: Duration(time.Minute)})
+				c.Apps[0].Gates.Before = append(c.Apps[0].Gates.Before, Gate{Type: GateHealth, Name: "early", Timeout: durPtr(time.Minute)})
 			},
 			wantErr: []string{"gates.before[1].type: health gates run only in gates.after"},
 		},
@@ -564,17 +599,27 @@ func TestCatalogValidate(t *testing.T) {
 		},
 		{
 			name:    "gate timeout zero",
-			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Timeout = 0 },
+			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Timeout = durPtr(0) },
 			wantErr: []string{"gates.before[0].timeout: must be positive"},
 		},
 		{
+			name:    "gate timeout missing",
+			mutate:  func(c *Catalog) { c.Apps[0].Gates.Before[0].Timeout = nil },
+			wantErr: []string{"gates.before[0].timeout: must be positive"},
+		},
+		{
+			name:    "soak gate zero timeout not allowed",
+			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(0) },
+			wantErr: []string{"apps[1] (api): gates.after[1].timeout: not allowed for type soak"},
+		},
+		{
 			name:    "gate timeout negative",
-			mutate:  func(c *Catalog) { c.Apps[0].Gates.After[0].Timeout = Duration(-time.Second) },
+			mutate:  func(c *Catalog) { c.Apps[0].Gates.After[0].Timeout = durPtr(-time.Second) },
 			wantErr: []string{"gates.after[0].timeout: must be positive"},
 		},
 		{
 			name:    "soak gate timeout not allowed",
-			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = Duration(time.Minute) },
+			mutate:  func(c *Catalog) { c.Apps[1].Gates.After[1].Timeout = durPtr(time.Minute) },
 			wantErr: []string{"apps[1] (api): gates.after[1].timeout: not allowed for type soak"},
 		},
 		{
@@ -655,6 +700,49 @@ func TestCatalogValidate(t *testing.T) {
 				c.Apps[0].Pin = Pin{YAML: &YAMLPin{File: "api/values.yaml", Path: "image.digest", Format: PinFormatReference}}
 			},
 			wantErr: []string{"apps[1] (api): pin: writes the same image pin as apps[0] (blog)"},
+		},
+		{
+			name: "yaml pin on a kustomization another app pins with kustomize",
+			mutate: func(c *Catalog) {
+				c.Apps[1].GitOps = GitOps{Repo: "Example-User/homelab", Branch: "main", Path: "apps"}
+				c.Apps[1].Pin = Pin{YAML: &YAMLPin{File: "blog/kustomization.yaml", Path: "images.0.digest", Format: PinFormatDigest}}
+			},
+			wantErr: []string{"apps[1] (api): pin.yaml.file: writes the kustomization that apps[0] (blog) pins with kustomize; use pin.kustomize instead"},
+		},
+		{
+			name: "yaml pin before the kustomize pin on the same kustomization",
+			mutate: func(c *Catalog) {
+				c.Apps[0].Pin = Pin{YAML: &YAMLPin{File: "kustomization.yml", Path: "images.0.digest", Format: PinFormatDigest}}
+				c.Apps[1].GitOps = c.Apps[0].GitOps
+				c.Apps[1].Pin = Pin{Kustomize: &KustomizePin{Image: "api"}}
+			},
+			wantErr: []string{"apps[0] (blog): pin.yaml.file: writes the kustomization that apps[1] (api) pins with kustomize"},
+		},
+		{
+			name: "yaml pin on a kustomization at the repository root",
+			mutate: func(c *Catalog) {
+				c.Apps[0].GitOps.Path = ""
+				c.Apps[1].GitOps = GitOps{Repo: "example-user/homelab", Branch: "main"}
+				c.Apps[1].Pin = Pin{YAML: &YAMLPin{File: "kustomization.yaml", Path: "images.0.digest", Format: PinFormatDigest}}
+			},
+			wantErr: []string{"apps[1] (api): pin.yaml.file: writes the kustomization that apps[0] (blog)"},
+		},
+		{
+			name: "yaml pin on a kustomization in another directory",
+			mutate: func(c *Catalog) {
+				c.Apps[1].GitOps = c.Apps[0].GitOps
+				c.Apps[1].Pin = Pin{YAML: &YAMLPin{File: "overlay/kustomization.yaml", Path: "images.0.digest", Format: PinFormatDigest}}
+			},
+			wantErr: nil,
+		},
+		{
+			name: "yaml pin on a kustomization on another branch",
+			mutate: func(c *Catalog) {
+				c.Apps[1].GitOps = c.Apps[0].GitOps
+				c.Apps[1].GitOps.Branch = "staging"
+				c.Apps[1].Pin = Pin{YAML: &YAMLPin{File: "kustomization.yaml", Path: "images.0.digest", Format: PinFormatDigest}}
+			},
+			wantErr: nil,
 		},
 		{
 			name: "same kustomization with different images",

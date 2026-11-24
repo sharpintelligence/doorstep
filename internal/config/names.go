@@ -240,5 +240,8 @@ func validateURL(s string) error {
 	if u.User != nil {
 		return errors.New("must not include credentials; use url_env or url_file")
 	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("must not include a query string or fragment, which often carry tokens; use url_env or url_file")
+	}
 	return nil
 }
