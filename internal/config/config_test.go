@@ -2,12 +2,15 @@ package config
 
 import (
 	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/logging"
 )
+
+const testDatabaseURL = "postgres://doorstep@localhost/doorstep"
 
 func envFrom(vars map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
@@ -27,8 +30,12 @@ func TestDefault(t *testing.T) {
 	if got != want {
 		t.Errorf("Default() = %+v, want %+v", got, want)
 	}
+	if err := got.Validate(); !errors.Is(err, ErrDatabaseSource) {
+		t.Errorf("Default().Validate() = %v, want only ErrDatabaseSource", err)
+	}
+	got.Database.URL = testDatabaseURL
 	if err := got.Validate(); err != nil {
-		t.Errorf("Default().Validate() = %v", err)
+		t.Errorf("Default() with a database URL: Validate() = %v", err)
 	}
 }
 
@@ -77,6 +84,21 @@ func TestFromEnv(t *testing.T) {
 			want: func(c *Config) { c.Log.Level = "" },
 		},
 		{
+			name: "database URL",
+			env:  map[string]string{EnvDatabaseURL: testDatabaseURL},
+			want: func(c *Config) { c.Database.URL = testDatabaseURL },
+		},
+		{
+			name: "database URL file",
+			env:  map[string]string{EnvDatabaseURLFile: "/run/secrets/db"},
+			want: func(c *Config) { c.Database.URLFile = "/run/secrets/db" },
+		},
+		{
+			name: "both database sources are kept for validation",
+			env:  map[string]string{EnvDatabaseURL: testDatabaseURL, EnvDatabaseURLFile: "/run/secrets/db"},
+			want: func(c *Config) { c.Database = Database{URL: testDatabaseURL, URLFile: "/run/secrets/db"} },
+		},
+		{
 			name: "all variables",
 			env: map[string]string{
 				EnvListenAddr:      ":9090",
@@ -84,10 +106,12 @@ func TestFromEnv(t *testing.T) {
 				EnvShutdownTimeout: "5s",
 				EnvLogLevel:        "warn",
 				EnvLogFormat:       "text",
+				EnvDatabaseURL:     testDatabaseURL,
 			},
 			want: func(c *Config) {
 				c.Server = Server{ListenAddr: ":9090", ShutdownDelay: 2 * time.Second, ShutdownTimeout: 5 * time.Second}
 				c.Log = Log{Level: "warn", Format: "text"}
+				c.Database.URL = testDatabaseURL
 			},
 		},
 		{
@@ -178,14 +202,28 @@ func TestValidate(t *testing.T) {
 			wantErr: []string{"log format", `"xml"`},
 			wantIs:  []error{logging.ErrUnknownFormat},
 		},
+		{name: "database URL file", mutate: func(c *Config) { c.Database = Database{URLFile: "/run/secrets/db"} }},
+		{
+			name:    "no database source",
+			mutate:  func(c *Config) { c.Database = Database{} },
+			wantErr: []string{"database", EnvDatabaseURL, EnvDatabaseURLFile},
+			wantIs:  []error{ErrDatabaseSource},
+		},
+		{
+			name:    "both database sources",
+			mutate:  func(c *Config) { c.Database.URLFile = "/run/secrets/db" },
+			wantErr: []string{"database", "exactly one"},
+			wantIs:  []error{ErrDatabaseSource},
+		},
 		{
 			name: "every error is reported",
 			mutate: func(c *Config) {
 				c.Server = Server{ListenAddr: "nope", ShutdownDelay: -time.Second, ShutdownTimeout: 0}
 				c.Log = Log{Level: "loud", Format: "xml"}
+				c.Database = Database{}
 			},
-			wantErr: []string{"listen address", "shutdown delay", "shutdown timeout", "log level", "log format"},
-			wantIs:  []error{logging.ErrUnknownLevel, logging.ErrUnknownFormat},
+			wantErr: []string{"listen address", "shutdown delay", "shutdown timeout", "log level", "log format", "database"},
+			wantIs:  []error{logging.ErrUnknownLevel, logging.ErrUnknownFormat, ErrDatabaseSource},
 		},
 	}
 
@@ -193,6 +231,7 @@ func TestValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := Default()
+			cfg.Database.URL = testDatabaseURL
 			tt.mutate(&cfg)
 			err := cfg.Validate()
 			assertErrorContains(t, err, tt.wantErr)
@@ -200,6 +239,79 @@ func TestValidate(t *testing.T) {
 				if !errors.Is(err, target) {
 					t.Errorf("Validate() error %v does not wrap %v", err, target)
 				}
+			}
+		})
+	}
+}
+
+func TestDatabaseConnString(t *testing.T) {
+	t.Parallel()
+
+	errUnreadable := errors.New("permission denied")
+	files := map[string]string{
+		"/secrets/url":     testDatabaseURL,
+		"/secrets/newline": testDatabaseURL + "\n",
+		"/secrets/padded":  "  \t" + testDatabaseURL + " \r\n",
+		"/secrets/empty":   "",
+		"/secrets/blank":   " \n\t",
+	}
+	readFile := func(path string) ([]byte, error) {
+		if path == "/secrets/unreadable" {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: errUnreadable}
+		}
+		content, ok := files[path]
+		if !ok {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		}
+		return []byte(content), nil
+	}
+
+	tests := []struct {
+		name    string
+		db      Database
+		want    string
+		wantErr []string
+		wantIs  error
+	}{
+		{name: "inline URL", db: Database{URL: testDatabaseURL}, want: testDatabaseURL},
+		{name: "inline URL is not trimmed", db: Database{URL: " " + testDatabaseURL}, want: " " + testDatabaseURL},
+		{name: "file", db: Database{URLFile: "/secrets/url"}, want: testDatabaseURL},
+		{name: "trailing newline trimmed", db: Database{URLFile: "/secrets/newline"}, want: testDatabaseURL},
+		{name: "surrounding whitespace trimmed", db: Database{URLFile: "/secrets/padded"}, want: testDatabaseURL},
+		{name: "empty file", db: Database{URLFile: "/secrets/empty"}, wantErr: []string{"/secrets/empty", "empty"}},
+		{name: "blank file", db: Database{URLFile: "/secrets/blank"}, wantErr: []string{"/secrets/blank", "empty"}},
+		{name: "missing file", db: Database{URLFile: "/secrets/missing"}, wantErr: []string{"/secrets/missing"}, wantIs: fs.ErrNotExist},
+		{name: "unreadable file", db: Database{URLFile: "/secrets/unreadable"}, wantErr: []string{"/secrets/unreadable", "permission denied"}, wantIs: errUnreadable},
+		{name: "neither", db: Database{}, wantIs: ErrDatabaseSource},
+		{name: "both", db: Database{URL: testDatabaseURL, URLFile: "/secrets/url"}, wantIs: ErrDatabaseSource},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.db.ConnString(readFile)
+			if tt.wantErr == nil && tt.wantIs == nil {
+				if err != nil {
+					t.Fatalf("ConnString: %v", err)
+				}
+				if got != tt.want {
+					t.Errorf("ConnString() = %q, want %q", got, tt.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if len(tt.wantErr) > 0 {
+				assertErrorContains(t, err, tt.wantErr)
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("error %v does not wrap %v", err, tt.wantIs)
+			}
+			if strings.Contains(err.Error(), "doorstep@localhost") {
+				t.Errorf("error %q contains the connection string", err)
+			}
+			if got != "" {
+				t.Errorf("ConnString() = %q on error", got)
 			}
 		})
 	}
