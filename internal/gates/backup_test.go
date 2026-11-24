@@ -210,6 +210,7 @@ func TestBackupFactoryRejectsBadConfig(t *testing.T) {
 	}{
 		{name: "no webhook", mutate: func(g *config.Gate) { g.Webhook = nil }, want: "has no webhook"},
 		{name: "unknown when", mutate: func(g *config.Gate) { g.When = "sometimes" }, want: `unknown when "sometimes"`},
+		{name: "no secret", mutate: func(g *config.Gate) { g.Webhook = &config.GateWebhook{URLEnv: "BACKUP_URL"} }, want: "has no webhook secret"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -334,71 +335,51 @@ func TestBackupGateVerdicts(t *testing.T) {
 func TestBackupGateRequest(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		mutate   func(*config.Gate)
-		wantSign bool
-	}{
-		{name: "signed", wantSign: true},
-		{name: "unsigned", mutate: func(g *config.Gate) { g.Webhook = &config.GateWebhook{URLEnv: "BACKUP_URL"} }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f := newBackupFixture(t)
-			f.receiver.respond = answer(http.StatusAccepted, "")
-			var mutate []func(*config.Gate)
-			if tt.mutate != nil {
-				mutate = append(mutate, tt.mutate)
-			}
-			g := f.gate(t, mutate...)
-			d := migrationDeployment(core.KindDeploy)
-			first := evaluateGate(t, g, d, nil)
-			f.clock.Advance(gates.BackupPollInterval)
-			evaluateGate(t, g, d, resultOf(first))
+	f := newBackupFixture(t)
+	f.receiver.respond = answer(http.StatusAccepted, "")
+	g := f.gate(t)
+	d := migrationDeployment(core.KindDeploy)
+	first := evaluateGate(t, g, d, nil)
+	f.clock.Advance(gates.BackupPollInterval)
+	evaluateGate(t, g, d, resultOf(first))
 
-			calls := f.receiver.received()
-			if len(calls) != 2 {
-				t.Fatalf("received %d calls, want 2", len(calls))
-			}
-			for i, call := range calls {
-				h := call.header
-				if h.Get("Content-Type") != "application/json" || h.Get("User-Agent") != "doorstep/test" || h.Get(gates.HeaderBackupEvent) != "backup" {
-					t.Errorf("call %d headers = %v", i, h)
-				}
-				if got := h.Get(gates.HeaderIdempotencyKey); got != "doorstep-backup-7-backup" {
-					t.Errorf("call %d idempotency key = %q", i, got)
-				}
-				sig := h.Get(gates.HeaderBackupSignature)
-				if want := fakeSign([]byte(backupSecret), call.body); tt.wantSign && sig != want {
-					t.Errorf("call %d signature = %q, want %q", i, sig, want)
-				}
-				if !tt.wantSign && sig != "" {
-					t.Errorf("call %d signed without a secret: %q", i, sig)
-				}
-			}
-			if string(calls[0].body) != string(calls[1].body) {
-				t.Errorf("polls re-posted a different request:\n%s\n%s", calls[0].body, calls[1].body)
-			}
-			var body map[string]any
-			if err := json.Unmarshal(calls[0].body, &body); err != nil {
-				t.Fatalf("decode body: %v", err)
-			}
-			dep := body["deployment"].(map[string]any)
-			if body["event"] != gates.BackupEvent || body["gate"] != "backup" || body["requested_at"] != "2026-11-23T12:00:00Z" {
-				t.Errorf("body = %v", body)
-			}
-			if dep["id"] != float64(7) || dep["app"] != "web" || dep["environment"] != "prod" || dep["kind"] != "deploy" ||
-				dep["migration"] != true || dep["migration_reason"] != d.MigrationReason {
-				t.Errorf("deployment = %v", dep)
-			}
-			if c := dep["commit"].(map[string]any); c["sha"] != d.Commit.SHA || c["repository"] != "acme/web" {
-				t.Errorf("commit = %v", c)
-			}
-			if img := dep["image"].(map[string]any); img["tag"] != "v2" || img["digest"] != string(d.Digest) {
-				t.Errorf("image = %v", img)
-			}
-		})
+	calls := f.receiver.received()
+	if len(calls) != 2 {
+		t.Fatalf("received %d calls, want 2", len(calls))
+	}
+	for i, call := range calls {
+		h := call.header
+		if h.Get("Content-Type") != "application/json" || h.Get("User-Agent") != "doorstep/test" || h.Get(gates.HeaderBackupEvent) != "backup" {
+			t.Errorf("call %d headers = %v", i, h)
+		}
+		if got := h.Get(gates.HeaderIdempotencyKey); got != "doorstep-backup-7-backup-2026-11-23T12:00:00Z" {
+			t.Errorf("call %d idempotency key = %q", i, got)
+		}
+		sig := h.Get(gates.HeaderBackupSignature)
+		if want := fakeSign([]byte(backupSecret), call.body); sig != want {
+			t.Errorf("call %d signature = %q, want %q", i, sig, want)
+		}
+	}
+	if string(calls[0].body) != string(calls[1].body) {
+		t.Errorf("polls re-posted a different request:\n%s\n%s", calls[0].body, calls[1].body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(calls[0].body, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	dep := body["deployment"].(map[string]any)
+	if body["event"] != gates.BackupEvent || body["gate"] != "backup" || body["requested_at"] != "2026-11-23T12:00:00Z" {
+		t.Errorf("body = %v", body)
+	}
+	if dep["id"] != float64(7) || dep["app"] != "web" || dep["environment"] != "prod" || dep["kind"] != "deploy" ||
+		dep["migration"] != true || dep["migration_reason"] != d.MigrationReason {
+		t.Errorf("deployment = %v", dep)
+	}
+	if c := dep["commit"].(map[string]any); c["sha"] != d.Commit.SHA || c["repository"] != "acme/web" {
+		t.Errorf("commit = %v", c)
+	}
+	if img := dep["image"].(map[string]any); img["tag"] != "v2" || img["digest"] != string(d.Digest) {
+		t.Errorf("image = %v", img)
 	}
 }
 
@@ -455,6 +436,10 @@ func TestBackupGateStartsOverAfterTerminalResult(t *testing.T) {
 	}
 	if evidenceMap(t, second)["requests"] != float64(1) {
 		t.Errorf("evidence = %s, want a fresh count", second.Evidence)
+	}
+	calls := f.receiver.received()
+	if a, b := calls[0].header.Get(gates.HeaderIdempotencyKey), calls[1].header.Get(gates.HeaderIdempotencyKey); a == b {
+		t.Errorf("idempotency key %q reused for a fresh request", a)
 	}
 }
 
@@ -534,7 +519,9 @@ func TestBackupGateErrors(t *testing.T) {
 func TestBackupGateLiteralURL(t *testing.T) {
 	t.Parallel()
 	f := newBackupFixture(t)
-	g := f.gate(t, func(g *config.Gate) { g.Webhook = &config.GateWebhook{URL: f.server.URL + "/literal"} })
+	g := f.gate(t, func(g *config.Gate) {
+		g.Webhook = &config.GateWebhook{URL: f.server.URL + "/literal", SecretEnv: "BACKUP_SECRET"}
+	})
 	if ev := evaluateGate(t, g, migrationDeployment(core.KindDeploy), nil); ev.Status != core.GatePassed {
 		t.Errorf("status = %s (%q), want passed", ev.Status, ev.Message)
 	}

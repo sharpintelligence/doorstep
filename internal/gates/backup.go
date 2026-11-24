@@ -83,7 +83,7 @@ type backupGate struct {
 	when             config.GateWhen
 	applyToRollbacks bool
 	endpoint         config.SecretRef
-	secret           *config.SecretRef
+	secret           config.SecretRef
 }
 
 func (d BackupDeps) newBackup(app config.App, gate config.Gate) (Gate, error) {
@@ -105,9 +105,11 @@ func (d BackupDeps) newBackup(app config.App, gate config.Gate) (Gate, error) {
 	default:
 		return nil, fmt.Errorf("backup gate %s: unknown when %q", gate.Name, gate.When)
 	}
-	if secret, ok := gate.WebhookSecret(app.Name); ok {
-		g.secret = &secret
+	secret, ok := gate.WebhookSecret(app.Name)
+	if !ok {
+		return nil, fmt.Errorf("backup gate %s has no webhook secret", gate.Name)
 	}
+	g.secret = secret
 	return g, nil
 }
 
@@ -174,7 +176,7 @@ func (g backupGate) Evaluate(ctx context.Context, req Request) (Evaluation, erro
 			return Evaluation{Status: core.GatePending, Message: req.Previous.Message, Evidence: req.Previous.Evidence}, nil
 		}
 	}
-	if ev.RequestedAt == "" {
+	if _, ok := parseTimestamp(ev.RequestedAt); !ok {
 		ev.RequestedAt = timestamp(now)
 	}
 
@@ -208,14 +210,12 @@ func (g backupGate) Evaluate(ctx context.Context, req Request) (Evaluation, erro
 	header.Set("Content-Type", "application/json")
 	header.Set("User-Agent", g.deps.UserAgent)
 	header.Set(HeaderBackupEvent, backupEventName)
-	header.Set(HeaderIdempotencyKey, g.idempotencyKey(d.ID))
-	if g.secret != nil {
-		secret, err := g.deps.ReadSecret(*g.secret)
-		if err != nil {
-			return Evaluation{}, fmt.Errorf("read backup webhook secret: %w", err)
-		}
-		header.Set(HeaderBackupSignature, g.deps.Sign([]byte(secret), body))
+	header.Set(HeaderIdempotencyKey, g.idempotencyKey(d.ID, ev.RequestedAt))
+	secret, err := g.deps.ReadSecret(g.secret)
+	if err != nil {
+		return Evaluation{}, fmt.Errorf("read backup webhook secret: %w", err)
 	}
+	header.Set(HeaderBackupSignature, g.deps.Sign([]byte(secret), body))
 
 	status, answer, postErr := g.post(ctx, target.String(), header, body)
 	if err := ctx.Err(); err != nil {
@@ -239,8 +239,8 @@ func (g backupGate) Evaluate(ctx context.Context, req Request) (Evaluation, erro
 	return Evaluation{Status: verdict, Message: clean(message), Evidence: evidence}, nil
 }
 
-func (g backupGate) idempotencyKey(id core.DeploymentID) string {
-	return "doorstep-backup-" + strconv.FormatInt(int64(id), 10) + "-" + g.name
+func (g backupGate) idempotencyKey(id core.DeploymentID, requestedAt string) string {
+	return "doorstep-backup-" + strconv.FormatInt(int64(id), 10) + "-" + g.name + "-" + requestedAt
 }
 
 func (g backupGate) post(ctx context.Context, target string, header http.Header, body []byte) (int, backupResponse, error) {

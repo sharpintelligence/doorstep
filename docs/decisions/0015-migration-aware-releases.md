@@ -11,19 +11,21 @@ Constraints: doorstep never writes to the cluster, git is the source of truth fo
 
 ## Decision
 
-- **The flag describes the whole release.** When a commit's checks turn green, intake inspects every commit between the app's previously enqueued deploy commit (its newest `deploy` row) and the new head: one GitHub compare call (at most 50 commits) and, when labels are configured, one `commits/{sha}/pulls` call per commit. Without a usable base (no earlier deploy, compare `behind`, `identical` or `404`) only the head is inspected. A range of more than 50 commits is flagged conservatively.
+- **The flag describes the whole release.** When a commit's checks turn green, intake inspects every commit between the app's previously enqueued deploy commit (its newest `deploy` row) and the new head: one GitHub compare call (at most 50 commits) and, when labels are configured, one `commits/{sha}/pulls` call per commit. Without a usable base (no earlier deploy, compare `behind`, `identical` or `404`) only the head is inspected. A range of more than 50 commits is flagged conservatively. Because that base may be a deployment that never reaches the cluster (batched away by a later deploy, or failed before its pin), intake also carries forward the flag of every flagged `deploy` row newer than the last one that reached the cluster and not released itself (`Store.UnreleasedMigrations`).
 - **Recognition is opt-in per app** (`apps[].migrations`): pull request labels, counted only on merged pull requests into the app's branch, and a `Doorstep-Migration: true|yes` commit trailer, on by default when the block exists. Without the block nothing is detected and no extra API calls are made.
 - **Detection fails closed.** It runs in `intake.Service.settle`, outside the Postgres transaction, only for a `success` evaluation. On any GitHub error the commit is neither settled nor enqueued and the next check event or poll retries.
-- **The flag lives on the deployment** (`deployments.migration`, `migration_reason`), not on tracked commits. Superseded deployments keep their rows, so batching loses nothing.
+- **The flag lives on the deployment** (`deployments.migration`, `migration_reason`), not on tracked commits. Superseded deployments keep their rows and the release that superseded them carries their flag, so batching loses nothing.
 - **Crossing is pure SQL.** A rollback from `current` to `to` crosses the target's flagged `deploy` rows created after `to`'s commit was first enqueued, not of `to`'s commit, and no newer than `current` (`Store.MigrationsBetween`). Rolling back to a flagged release, or forward, crosses nothing.
 - **Confirmation.** A crossing rollback without `confirm_migration_rollback` (CLI `--confirm-migration-rollback`) answers `409 migration_confirmation_required` and writes nothing. The `deployer` role suffices. A confirmed rollback is itself flagged and audits the crossed deployments.
 - **Automatic rollbacks across a flagged release are withheld**: the engine fails the deploy with a reason telling the operator how to roll back by hand, and notifies.
-- **The backup is a webhook gate.** A `before` gate of type `backup` POSTs a signed JSON request to an operator-configured endpoint and polls by re-POSTing it with a stable `Idempotency-Key` until the receiver reports success. It runs for flagged releases by default, for rollbacks only on request, and is *deferred*: the evaluator neither calls nor records it until every earlier gate of the phase has passed or been skipped in that pass. It fails closed on its timeout (default 30 minutes).
+- **The backup is a webhook gate.** A `before` gate of type `backup` POSTs a signed JSON request to an operator-configured endpoint and polls by re-POSTing it with an `Idempotency-Key` that is stable for one request (it includes `requested_at`, so an explicit re-run gets a fresh key) until the receiver reports success. A signing secret is required. It runs for flagged releases by default, for rollbacks only on request, and is *deferred*: the evaluator neither calls nor records it until every non-deferred gate of the phase, wherever it is listed, has passed or been skipped in that pass. It fails closed on its timeout (default 30 minutes).
 
 ## Options considered
 
 - **Head commit only.** One call fewer, but busy merge periods are exactly when a migration commit is superseded without its own deployment, so the guard would be wrong when it matters most. Rejected.
 - **Flag on tracked commits as well.** A second source of truth and a change to the settle signature, for no reader that needs it. Rejected.
+- **Base detection on the last release that reached the cluster.** Also closes the batching gap, but a range from an older base re-reads more commits on every green push, and an app that never had a successful release would still need a fallback. Carrying the stored flags is one indexed query. Rejected.
+- **OR the superseded rows' flags into the winner when batching.** Fixes batching but not a flagged deploy that fails before its pin, and puts migration policy into the queue. Rejected.
 - **Fail open on GitHub errors.** Keeps deploys moving during a GitHub outage, but an operator who opted in relies on the guard; a stalled deploy with a loud log line is noticed, a silently unflagged one is not. Rejected.
 - **A generic `confirm` field.** It would become a blanket override for every future prompt. A field named for the risk mirrors the CLI flag and cannot be reused by accident.
 - **doorstep runs the backup as a Kubernetes Job.** It would make doorstep write to the cluster, against its core principle. An outbound request to an operator-owned endpoint is not a cluster write; whatever runs the backup (a Job launcher, a NAS script, a managed database API) belongs to the operator.
@@ -33,7 +35,8 @@ Constraints: doorstep never writes to the cluster, git is the source of truth fo
 ## Consequences
 
 - Rollbacks across migrations need one extra, explicit step; automatic recovery is not available for flagged releases.
-- Apps that opt in need *Pull requests: read* on their application repositories for labels, and their deploys stop while GitHub cannot be read.
+- Apps that opt in need *Pull requests: read* on their application repositories for labels, and their deploys stop while GitHub cannot be read; `doorstep_migration_detection_failures_total` makes that alertable.
+- A release that follows a flagged one still in the queue is flagged too, even if the flagged one deploys on its own, so it may take one redundant backup.
 - Over-flagging (a long range, a lenient trailer match) costs only a confirmation or a backup.
 - Deploys requested by other paths are unflagged until those paths add detection.
 - Backup receivers must be idempotent on the key, or answer within 20 seconds.

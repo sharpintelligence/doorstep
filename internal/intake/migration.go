@@ -19,7 +19,7 @@ const (
 	shortSHALength     = 7
 )
 
-var trailerPattern = regexp.MustCompile(`(?im)^[\s*>-]*doorstep-migration[ \t]*:[ \t]*(true|yes)[ \t.\r]*$`)
+var trailerPattern = regexp.MustCompile(`(?im)^[ \t*>-]*doorstep-migration[ \t]*:[ \t]*(true|yes)[ \t.\r]*$`)
 
 type MigrationPolicy struct {
 	Labels  []string
@@ -61,6 +61,28 @@ func (p MigrationPolicy) label(labels []string) (string, bool) {
 type MigrationFlag struct {
 	Flagged bool
 	Reason  string
+}
+
+func (f MigrationFlag) carrying(unreleased []core.DeploymentID) MigrationFlag {
+	if len(unreleased) == 0 {
+		return f
+	}
+	ids := make([]string, 0, min(len(unreleased), maxReasonsListed))
+	for _, id := range unreleased[:min(len(unreleased), maxReasonsListed)] {
+		ids = append(ids, strconv.FormatInt(int64(id), 10))
+	}
+	noun := "deployment "
+	if len(unreleased) > 1 {
+		noun = "deployments "
+	}
+	reason := "unreleased migration in " + noun + strings.Join(ids, ", ")
+	if extra := len(unreleased) - maxReasonsListed; extra > 0 {
+		reason += " +" + strconv.Itoa(extra) + " more"
+	}
+	if f.Reason != "" {
+		reason += "; " + f.Reason
+	}
+	return MigrationFlag{Flagged: true, Reason: core.CleanMigrationReason(reason)}
 }
 
 func HasMigrationTrailer(message string) bool {
@@ -142,6 +164,18 @@ func newMigrationReader(source MigrationSource) *migrationReader {
 }
 
 func (s *Service) migration(ctx context.Context, reader *migrationReader, app App, commit core.Commit) (MigrationFlag, error) {
+	unreleased, err := s.baselines.UnreleasedMigrations(ctx, app.Target)
+	if err != nil {
+		return MigrationFlag{}, fmt.Errorf("read the unreleased migrations of %s: %w", app.Target, err)
+	}
+	flag, err := s.detect(ctx, reader, app, commit)
+	if err != nil {
+		return MigrationFlag{}, err
+	}
+	return flag.carrying(unreleased), nil
+}
+
+func (s *Service) detect(ctx context.Context, reader *migrationReader, app App, commit core.Commit) (MigrationFlag, error) {
 	baseline, found, err := s.baselines.LastDeployCommit(ctx, app.Target)
 	if err != nil {
 		return MigrationFlag{}, fmt.Errorf("read the last enqueued deploy of %s: %w", app.Target, err)

@@ -54,6 +54,9 @@ func TestRecorderPrimeAppCounters(t *testing.T) {
 	if counts["doorstep_deployments_started_total"] != 1 {
 		t.Errorf("deployments_started series = %d, want 1", counts["doorstep_deployments_started_total"])
 	}
+	if counts["doorstep_migration_detection_failures_total"] != 1 {
+		t.Errorf("migration_detection_failures series = %d, want 1", counts["doorstep_migration_detection_failures_total"])
+	}
 	if counts["doorstep_rollbacks_total"] != 3 {
 		t.Errorf("rollbacks series = %d, want 3", counts["doorstep_rollbacks_total"])
 	}

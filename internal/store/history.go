@@ -303,6 +303,25 @@ WHERE a.name = $1
 ORDER BY d.id DESC
 LIMIT 1`
 
+const MaxUnreleasedMigrations = 20
+
+const unreleasedMigrationsSQL = `
+SELECT d.id` + deploymentTables + `
+WHERE a.name = $1
+  AND a.environment = $2
+  AND d.kind = 'deploy'
+  AND d.migration
+  AND d.state <> 'succeeded'
+  AND d.pin_commit_sha IS NULL
+  AND d.id > COALESCE((
+      SELECT max(r.id) FROM deployments r
+      WHERE r.app_id = d.app_id
+        AND r.kind = 'deploy'
+        AND (r.state = 'succeeded' OR r.pin_commit_sha IS NOT NULL)
+  ), 0)
+ORDER BY d.id
+LIMIT $3`
+
 func (s *Store) MigrationsBetween(ctx context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error) {
 	if err := t.Validate(); err != nil {
 		return nil, fmt.Errorf("migrations between deployments: %w", err)
@@ -330,4 +349,15 @@ func (s *Store) LastDeployCommit(ctx context.Context, t core.Target) (core.Commi
 		return core.Commit{}, false, fmt.Errorf("last deploy commit of %s: %w", t, err)
 	}
 	return c, true, nil
+}
+
+func (s *Store) UnreleasedMigrations(ctx context.Context, t core.Target) ([]core.DeploymentID, error) {
+	if err := t.Validate(); err != nil {
+		return nil, fmt.Errorf("unreleased migrations: %w", err)
+	}
+	ids, err := s.deploymentIDs(ctx, unreleasedMigrationsSQL, t.App, t.Environment, MaxUnreleasedMigrations)
+	if err != nil {
+		return nil, fmt.Errorf("unreleased migrations of %s: %w", t, err)
+	}
+	return ids, nil
 }

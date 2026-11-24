@@ -429,9 +429,7 @@ func validateWebhookGate(r reporter, gateField string, g Gate) {
 	if w.URL != "" {
 		r.check(prefix+"url", validateURL(w.URL, "url_env or url_file"))
 	}
-	if w.SecretEnv != "" && w.SecretFile != "" {
-		r.addf(prefix+"secret_env, "+prefix+"secret_file", "set at most one")
-	}
+	exactlyOne(r, []field{{prefix + "secret_env", w.SecretEnv}, {prefix + "secret_file", w.SecretFile}})
 	for _, f := range []field{{prefix + "url_env", w.URLEnv}, {prefix + "secret_env", w.SecretEnv}} {
 		if f.value != "" {
 			r.check(f.name, validateEnvName(f.value))

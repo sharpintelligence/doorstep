@@ -16,6 +16,7 @@ type historyStep struct {
 	app       string
 	rollback  bool
 	migration bool
+	pinned    bool
 	state     core.State
 }
 
@@ -42,6 +43,9 @@ func recordHistory(t *testing.T, st *store.Store, steps []historyStep) map[strin
 		if s.migration {
 			d.Migration = true
 			d.MigrationReason = "flagged " + s.name
+		}
+		if s.pinned {
+			d.PinCommitSHA = randomSHA(t)
 		}
 		state := s.state
 		if state == "" {
@@ -280,6 +284,92 @@ func TestLastDeployCommit(t *testing.T) {
 	}
 	if _, _, err := st.LastDeployCommit(t.Context(), core.Target{}); err == nil {
 		t.Error("LastDeployCommit accepted an invalid target")
+	}
+}
+
+func TestUnreleasedMigrations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		steps []historyStep
+		want  []string
+	}{
+		{name: "empty history"},
+		{
+			name:  "flagged release superseded by an unflagged one",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "v2m", sha: "b", migration: true, state: core.StateSuperseded}, {name: "v3", sha: "c", state: core.StateQueued}},
+			want:  []string{"v2m"},
+		},
+		{
+			name:  "flagged release still queued",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "v2m", sha: "b", migration: true, state: core.StateQueued}},
+			want:  []string{"v2m"},
+		},
+		{
+			name:  "flagged release failed before its pin",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "v2m", sha: "b", migration: true, state: core.StateFailed}},
+			want:  []string{"v2m"},
+		},
+		{
+			name:  "no release reached the cluster yet",
+			steps: []historyStep{{name: "v1m", sha: "a", migration: true, state: core.StateCancelled}, {name: "v2m", sha: "b", migration: true, state: core.StateSuperseded}},
+			want:  []string{"v1m", "v2m"},
+		},
+		{
+			name:  "flagged release failed after its pin",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "v2m", sha: "b", migration: true, pinned: true, state: core.StateFailed}},
+		},
+		{
+			name:  "flagged release succeeded",
+			steps: []historyStep{{name: "v1m", sha: "a", migration: true, state: core.StateSucceeded}},
+		},
+		{
+			name: "a later release reached the cluster",
+			steps: []historyStep{
+				{name: "v1", sha: "a", state: core.StateSucceeded},
+				{name: "v2m", sha: "b", migration: true, state: core.StateSuperseded},
+				{name: "v3", sha: "c", state: core.StateSucceeded},
+			},
+		},
+		{
+			name: "a later in-flight release is pinned",
+			steps: []historyStep{
+				{name: "v2m", sha: "b", migration: true, state: core.StateSuperseded},
+				{name: "v3", sha: "c", pinned: true, state: core.StateSyncing},
+			},
+		},
+		{
+			name:  "unflagged and rollback rows are ignored",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "v2", sha: "b", state: core.StateSuperseded}, {name: "rb", sha: "a", rollback: true}},
+		},
+		{
+			name:  "other apps are ignored",
+			steps: []historyStep{{name: "v1", sha: "a", state: core.StateSucceeded}, {name: "api", sha: "x", app: "api", migration: true, state: core.StateSuperseded}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := storetest.Open(t)
+			rows := recordHistory(t, st, tt.steps)
+			got, err := st.UnreleasedMigrations(t.Context(), webTarget())
+			if err != nil {
+				t.Fatalf("UnreleasedMigrations: %v", err)
+			}
+			var want []core.DeploymentID
+			for _, name := range tt.want {
+				want = append(want, rows[name].ID)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("UnreleasedMigrations = %v, want %v", got, want)
+			}
+		})
+	}
+
+	st := storetest.Open(t)
+	if _, err := st.UnreleasedMigrations(t.Context(), core.Target{}); err == nil {
+		t.Error("UnreleasedMigrations accepted an invalid target")
 	}
 }
 

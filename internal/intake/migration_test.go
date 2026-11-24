@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,9 +81,20 @@ func (f *fakeMigrations) counts() (ranges, commits, pulls int) {
 }
 
 type fakeBaselines struct {
-	mu      sync.Mutex
-	commits map[core.Target]core.Commit
-	err     error
+	mu            sync.Mutex
+	commits       map[core.Target]core.Commit
+	err           error
+	unreleased    map[core.Target][]core.DeploymentID
+	unreleasedErr error
+}
+
+func (f *fakeBaselines) UnreleasedMigrations(_ context.Context, t core.Target) ([]core.DeploymentID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unreleasedErr != nil {
+		return nil, f.unreleasedErr
+	}
+	return f.unreleased[t], nil
 }
 
 func (f *fakeBaselines) LastDeployCommit(_ context.Context, t core.Target) (core.Commit, bool, error) {
@@ -99,6 +111,7 @@ type migrationHarness struct {
 	*harness
 	source    *fakeMigrations
 	baselines *fakeBaselines
+	observer  *fakeObserver
 }
 
 func newMigrationHarness(t *testing.T, apps ...intake.App) *migrationHarness {
@@ -106,11 +119,12 @@ func newMigrationHarness(t *testing.T, apps ...intake.App) *migrationHarness {
 	h := &migrationHarness{
 		harness:   &harness{commits: newFakeCommits(), checks: newFakeChecks(), branches: newFakeBranches()},
 		source:    newFakeMigrations(),
-		baselines: &fakeBaselines{commits: map[core.Target]core.Commit{}},
+		baselines: &fakeBaselines{commits: map[core.Target]core.Commit{}, unreleased: map[core.Target][]core.DeploymentID{}},
+		observer:  &fakeObserver{},
 	}
 	svc, err := intake.New(intake.Options{
 		Apps: apps, Commits: h.commits, Checks: h.checks, Branches: h.branches,
-		Migrations: h.source, Baselines: h.baselines, Now: newTickingClock().Now,
+		Migrations: h.source, Baselines: h.baselines, Observer: h.observer, Now: newTickingClock().Now,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -241,6 +255,26 @@ func TestMigrationFlagReachesEnqueuedDeployment(t *testing.T) {
 			wantRanges: 1, wantCommits: 1, wantPulls: 1,
 		},
 		{
+			name:   "unreleased flagged deployment is carried into an unflagged range",
+			policy: labelsAndTrailer(),
+			setup: func(h *migrationHarness) {
+				h.baselines.commits[prod] = core.Commit{Repository: "Example-User/blog", SHA: shaBase}
+				h.baselines.unreleased[prod] = []core.DeploymentID{12}
+				h.source.ranges[shaBase+"..."+shaA] = github.CommitRange{Status: github.ComparisonAhead, Total: 1, Commits: []github.CommitInfo{{SHA: shaA}}}
+			},
+			wantFlag: true, wantReason: "unreleased migration in deployment 12", wantRanges: 1, wantPulls: 1,
+		},
+		{
+			name:   "unreleased deployments are listed before detected reasons",
+			policy: labelsAndTrailer(),
+			setup: func(h *migrationHarness) {
+				h.baselines.commits[prod] = core.Commit{Repository: "Example-User/blog", SHA: shaBase}
+				h.baselines.unreleased[prod] = []core.DeploymentID{3, 5, 8, 13, 21}
+				h.source.ranges[shaBase+"..."+shaA] = github.CommitRange{Status: github.ComparisonAhead, Total: 1, Commits: []github.CommitInfo{{SHA: shaA, Message: "Doorstep-Migration: true"}}}
+			},
+			wantFlag: true, wantReason: "unreleased migration in deployments 3, 5, 8 +2 more; trailer Doorstep-Migration in aaaaaaa", wantRanges: 1, wantPulls: 1,
+		},
+		{
 			name:   "baseline unknown to GitHub",
 			policy: labelsAndTrailer(),
 			setup: func(h *migrationHarness) {
@@ -286,6 +320,7 @@ func TestMigrationDetectionFailsClosed(t *testing.T) {
 		fail   func(h *migrationHarness, err error)
 	}{
 		{name: "baseline read", policy: labelsAndTrailer(), fail: func(h *migrationHarness, err error) { h.baselines.err = err }},
+		{name: "unreleased migrations read", policy: labelsAndTrailer(), fail: func(h *migrationHarness, err error) { h.baselines.unreleasedErr = err }},
 		{name: "range read", policy: labelsAndTrailer(), fail: func(h *migrationHarness, err error) {
 			h.baselines.commits[core.Target{App: "blog-prod", Environment: "prod"}] = core.Commit{Repository: "Example-User/blog", SHA: shaBase}
 			h.source.rangeErr = err
@@ -314,6 +349,9 @@ func TestMigrationDetectionFailsClosed(t *testing.T) {
 			}
 			if n := len(h.commits.queue.all()); n != 0 {
 				t.Errorf("enqueued %d deployments while migration status was unknown", n)
+			}
+			if got := h.observer.failedDetections(); !slices.Equal(got, []string{"blog-prod"}) {
+				t.Errorf("failed detections observed = %v, want [blog-prod]", got)
 			}
 
 			tt.fail(h, nil)

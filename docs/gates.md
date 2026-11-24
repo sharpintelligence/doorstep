@@ -62,7 +62,7 @@ Each gate receives the deployment, the phase and its previously recorded result 
 
 ### Deferred gates
 
-A gate type registered with `Definition.Deferred` (today only `backup`) waits its turn: in a pass it is neither called nor recorded until every gate configured before it in the same phase is `passed` or `skipped` in that pass. Until then the phase is already `pending` or `failed` because of those earlier gates, so the verdict is unchanged. Without deferral the evaluator would call the gate on every pass while CI is still running or a deploy window holds the deploy for days, taking a stale backup and burning its timeout. Because nothing is recorded while it waits, its timeout clock starts only when it is first called. Put a deferred gate last in `gates.before`. A result it already recorded is kept and reported while an earlier gate is re-run.
+A gate type registered with `Definition.Deferred` (today only `backup`) waits its turn: in a pass the evaluator first settles every gate of the phase that is not deferred, whatever the configured order, and only then the deferred ones, in their configured order. A deferred gate is neither called nor recorded until every non-deferred gate of the phase, and every deferred gate listed before it, is `passed` or `skipped` in that pass. Until then the phase is already `pending` or `failed` because of those gates, so the verdict is unchanged. Results are still reported in configuration order. Without deferral the evaluator would call the gate on every pass while CI is still running or a deploy window holds the deploy for days, taking a stale backup and burning its timeout. Because nothing is recorded while it waits, its timeout clock starts only when it is first called. Where it is listed does not matter. A result it already recorded is kept and reported while an earlier gate is re-run.
 
 ### Timeouts
 
@@ -353,14 +353,16 @@ gates:
       timeout: 45m             # default 30m
       webhook:
         url_env: BLOG_BACKUP_URL   # or url, or url_file
-        secret_env: BLOG_BACKUP_SECRET  # optional, or secret_file
+        secret_env: BLOG_BACKUP_SECRET  # required, or secret_file
 ```
+
+> **Not active yet.** `serve` builds no gate plans and evaluates no gates until the engine (bead doorstep-ehl.4.4) lands, so a configured `backup` gate is validated at startup but no backup is requested yet. Do not rely on it until then.
 
 When it runs:
 
 - For a rollback without `apply_to_rollbacks: true` it is `skipped` with `skipped for rollback`. With it, `when` applies to the rollback row's own flag, which a [confirmed rollback across migrations](rollback.md#confirmation) sets.
 - With `when: migration` (the default) a deployment that is not [flagged as containing database migrations](rollback.md#migration-aware-releases) is `skipped` with `release is not flagged as a database migration`. With `when: always` it runs for every deploy.
-- It is [deferred](#deferred-gates): it is first called once every earlier `before` gate has passed or been skipped, so the backup is taken right before the pin, not while CI is still running.
+- It is [deferred](#deferred-gates): it is first called once every other `before` gate has passed or been skipped, wherever it is listed, so the backup is taken right before the pin, not while CI is still running.
 
 Protocol: the gate `POST`s the same JSON document on its first call and on every poll, at most every 15 seconds, each with a 20 second request timeout:
 
@@ -383,8 +385,8 @@ Protocol: the gate `POST`s the same JSON document on its first call and on every
 | `Content-Type` | `application/json` |
 | `User-Agent` | `doorstep/<version>` |
 | `X-Doorstep-Event` | `backup` |
-| `Idempotency-Key` | `doorstep-backup-<deployment id>-<gate name>`, the same on every poll of one deployment |
-| `X-Doorstep-Signature-256` | `sha256=<hex HMAC-SHA256 of the body>` when a secret is configured, exactly as for [notification webhooks](notifications.md) |
+| `Idempotency-Key` | `doorstep-backup-<deployment id>-<gate name>-<requested_at>`, the same on every poll of one backup request; a re-run after a verdict (`Reevaluate`) starts a new request with a new `requested_at` and so a new key |
+| `X-Doorstep-Signature-256` | `sha256=<hex HMAC-SHA256 of the body>`, exactly as for [notification webhooks](notifications.md); the secret is required, because the endpoint starts a database backup |
 
 The receiver may answer with an optional JSON body `{"status": "running" | "succeeded" | "failed", "message": "...", "reference": "..."}` (at most 4 KiB is read). The verdict:
 
@@ -398,7 +400,7 @@ The receiver may answer with an optional JSON body `{"status": "running" | "succ
 | `408`, `425`, `429`, `5xx`, a network error or no answer within 20 seconds | `pending`, retried |
 | any other `4xx` | `failed` |
 
-A gate still `pending` when its timeout (default `30m`) is reached fails: no backup, no deploy. A receiver must either answer within 20 seconds with the final result (`200` when done) or treat the `Idempotency-Key` as the identity of one backup: start it on the first request, answer `202` (or `running`) while it runs and the final status afterwards, without starting a second backup. It should verify the signature over the raw body before acting. Evidence: `{"requested_at", "last_request_at", "requests", "status_code", "state", "reference"}`; the URL is never stored or logged. `message` and `reference` appear in the gate message, so they must not carry secrets.
+A gate still `pending` when its timeout (default `30m`) is reached fails: no backup, no deploy. A receiver must either answer within 20 seconds with the final result (`200` when done) or treat the `Idempotency-Key` as the identity of one backup: start it on the first request, answer `202` (or `running`) while it runs and the final status afterwards, without starting a second backup. It must verify the signature over the raw body before acting. Because a re-run uses a new key, a receiver that caches a `failed` answer per key still lets an operator retry the gate. Evidence: `{"requested_at", "last_request_at", "requests", "status_code", "state", "reference"}`; the URL is never stored or logged. `message` and `reference` appear in the gate message, so they must not carry secrets.
 
 ## Limits
 

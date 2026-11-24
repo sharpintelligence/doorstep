@@ -479,7 +479,7 @@ apps:
 | `migrations.labels` | none | Pull request labels that mark a migration, compared case-insensitively. At most 10, each at most 50 characters, unique, without control characters or surrounding whitespace. A label counts only on a merged pull request whose base is `source.branch`. |
 | `migrations.trailer` | `true` | Also flag a commit whose message has a `Doorstep-Migration: true` (or `yes`) line. |
 
-The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches; the flag makes a rollback across it require `--confirm-migration-rollback`, withholds automatic rollbacks across it, and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can. See [rollback.md](rollback.md#migration-aware-releases).
+The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches, or when an earlier flagged deploy has not reached the cluster (it is still queued, was batched away, or failed before its pin); the flag makes a rollback across it require `--confirm-migration-rollback`, withholds automatic rollbacks across it, and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can, and `doorstep_migration_detection_failures_total` counts each refusal. See [rollback.md](rollback.md#migration-aware-releases).
 
 #### Pin strategies
 
@@ -573,9 +573,9 @@ apps:
 | `apply_to_rollbacks` | `false` | Also run for rollbacks; `when` then applies to the rollback's own flag, which a confirmed rollback across migrations sets. |
 | `timeout` | `30m` | How long the backup may take, measured from the first request. A backup still running then fails the deploy. |
 | `webhook.url`, `webhook.url_env`, `webhook.url_file` | exactly one required | Endpoint that takes the backup. A literal `url` must be an absolute `http` or `https` URL without user info, query or fragment; use `url_env` or `url_file` for a URL that carries a token. |
-| `webhook.secret_env`, `webhook.secret_file` | none | At most one. Signs each request with `X-Doorstep-Signature-256`, like notification webhooks. |
+| `webhook.secret_env`, `webhook.secret_file` | exactly one required | Signs each request with `X-Doorstep-Signature-256`, like notification webhooks. Required because the endpoint starts a database backup, so it must not accept unsigned requests. |
 
-The gate runs after every earlier `before` gate has passed, so list it last. The request, the answers it understands and what a receiver must do are described in [gates.md](gates.md#backup).
+The gate runs only after every other `before` gate has passed or been skipped, wherever it is listed. It is validated at startup but not evaluated until the deploy engine lands ([gates.md](gates.md#backup)). The request, the answers it understands and what a receiver must do are described in [gates.md](gates.md#backup).
 
 #### Deploy windows
 

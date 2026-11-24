@@ -26,7 +26,6 @@ func TestRegisterBackupGate(t *testing.T) {
 		webhook    func(server string, secretFile string) *config.GateWebhook
 		env        func(server string) map[string]string
 		wantStatus core.GateStatus
-		wantSigned bool
 	}{
 		{
 			name: "url from env, secret from env",
@@ -38,7 +37,6 @@ func TestRegisterBackupGate(t *testing.T) {
 				return map[string]string{"BACKUP_URL": server + "/backup", "BACKUP_SECRET": "s3cret"}
 			},
 			wantStatus: core.GatePassed,
-			wantSigned: true,
 		},
 		{
 			name: "literal url, secret from file",
@@ -47,12 +45,13 @@ func TestRegisterBackupGate(t *testing.T) {
 				return &config.GateWebhook{URL: server + "/backup", SecretFile: file}
 			},
 			wantStatus: core.GatePassed,
-			wantSigned: true,
 		},
 		{
-			name:       "redirect is not followed",
-			path:       "/moved",
-			webhook:    func(server, _ string) *config.GateWebhook { return &config.GateWebhook{URL: server + "/moved"} },
+			name: "redirect is not followed",
+			path: "/moved",
+			webhook: func(server, file string) *config.GateWebhook {
+				return &config.GateWebhook{URL: server + "/moved", SecretFile: file}
+			},
 			wantStatus: core.GateFailed,
 		},
 	}
@@ -112,11 +111,8 @@ func TestRegisterBackupGate(t *testing.T) {
 				t.Fatalf("requests = %d, want exactly one to %s", len(requests), tt.path)
 			}
 			sig := requests[0].Header.Get(gates.HeaderBackupSignature)
-			if tt.wantSigned && sig != notify.Sign([]byte("s3cret"), bodies[0]) {
+			if sig != notify.Sign([]byte("s3cret"), bodies[0]) {
 				t.Errorf("signature = %q, want notify.Sign over the body", sig)
-			}
-			if !tt.wantSigned && sig != "" {
-				t.Errorf("unexpected signature %q", sig)
 			}
 			if ua := requests[0].Header.Get("User-Agent"); !strings.HasPrefix(ua, "doorstep") {
 				t.Errorf("User-Agent = %q", ua)

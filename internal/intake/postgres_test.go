@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/github"
 	"github.com/sharpintelligence/doorstep/internal/intake"
+	"github.com/sharpintelligence/doorstep/internal/queue"
 	"github.com/sharpintelligence/doorstep/internal/store"
 	"github.com/sharpintelligence/doorstep/internal/store/storetest"
 )
@@ -27,6 +29,19 @@ func (q storeQueue) Enqueue(ctx context.Context, d core.Deployment) (core.Deploy
 
 func queueOver(tx *store.Store) intake.Queue {
 	return storeQueue{tx: tx}
+}
+
+type realQueue struct {
+	queue *queue.Queue
+}
+
+func (q realQueue) Enqueue(ctx context.Context, d core.Deployment) (core.Deployment, error) {
+	result, err := q.queue.Enqueue(ctx, d, queue.EnqueueOptions{})
+	return result.Deployment, err
+}
+
+func realQueueOver(tx *store.Store) intake.Queue {
+	return realQueue{queue: queue.New(queue.Options{Store: tx})}
 }
 
 func openStore(t *testing.T) (*store.Store, *pgxpool.Pool) {
@@ -328,6 +343,51 @@ func TestPostgresWebhookAndPollerEndToEnd(t *testing.T) {
 	}
 	if got := send(pushed); got != "processed" {
 		t.Errorf("push after retention = %s, want processed", got)
+	}
+}
+
+func TestPostgresBatchedReleaseKeepsSupersededMigrationFlag(t *testing.T) {
+	t.Parallel()
+
+	st, _ := openStore(t)
+	checks := newFakeChecks()
+	branches := newFakeBranches()
+	source := newFakeMigrations()
+	source.commits[shaMid] = github.CommitInfo{SHA: shaMid, Message: "add column\n\nDoorstep-Migration: true"}
+	source.ranges[shaMid+"..."+shaA] = github.CommitRange{Status: github.ComparisonAhead, Total: 1, Commits: []github.CommitInfo{{SHA: shaA, Message: "fix typo"}}}
+	app := migratingApp("prod", intake.MigrationPolicy{Trailer: true})
+	svc, err := intake.New(intake.Options{
+		Apps:       []intake.App{app},
+		Commits:    intake.NewPostgresCommits(st, realQueueOver),
+		Checks:     checks,
+		Branches:   branches,
+		Migrations: source,
+		Baselines:  st,
+		Now:        newTickingClock().Now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, sha := range []string{shaMid, shaA} {
+		branches.set("example-user/blog", "main", sha)
+		checks.set("example-user/blog", sha, green("test"))
+		results, err := svc.HandlePush(t.Context(), push(sha))
+		if err != nil || len(results) != 1 || !results[0].Enqueued {
+			t.Fatalf("HandlePush(%s) = %+v, %v, want enqueued", sha[:4], results, err)
+		}
+	}
+
+	q := queue.New(queue.Options{Store: st, Lease: time.Minute, MaxBatch: func(string) int { return 5 }})
+	claimed, ok, err := q.Claim(t.Context(), "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v", ok, err)
+	}
+	if claimed.Deployment.Commit.SHA != shaA || len(claimed.Superseded) != 1 {
+		t.Fatalf("claimed %s superseding %v, want the newest commit superseding the flagged one", claimed.Deployment.Commit.SHA[:4], claimed.Superseded)
+	}
+	want := "unreleased migration in deployment " + strconv.FormatInt(int64(claimed.Superseded[0]), 10)
+	if !claimed.Deployment.Migration || claimed.Deployment.MigrationReason != want {
+		t.Errorf("winner migration = %v %q, want true %q", claimed.Deployment.Migration, claimed.Deployment.MigrationReason, want)
 	}
 }
 

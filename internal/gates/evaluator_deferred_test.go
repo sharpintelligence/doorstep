@@ -15,12 +15,13 @@ func deferredBinding(g gates.Gate) gates.Binding {
 	return b
 }
 
-func TestEvaluateDefersGateUntilEarlierGatesClear(t *testing.T) {
+func TestEvaluateDefersGateUntilOtherGatesClear(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		earlier      [][]core.GateStatus
+		listedFirst  bool
 		passes       int
 		wantCalls    int
 		wantRecorded bool
@@ -32,6 +33,9 @@ func TestEvaluateDefersGateUntilEarlierGatesClear(t *testing.T) {
 		{name: "earlier gates passed and skipped", earlier: [][]core.GateStatus{{core.GatePassed}, {core.GateSkipped}}, passes: 1, wantCalls: 1, wantRecorded: true, wantStatus: core.GatePending},
 		{name: "one of two earlier gates pending", earlier: [][]core.GateStatus{{core.GatePassed}, {core.GatePending}}, passes: 2, wantStatus: core.GatePending},
 		{name: "no earlier gates", passes: 1, wantCalls: 1, wantRecorded: true, wantStatus: core.GatePending},
+		{name: "listed first waits for a pending gate", earlier: [][]core.GateStatus{{core.GatePending}}, listedFirst: true, passes: 3, wantStatus: core.GatePending},
+		{name: "listed first waits for a failed gate", earlier: [][]core.GateStatus{{core.GatePassed}, {core.GateFailed}}, listedFirst: true, passes: 2, wantStatus: core.GateFailed},
+		{name: "listed first runs once the others clear", earlier: [][]core.GateStatus{{core.GatePending, core.GatePassed}, {core.GateSkipped}}, listedFirst: true, passes: 2, wantCalls: 1, wantRecorded: true, wantStatus: core.GatePending},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,7 +45,11 @@ func TestEvaluateDefersGateUntilEarlierGatesClear(t *testing.T) {
 				bindings = append(bindings, bind("gate-"+string(rune('a'+i)), core.GatePhaseBefore, verdicts(statuses...)))
 			}
 			backup := verdicts(core.GatePending)
-			bindings = append(bindings, deferredBinding(backup))
+			if tt.listedFirst {
+				bindings = append([]gates.Binding{deferredBinding(backup)}, bindings...)
+			} else {
+				bindings = append(bindings, deferredBinding(backup))
+			}
 			h := newHarness(t, gates.Plan{Before: bindings})
 			d := deployment(core.KindDeploy)
 
@@ -87,6 +95,28 @@ func TestEvaluateDeferredTimeoutStartsWhenCalled(t *testing.T) {
 	out = mustEvaluate(t, h, d, core.GatePhaseBefore)
 	if out.Status != core.GateFailed || out.Results[1].Message != "timed out after 30m0s" {
 		t.Errorf("outcome = %s %v, want the backup timed out 30m after its first call", out.Status, out.Results)
+	}
+}
+
+func TestEvaluateDeferredKeepsBindingOrderInResults(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, gates.Plan{Before: []gates.Binding{
+		deferredBinding(verdicts(core.GatePassed)),
+		bind("checks", core.GatePhaseBefore, verdicts(core.GatePassed)),
+		bind("lock", core.GatePhaseBefore, verdicts(core.GatePending, core.GatePassed)),
+	}})
+	d := deployment(core.KindDeploy)
+
+	if got := outcomeStatuses(mustEvaluate(t, h, d, core.GatePhaseBefore)); !slices.Equal(got, []string{"checks=passed", "lock=pending"}) {
+		t.Fatalf("first pass = %v, want the backup not yet called", got)
+	}
+	out := mustEvaluate(t, h, d, core.GatePhaseBefore)
+	if got := outcomeStatuses(out); !slices.Equal(got, []string{"backup=passed", "checks=passed", "lock=passed"}) {
+		t.Errorf("second pass = %v, want results in binding order", got)
+	}
+	if out.Status != core.GatePassed {
+		t.Errorf("status = %s, want passed", out.Status)
 	}
 }
 

@@ -98,9 +98,11 @@ The flag describes the **whole release**, not just its head commit. Intake drops
 | more than 50 commits | nothing: the release is flagged conservatively with `52 commits since the last release, too many to inspect` |
 | otherwise | every commit in the range |
 
-Detection runs in intake when a commit's checks become `success`, the last moment before it is queued, outside the Postgres transaction so rollback requests never wait on GitHub. Reads are shared within one evaluation pass. If GitHub cannot be read, the commit is **not** settled or queued: intake logs `reading migration flags failed; not enqueued` and the next check event or poll (at most a minute later) tries again. An operator who opted in wants the guard to be reliable, so a deploy with unknown migration status never slips through.
+Because the range starts at the newest `deploy` row whatever its state, it skips the commits of an earlier deployment that may never reach the cluster: one still queued that a later deploy will batch away, or one that failed or was cancelled before its pin. Intake therefore also carries their flags forward. Every flagged `deploy` row newer than the last one that reached the cluster (`succeeded`, or with a pin commit), and that has not reached it itself, flags the new release too, with a reason such as `unreleased migration in deployment 44; ...` (`Store.UnreleasedMigrations`, at most 20 rows). So when v2 (flagged) is queued and v3 goes green before it deploys, v3 is flagged, and the backup gate runs for whichever of them ships. If v2 does deploy on its own first (for example with `deploy.max_batch: 1`), v3 is flagged as well and takes a second backup: the carry errs towards an extra backup, never towards a missed one.
 
-The result is stored on the deployment: `migration` and `migration_reason` (at most 200 characters), for example `label db-migration on #12 (abc1234); trailer Doorstep-Migration in def5678`. The API, the history and the backup gate read it from there. Deployments that were batched away (`superseded`) keep their flag, so batching loses nothing. Deploys requested through other paths are not inspected and are unflagged.
+Detection runs in intake when a commit's checks become `success`, the last moment before it is queued, outside the Postgres transaction so rollback requests never wait on GitHub. Reads are shared within one evaluation pass. If GitHub or the database cannot be read, the commit is **not** settled or queued: intake logs `reading migration flags failed; not enqueued`, increments `doorstep_migration_detection_failures_total{app}` ([metrics.md](metrics.md#metrics)) and the next check event or poll (at most a minute later) tries again. An operator who opted in wants the guard to be reliable, so a deploy with unknown migration status never slips through. The flip side is that a persistent error (the GitHub App lacks *Pull requests: read*, or GitHub keeps answering `404`/`422` for the head commit) holds every deploy of the app until it is fixed, so alert on that counter, for example `increase(doorstep_migration_detection_failures_total[15m]) > 0`.
+
+The result is stored on the deployment: `migration` and `migration_reason` (at most 200 characters), for example `label db-migration on #12 (abc1234); trailer Doorstep-Migration in def5678`. The API, the history and the backup gate read it from there. Deployments that were batched away (`superseded`) keep their flag, and the deployment that superseded them carries it as described above, so batching loses nothing. Deploys requested through other paths are not inspected and are unflagged.
 
 ### What counts as crossing
 
@@ -117,6 +119,8 @@ A rollback from the current deployment to a target **crosses** a migration when 
 2. After that rollback (to v1), v3 deploys. Rolling back to v1 again still crosses v2, because v2 is newer than v1's first deploy.
 3. Rolling back **to** v2 crosses nothing: v2's migration is what the schema already has. Rolling forward crosses nothing either. Rollback rows are never counted.
 
+The answer is deliberately conservative: it counts flagged rows whatever their state, including ones that never reached the cluster (superseded, or failed or cancelled before their pin). Their migrations usually shipped with the release that superseded them, which is flagged too, so the confirmation prompt can name both, or name a deployment ID that never ran itself. Confirming costs one flag; missing a migration would cost a broken rollback.
+
 ### Confirmation
 
 Without confirmation a crossing rollback fails with `409 migration_confirmation_required`:
@@ -132,6 +136,8 @@ Without confirmation a crossing rollback fails with `409 migration_confirmation_
 Repeat the request with `"confirm_migration_rollback": true` or `doorstep rollback blog --confirm-migration-rollback`. The `deployer` role is enough. The check runs after the target is chosen, so `rollback_in_progress`, `no_rollback_target` and `blocked` take precedence, and it is part of the same transaction as the rest of the request. A confirmed rollback is stored with `migration: true` and audits `migration_confirmed` and `migration_deployment_ids`.
 
 ### Automatic rollbacks
+
+> **Not active yet.** Nothing runs automatic rollbacks or gates until the engine (bead doorstep-ehl.4.4) lands; this section and the next describe what it must do. Until then flags, the confirmation prompt and the configuration are live, but no backup is taken.
 
 An automatic rollback after a failed gate must never cross a migration unattended. Before queuing one, the engine calls `MigrationsBetween` (or `(*rollback.Service).MigrationsCrossed`) with the target it picked and the failing deploy; when the answer is not empty it does not roll back and fails the deploy with `automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback`, and notifies as for any failure. A person then decides.
 

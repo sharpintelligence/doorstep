@@ -875,9 +875,11 @@ func TestCatalogValidate(t *testing.T) {
 			g.ApplyToRollbacks = true
 			g.Webhook = &GateWebhook{URLFile: "/etc/doorstep/backup-url", SecretFile: "/etc/doorstep/backup-secret"}
 		})},
-		{name: "backup gate with url env and no secret", mutate: withBackup(func(g *Gate) {
-			g.Webhook = &GateWebhook{URLEnv: "BACKUP_URL"}
-		})},
+		{
+			name:    "backup gate needs a signing secret",
+			mutate:  withBackup(func(g *Gate) { g.Webhook = &GateWebhook{URLEnv: "BACKUP_URL"} }),
+			wantErr: []string{"gates.before[1].webhook.secret_env, gates.before[1].webhook.secret_file: set exactly one"},
+		},
 		{
 			name:    "backup gate needs a webhook",
 			mutate:  withBackup(func(g *Gate) { g.Webhook = nil }),
@@ -906,7 +908,7 @@ func TestCatalogValidate(t *testing.T) {
 		{
 			name:    "backup gate at most one secret",
 			mutate:  withBackup(func(g *Gate) { g.Webhook.SecretFile = "/etc/doorstep/secret" }),
-			wantErr: []string{"gates.before[1].webhook.secret_env, gates.before[1].webhook.secret_file: set at most one"},
+			wantErr: []string{"gates.before[1].webhook.secret_env, gates.before[1].webhook.secret_file: set exactly one"},
 		},
 		{
 			name: "backup gate bad secret sources",

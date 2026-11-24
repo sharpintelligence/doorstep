@@ -20,6 +20,7 @@ type Options struct {
 	Branches   Branches
 	Migrations MigrationSource
 	Baselines  Baselines
+	Observer   Observer
 	Logger     *slog.Logger
 	Now        func() time.Time
 }
@@ -47,6 +48,7 @@ type Service struct {
 	branches   Branches
 	migrations MigrationSource
 	baselines  Baselines
+	observer   Observer
 	logger     *slog.Logger
 	now        func() time.Time
 }
@@ -70,6 +72,7 @@ func New(opts Options) (*Service, error) {
 		branches:   opts.Branches,
 		migrations: opts.Migrations,
 		baselines:  opts.Baselines,
+		observer:   opts.Observer,
 		logger:     opts.Logger,
 		now:        opts.Now,
 	}
@@ -78,6 +81,9 @@ func New(opts Options) (*Service, error) {
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.observer == nil {
+		s.observer = nopObserver{}
 	}
 	var errs []error
 	for i, app := range opts.Apps {
@@ -324,6 +330,7 @@ func (s *Service) settle(ctx context.Context, c core.TrackedCommit, read readSna
 		var err error
 		if flag, err = s.migration(ctx, migrations, app, c.Commit); err != nil {
 			log.WarnContext(ctx, "reading migration flags failed; not enqueued", "error", err)
+			s.observer.MigrationDetectionFailed(c.Target.App)
 			return Result{Commit: c}, fmt.Errorf("detect migrations of %s: %w", c.Commit.SHA, err)
 		}
 		detected = true

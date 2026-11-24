@@ -42,4 +42,5 @@ type MigrationSource interface {
 
 type Baselines interface {
 	LastDeployCommit(ctx context.Context, t core.Target) (core.Commit, bool, error)
+	UnreleasedMigrations(ctx context.Context, t core.Target) ([]core.DeploymentID, error)
 }
