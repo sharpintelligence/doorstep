@@ -22,6 +22,7 @@ type Factory func(app config.App, gate config.Gate) (Gate, error)
 type Definition struct {
 	Kind           metrics.GateKind
 	SkipOnRollback bool
+	Deferred       bool
 	New            Factory
 }
 
@@ -110,6 +111,7 @@ func (r *Registry) binding(app config.App, phase core.GatePhase, g config.Gate) 
 		Kind:           def.Kind,
 		Phase:          phase,
 		SkipOnRollback: def.SkipOnRollback,
+		Deferred:       def.Deferred,
 		Gate:           gate,
 	}
 	if g.Timeout != nil {

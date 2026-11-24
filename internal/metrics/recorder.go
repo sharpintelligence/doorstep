@@ -21,6 +21,7 @@ type Recorder struct {
 	notifications      *prometheus.CounterVec
 	webhookDeliveries  *prometheus.CounterVec
 	pollCycles         *prometheus.CounterVec
+	migrationFailures  *prometheus.CounterVec
 }
 
 func newRecorder() *Recorder {
@@ -62,6 +63,11 @@ func newRecorder() *Recorder {
 			Name:      "intake_poll_cycles_total",
 			Help:      "Intake poll cycles run by this replica, by result.",
 		}, []string{"result"}),
+		migrationFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "migration_detection_failures_total",
+			Help:      "Green commits not enqueued because their migration flags could not be read, by application.",
+		}, []string{"app"}),
 	}
 	for _, t := range allNotificationTypes {
 		for _, result := range allNotificationResults {
@@ -80,7 +86,7 @@ func newRecorder() *Recorder {
 }
 
 func (r *Recorder) collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications, r.webhookDeliveries, r.pollCycles}
+	return []prometheus.Collector{r.deploymentsStarted, r.deploymentDuration, r.rollbacks, r.gateDuration, r.notifications, r.webhookDeliveries, r.pollCycles, r.migrationFailures}
 }
 
 func (r *Recorder) DeploymentStarted(app string) {
@@ -111,8 +117,13 @@ func (r *Recorder) PollCycle(result PollResult) {
 	r.pollCycles.WithLabelValues(result.label()).Inc()
 }
 
+func (r *Recorder) MigrationDetectionFailed(app string) {
+	r.migrationFailures.WithLabelValues(app).Inc()
+}
+
 func (r *Recorder) PrimeApp(app string) {
 	r.deploymentsStarted.WithLabelValues(app)
+	r.migrationFailures.WithLabelValues(app)
 	for _, outcome := range allOutcomes {
 		r.deploymentDuration.WithLabelValues(app, outcome.label())
 	}

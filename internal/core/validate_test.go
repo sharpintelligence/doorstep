@@ -232,6 +232,28 @@ func TestDeploymentValidate(t *testing.T) {
 		{name: "bad previous digest", mutate: func(d *Deployment) { d.PreviousDigest = "sha256:abc" }, wantErr: []string{"previous digest"}, wantIs: ErrInvalidDigest},
 		{name: "short pin commit", mutate: func(d *Deployment) { d.PinCommitSHA = "abc1234" }, wantErr: []string{"pin commit"}, wantIs: ErrInvalidCommitSHA},
 		{name: "short source commit", mutate: func(d *Deployment) { d.Commit.SHA = "abc1234" }, wantIs: ErrInvalidCommitSHA},
+		{name: "migration with reason", mutate: func(d *Deployment) {
+			d.Migration = true
+			d.MigrationReason = "label db-migration on #12 (0123456)"
+		}},
+		{name: "migration without reason", mutate: func(d *Deployment) { d.Migration = true }},
+		{name: "reason without migration", mutate: func(d *Deployment) { d.MigrationReason = "x" }, wantErr: []string{"migration reason must be empty"}},
+		{name: "migration reason too long", mutate: func(d *Deployment) {
+			d.Migration = true
+			d.MigrationReason = strings.Repeat("é", MaxMigrationReasonLength+1)
+		}, wantErr: []string{"at most 200"}},
+		{name: "migration reason at limit", mutate: func(d *Deployment) {
+			d.Migration = true
+			d.MigrationReason = strings.Repeat("é", MaxMigrationReasonLength)
+		}},
+		{name: "migration reason with control", mutate: func(d *Deployment) {
+			d.Migration = true
+			d.MigrationReason = "a\nb"
+		}, wantErr: []string{"control characters"}},
+		{name: "migration reason invalid UTF-8", mutate: func(d *Deployment) {
+			d.Migration = true
+			d.MigrationReason = "a\xffb"
+		}, wantErr: []string{"UTF-8"}},
 		{name: "missing target and image", mutate: func(d *Deployment) {
 			d.Target = Target{}
 			d.Image = ImageRef{}

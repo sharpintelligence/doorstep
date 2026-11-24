@@ -50,17 +50,20 @@ func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
 	if in.announcer != nil {
 		commits = announcingCommits{Commits: commits, announcer: in.announcer}
 	}
+	observer := intakeObserver{recorder: in.recorder}
 	service, err := intake.New(intake.Options{
-		Apps:     apps,
-		Commits:  commits,
-		Checks:   intake.GitHub{Clients: in.githubApp},
-		Branches: intake.GitHub{Clients: in.githubApp},
-		Logger:   in.logger,
+		Apps:       apps,
+		Commits:    commits,
+		Checks:     intake.GitHub{Clients: in.githubApp},
+		Branches:   intake.GitHub{Clients: in.githubApp},
+		Migrations: intake.GitHub{Clients: in.githubApp},
+		Baselines:  in.store,
+		Observer:   observer,
+		Logger:     in.logger,
 	})
 	if err != nil {
 		return intakeWiring{}, err
 	}
-	observer := intakeObserver{recorder: in.recorder}
 
 	if secret != nil {
 		deliveries := intake.NewPostgresDeliveries(in.store)
@@ -142,4 +145,8 @@ func (o intakeObserver) WebhookDelivery(event string, result intake.WebhookResul
 
 func (o intakeObserver) PollCycle(result intake.PollResult) {
 	o.recorder.PollCycle(metrics.PollResult(result))
+}
+
+func (o intakeObserver) MigrationDetectionFailed(app string) {
+	o.recorder.MigrationDetectionFailed(app)
 }

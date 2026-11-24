@@ -11,6 +11,7 @@ type Repository interface {
 	LockTarget(ctx context.Context, t core.Target) error
 	CurrentDeployment(ctx context.Context, t core.Target) (core.Deployment, error)
 	LastSuccessfulDeployment(ctx context.Context, t core.Target, excludeDigest core.Digest) (core.Deployment, error)
+	MigrationsBetween(ctx context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error)
 	GetDeployment(ctx context.Context, id core.DeploymentID) (core.Deployment, error)
 	ListDeployments(ctx context.Context, f store.DeploymentFilter) (store.DeploymentPage, error)
 	TransitionDeployment(ctx context.Context, t store.Transition) (core.Deployment, error)

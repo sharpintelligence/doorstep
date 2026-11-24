@@ -25,7 +25,15 @@ func (w appWiring) intake() intake.App {
 		Branch:          w.app.Source.Branch,
 		RequiredChecks:  w.app.Source.RequiredChecks,
 		ImageRepository: w.app.Image.Repository,
+		Migrations:      migrationPolicy(w.app.Migrations),
 	}
+}
+
+func migrationPolicy(m *config.Migrations) *intake.MigrationPolicy {
+	if m == nil {
+		return nil
+	}
+	return &intake.MigrationPolicy{Labels: m.Labels, Trailer: m.TrailerEnabled()}
 }
 
 func (w appWiring) gitops() gitops.Target {

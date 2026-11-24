@@ -14,6 +14,7 @@ type App struct {
 	Branch          string
 	RequiredChecks  []string
 	ImageRepository string
+	Migrations      *MigrationPolicy
 }
 
 func (a App) Validate() error {
@@ -32,6 +33,9 @@ func (a App) Validate() error {
 			errs = append(errs, fmt.Errorf("required check %d must not be empty", i))
 		}
 	}
+	if a.Migrations != nil {
+		errs = append(errs, a.Migrations.validate())
+	}
 	return errors.Join(errs...)
 }
 
@@ -39,14 +43,16 @@ func (a App) matches(repository, branch string) bool {
 	return strings.EqualFold(a.Repository, repository) && a.Branch == branch
 }
 
-func (a App) deployment(c core.TrackedCommit) core.Deployment {
+func (a App) deployment(c core.TrackedCommit, flag MigrationFlag) core.Deployment {
 	return core.Deployment{
-		Target:      a.Target,
-		Kind:        core.KindDeploy,
-		Source:      c.Source,
-		RequestedBy: c.PushedBy,
-		Commit:      c.Commit,
-		Image:       core.ImageRef{Repository: a.ImageRepository, Tag: c.Commit.SHA},
+		Target:          a.Target,
+		Kind:            core.KindDeploy,
+		Source:          c.Source,
+		RequestedBy:     c.PushedBy,
+		Commit:          c.Commit,
+		Image:           core.ImageRef{Repository: a.ImageRepository, Tag: c.Commit.SHA},
+		Migration:       flag.Flagged,
+		MigrationReason: flag.Reason,
 	}
 }
 

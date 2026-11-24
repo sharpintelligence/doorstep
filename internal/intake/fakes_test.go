@@ -549,6 +549,19 @@ type fakeObserver struct {
 	mu         sync.Mutex
 	deliveries []string
 	cycles     []intake.PollResult
+	detections []string
+}
+
+func (f *fakeObserver) MigrationDetectionFailed(app string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detections = append(f.detections, app)
+}
+
+func (f *fakeObserver) failedDetections() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.detections)
 }
 
 func (f *fakeObserver) WebhookDelivery(event string, result intake.WebhookResult) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
@@ -35,12 +36,13 @@ type Service struct {
 }
 
 type Request struct {
-	Target       core.Target
-	ToDeployment *core.DeploymentID
-	ToDigest     core.Digest
-	Reason       string
-	Actor        core.Actor
-	Role         core.Role
+	Target           core.Target
+	ToDeployment     *core.DeploymentID
+	ToDigest         core.Digest
+	Reason           string
+	ConfirmMigration bool
+	Actor            core.Actor
+	Role             core.Role
 }
 
 type Result struct {
@@ -49,6 +51,7 @@ type Result struct {
 	To         core.Deployment
 	Block      *core.Block
 	Cancelled  []core.DeploymentID
+	Migrations []core.Deployment
 }
 
 type BlockRequest struct {
@@ -102,6 +105,9 @@ func (s *Service) Rollback(ctx context.Context, req Request) (Result, error) {
 	if result.Block != nil {
 		attrs = append(attrs, slog.String("blocked", result.Block.Subject()))
 	}
+	if len(result.Migrations) > 0 {
+		attrs = append(attrs, slog.Any("migration_deployment_ids", deploymentIDs(result.Migrations)))
+	}
 	s.logger.InfoContext(ctx, "rollback requested", attrs...)
 	s.observer.RollbackRequested(req.Target.App)
 	return result, nil
@@ -145,6 +151,13 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 		if err != nil {
 			return err
 		}
+		crossed, err := tx.MigrationsBetween(ctx, req.Target, to, bad)
+		if err != nil {
+			return err
+		}
+		if len(crossed) > 0 && !req.ConfirmMigration {
+			return &core.MigrationRollbackError{To: to, Migrations: crossed}
+		}
 
 		block := blockFor(req, bad, to)
 		actor := req.Actor.String()
@@ -166,14 +179,16 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 		}
 
 		rb, _, err := tx.EnqueueDeployment(ctx, core.Deployment{
-			Target:       req.Target,
-			Kind:         core.KindRollback,
-			Source:       core.SourceAPI,
-			RequestedBy:  actor,
-			Commit:       to.Commit,
-			Image:        to.Image,
-			Digest:       to.Digest,
-			RollbackOfID: &bad.ID,
+			Target:          req.Target,
+			Kind:            core.KindRollback,
+			Source:          core.SourceAPI,
+			RequestedBy:     actor,
+			Commit:          to.Commit,
+			Image:           to.Image,
+			Digest:          to.Digest,
+			RollbackOfID:    &bad.ID,
+			Migration:       len(crossed) > 0,
+			MigrationReason: crossingReason(crossed),
 		}, core.PriorityRollback)
 		if err != nil {
 			return err
@@ -193,7 +208,7 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 		if err != nil {
 			return err
 		}
-		result = Result{Rollback: rb, RolledBack: bad, To: to, Block: recorded, Cancelled: cancelled}
+		result = Result{Rollback: rb, RolledBack: bad, To: to, Block: recorded, Cancelled: cancelled, Migrations: crossed}
 		entry, err := rollbackAudit(req, result)
 		if err != nil {
 			return err
@@ -340,6 +355,10 @@ func rollbackAudit(req Request, r Result) (core.AuditEntry, error) {
 	if req.Reason != "" {
 		detail["reason"] = req.Reason
 	}
+	if len(r.Migrations) > 0 {
+		detail["migration_confirmed"] = true
+		detail["migration_deployment_ids"] = deploymentIDs(r.Migrations)
+	}
 	entry, err := auditEntry(core.AuditRollbackRequest, req.Target, req.Actor, req.Role, detail)
 	id := r.Rollback.ID
 	entry.DeploymentID = &id
@@ -432,6 +451,10 @@ func (s *Service) Unblock(ctx context.Context, t core.Target, ref core.BlockRef,
 	return cleared, nil
 }
 
+func (s *Service) MigrationsCrossed(ctx context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error) {
+	return s.repo.MigrationsBetween(ctx, t, to, current)
+}
+
 func (s *Service) ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error) {
 	return s.repo.ListBlocks(ctx, t, false)
 }
@@ -454,6 +477,29 @@ func auditEntry(action core.AuditAction, t core.Target, actor core.Actor, role c
 		return core.AuditEntry{}, fmt.Errorf("encode %s audit detail: %w", action, err)
 	}
 	return core.AuditEntry{Actor: actor, Role: role, Action: action, Target: &t, Detail: data}, nil
+}
+
+func crossingReason(crossed []core.Deployment) string {
+	if len(crossed) == 0 {
+		return ""
+	}
+	ids := make([]string, len(crossed))
+	for i, d := range crossed {
+		ids[i] = strconv.FormatInt(int64(d.ID), 10)
+	}
+	word := "deployment "
+	if len(crossed) > 1 {
+		word = "deployments "
+	}
+	return core.CleanMigrationReason("rolls back across " + word + strings.Join(ids, ", "))
+}
+
+func deploymentIDs(ds []core.Deployment) []core.DeploymentID {
+	ids := make([]core.DeploymentID, len(ds))
+	for i, d := range ds {
+		ids[i] = d.ID
+	}
+	return ids
 }
 
 func nonNil(ids []core.DeploymentID) []core.DeploymentID {

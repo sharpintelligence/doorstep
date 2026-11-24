@@ -14,15 +14,17 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/store/storetest"
 )
 
-func succeededDeployment(t *testing.T, st *store.Store, sha string, digest core.Digest) core.Deployment {
+func succeededDeployment(t *testing.T, st *store.Store, sha string, digest core.Digest, migrationReason ...string) core.Deployment {
 	t.Helper()
 	d, _, err := st.EnqueueDeployment(t.Context(), core.Deployment{
-		Target:      core.AppTarget("blog"),
-		Kind:        core.KindDeploy,
-		Source:      core.SourceWebhook,
-		RequestedBy: "octocat",
-		Commit:      core.Commit{Repository: "example-user/blog", SHA: sha},
-		Image:       core.ImageRef{Repository: "ghcr.io/example-user/blog", Tag: sha},
+		Target:          core.AppTarget("blog"),
+		Kind:            core.KindDeploy,
+		Source:          core.SourceWebhook,
+		RequestedBy:     "octocat",
+		Commit:          core.Commit{Repository: "example-user/blog", SHA: sha},
+		Image:           core.ImageRef{Repository: "ghcr.io/example-user/blog", Tag: sha},
+		Migration:       len(migrationReason) > 0,
+		MigrationReason: strings.Join(migrationReason, "; "),
 	}, core.PriorityNormal)
 	if err != nil {
 		t.Fatalf("EnqueueDeployment: %v", err)
@@ -109,5 +111,45 @@ func TestRollbackCommandsAgainstAPI(t *testing.T) {
 	want := []core.AuditAction{core.AuditBlockClear, core.AuditRollbackRequest}
 	if len(actions) != len(want) || actions[0] != want[0] || actions[1] != want[1] {
 		t.Errorf("audit actions = %v, want %v", actions, want)
+	}
+}
+
+func TestMigrationRollbackAgainstAPI(t *testing.T) {
+	t.Parallel()
+
+	st := storetest.Open(t)
+	service, err := rollback.New(rollback.Options{Repository: rollback.NewRepository(st)})
+	if err != nil {
+		t.Fatalf("rollback.New: %v", err)
+	}
+	srv := httptest.NewServer(api.New(api.Options{
+		Rollbacks:     service,
+		Blocks:        service,
+		KnownApp:      knownApp(oneAppCatalog(t)),
+		Authenticator: staticAuth{},
+	}))
+	defer srv.Close()
+	env := map[string]string{EnvServerURL: srv.URL, EnvToken: "tok-123"}
+
+	succeededDeployment(t, st, strings.Repeat("a", 40), cliGoodDigest)
+	migrated := succeededDeployment(t, st, cliBadSHA, cliBadDigest, "label db-migration on #12 (ccccccc)")
+	id := strconv.FormatInt(int64(migrated.ID), 10)
+
+	code, _, stderr := runCLI(t, []string{"rollback", "blog"}, env)
+	if code != 1 || !strings.Contains(stderr, "crosses database migrations in deployment "+id+" (label db-migration on #12 (ccccccc))") ||
+		!strings.Contains(stderr, "--confirm-migration-rollback") {
+		t.Fatalf("unconfirmed rollback: exit %d, stderr %q", code, stderr)
+	}
+	if entries, err := st.QueueEntries(t.Context(), "blog"); err != nil || len(entries) != 0 {
+		t.Fatalf("queue after a refused rollback = %+v, %v", entries, err)
+	}
+
+	code, stdout, stderr := runCLI(t, []string{"rollback", "blog", "--confirm-migration-rollback"}, env)
+	if code != 0 || !strings.Contains(stdout, "confirmed rollback across migrations in deployment "+id+"\n") {
+		t.Fatalf("confirmed rollback: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	entries, err := st.QueueEntries(t.Context(), "blog")
+	if err != nil || len(entries) != 1 || !entries[0].Deployment.Migration || entries[0].Deployment.MigrationReason != "rolls back across deployment "+id {
+		t.Fatalf("queue = %+v, %v", entries, err)
 	}
 }

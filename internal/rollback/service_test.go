@@ -551,7 +551,7 @@ func TestRollbackValidation(t *testing.T) {
 func TestRollbackRepositoryErrors(t *testing.T) {
 	t.Parallel()
 
-	for _, op := range []string{"LockTarget", "ListDeployments", "CurrentDeployment", "EnqueueDeployment", "CreateBlock", "RecordAudit"} {
+	for _, op := range []string{"LockTarget", "ListDeployments", "CurrentDeployment", "MigrationsBetween", "EnqueueDeployment", "CreateBlock", "RecordAudit"} {
 		t.Run(op, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeRepo()

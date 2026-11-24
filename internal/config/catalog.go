@@ -59,6 +59,17 @@ func (c Catalog) SecretRefs() []SecretRef {
 			refs = append(refs, password)
 		}
 	}
+	for _, a := range c.Apps {
+		for _, g := range slices.Concat(a.Gates.Before, a.Gates.After) {
+			endpoint, ok := g.WebhookEndpoint(a.Name)
+			if ok && endpoint.Value == "" {
+				refs = append(refs, endpoint)
+			}
+			if secret, ok := g.WebhookSecret(a.Name); ok {
+				refs = append(refs, secret)
+			}
+		}
+	}
 	if secret, ok := c.Auth.ClientSecret(); ok {
 		refs = append(refs, secret)
 	}
@@ -78,15 +89,31 @@ func (r RepoName) Name() string {
 }
 
 type App struct {
-	Name   string   `yaml:"name"`
-	Source Source   `yaml:"source"`
-	Image  Image    `yaml:"image"`
-	GitOps GitOps   `yaml:"gitops"`
-	Pin    Pin      `yaml:"pin"`
-	Deploy Deploy   `yaml:"deploy"`
-	ArgoCD ArgoCD   `yaml:"argocd"`
-	Gates  Gates    `yaml:"gates"`
-	Notify []string `yaml:"notify"`
+	Name       string      `yaml:"name"`
+	Source     Source      `yaml:"source"`
+	Image      Image       `yaml:"image"`
+	GitOps     GitOps      `yaml:"gitops"`
+	Pin        Pin         `yaml:"pin"`
+	Deploy     Deploy      `yaml:"deploy"`
+	ArgoCD     ArgoCD      `yaml:"argocd"`
+	Gates      Gates       `yaml:"gates"`
+	Notify     []string    `yaml:"notify"`
+	Migrations *Migrations `yaml:"migrations"`
+}
+
+const (
+	MigrationTrailer        = "Doorstep-Migration"
+	MaxMigrationLabels      = 10
+	MaxMigrationLabelLength = 50
+)
+
+type Migrations struct {
+	Labels  []string `yaml:"labels"`
+	Trailer *bool    `yaml:"trailer"`
+}
+
+func (m Migrations) TrailerEnabled() bool {
+	return m.Trailer == nil || *m.Trailer
 }
 
 type Source struct {
@@ -205,11 +232,20 @@ const (
 	GateSoak       GateType = "soak"
 	GatePrometheus GateType = "prometheus"
 	GateExternal   GateType = "external"
+	GateBackup     GateType = "backup"
+)
+
+type GateWhen string
+
+const (
+	GateWhenMigration GateWhen = "migration"
+	GateWhenAlways    GateWhen = "always"
 )
 
 const (
 	DefaultTimeoutAllowance    = 10 * time.Minute
 	DefaultExternalGateTimeout = 24 * time.Hour
+	DefaultBackupTimeout       = 30 * time.Minute
 )
 
 type GatePhase string
@@ -242,6 +278,35 @@ type Gate struct {
 	NoData           NoDataPolicy `yaml:"no_data"`
 	Baseline         *Baseline    `yaml:"baseline"`
 	Reporters        []string     `yaml:"reporters"`
+	When             GateWhen     `yaml:"when"`
+	Webhook          *GateWebhook `yaml:"webhook"`
+}
+
+type GateWebhook struct {
+	URL        string `yaml:"url"`
+	URLEnv     string `yaml:"url_env"`
+	URLFile    string `yaml:"url_file"`
+	SecretEnv  string `yaml:"secret_env"`
+	SecretFile string `yaml:"secret_file"`
+}
+
+func (g Gate) WebhookEndpoint(app string) (SecretRef, bool) {
+	if g.Webhook == nil {
+		return SecretRef{}, false
+	}
+	return SecretRef{Label: g.label(app, "url"), Value: g.Webhook.URL, Env: g.Webhook.URLEnv, File: g.Webhook.URLFile}, true
+}
+
+func (g Gate) WebhookSecret(app string) (SecretRef, bool) {
+	if g.Webhook == nil {
+		return SecretRef{}, false
+	}
+	ref := SecretRef{Label: g.label(app, "secret"), Env: g.Webhook.SecretEnv, File: g.Webhook.SecretFile}
+	return ref, ref.Env != "" || ref.File != ""
+}
+
+func (g Gate) label(app, field string) string {
+	return "app " + app + " gate " + g.Name + " " + field
 }
 
 type WindowEffect string
@@ -268,6 +333,7 @@ type gateSpec struct {
 	allowsRollbackOptIn bool
 	prometheus          bool
 	allowsReporters     bool
+	webhook             bool
 }
 
 func gateSpecs() map[GateType]gateSpec {
@@ -279,6 +345,7 @@ func gateSpecs() map[GateType]gateSpec {
 		GateSoak:       {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: soakTimeout, requiresDuration: true},
 		GatePrometheus: {phase: PhaseAfter, allowsTimeout: true, defaultTimeout: prometheusTimeout, prometheus: true},
 		GateExternal:   {allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultExternalGateTimeout), allowsRollbackOptIn: true, allowsReporters: true},
+		GateBackup:     {phase: PhaseBefore, allowsTimeout: true, defaultTimeout: fixedTimeout(DefaultBackupTimeout), allowsRollbackOptIn: true, webhook: true},
 	}
 }
 
@@ -353,6 +420,10 @@ func (a App) withDefaults() App {
 	a.ArgoCD.SyncTimeout = new(Duration(a.ArgoCD.Timeout()))
 	a.Gates = a.Gates.withDefaults()
 	a.Notify = slices.Clone(a.Notify)
+	if a.Migrations != nil {
+		m := Migrations{Labels: slices.Clone(a.Migrations.Labels), Trailer: new(a.Migrations.TrailerEnabled())}
+		a.Migrations = &m
+	}
 	return a
 }
 
@@ -407,6 +478,13 @@ func gatesWithDefaults(gates, fallback []Gate, specs map[GateType]gateSpec) []Ga
 			g.Timezone = orDefault(g.Timezone, DefaultScheduleZone)
 		}
 		g.Reporters = slices.Clone(g.Reporters)
+		if known && spec.webhook {
+			g.When = orDefault(g.When, GateWhenMigration)
+		}
+		if g.Webhook != nil {
+			webhook := *g.Webhook
+			g.Webhook = &webhook
+		}
 		g.Windows = slices.Clone(g.Windows)
 		for i := range g.Windows {
 			g.Windows[i].Timezone = orDefault(g.Windows[i].Timezone, g.Timezone)

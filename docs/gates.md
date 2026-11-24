@@ -60,9 +60,13 @@ Results left behind by a gate that has since been removed from the configuration
 
 Each gate receives the deployment, the phase and its previously recorded result (`Request.Previous`), so a gate that needs state across polls and restarts (a soak start time, a launched Job name) keeps it in its evidence rather than in its own table.
 
+### Deferred gates
+
+A gate type registered with `Definition.Deferred` (today only `backup`) waits its turn: in a pass the evaluator first settles every gate of the phase that is not deferred, whatever the configured order, and only then the deferred ones, in their configured order. A deferred gate is neither called nor recorded until every non-deferred gate of the phase, and every deferred gate listed before it, is `passed` or `skipped` in that pass. Until then the phase is already `pending` or `failed` because of those gates, so the verdict is unchanged. Results are still reported in configuration order. Without deferral the evaluator would call the gate on every pass while CI is still running or a deploy window holds the deploy for days, taking a stale backup and burning its timeout. Because nothing is recorded while it waits, its timeout clock starts only when it is first called. Where it is listed does not matter. A result it already recorded is kept and reported while an earlier gate is re-run.
+
 ### Timeouts
 
-A gate's `timeout` from the configuration (default `30m` for `checks`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days; an `external` gate times out after `24h` unless it sets its own. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
+A gate's `timeout` from the configuration (default `30m` for `checks` and `backup`, `10m` for `health`, the soak `duration` plus `10m` for `soak`, `initial_delay` + `success_threshold` × `interval` + `10m` for `prometheus`) is enforced by the evaluator for every gate type. When a gate is still `pending` and its `UpdatedAt - StartedAt` has reached the timeout, it is recorded as `failed` with the message `timed out after <timeout>`, keeping the gate's last evidence. A gate without a timeout (`lock`, `schedule`) never times out, because a freeze legitimately lasts days; an `external` gate times out after `24h` unless it sets its own. Because both timestamps are database readings, the timeout is measured on the clock all replicas share and survives restarts.
 
 ### Errors
 
@@ -87,8 +91,9 @@ A rollback re-pins a digest that already passed CI and soak, but it still waits 
 | `soak` | after | `soak` | skipped | `duration` + `10m` | the Argo CD Application |
 | `prometheus` | after | `metrics` | skipped | `initial_delay` + `success_threshold` × `interval` + `10m` | a Prometheus server |
 | `external` | either | `external` | skipped unless `apply_to_rollbacks: true` | `24h` | reports posted through the API |
+| `backup` | before (deferred) | `backup` | skipped unless `apply_to_rollbacks: true` | `30m` | an operator-owned webhook |
 
-The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak`, `prometheus` and `external` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
+The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule`, `soak`, `prometheus`, `external` and `backup` are opt-in ([configuration.md](configuration.md#gates)). Every gate honours `ctx`, keeps any state it needs across polls in its evidence (timestamps as RFC 3339 UTC), starts fresh when previous evidence cannot be decoded, and never puts credentials in messages or evidence. Strings read from GitHub or Argo CD are cleaned like messages before they are stored as evidence.
 
 ### Wiring
 
@@ -123,6 +128,17 @@ The ports are small interfaces in `internal/gates`:
 | `ExternalReports` | `GetGateReport(ctx, deploymentID, gate) (core.GateReport, error)` | `*store.Store` |
 
 `gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
+
+The `backup` type needs an HTTP client, a secret reader and a signer, which `gates` may not take from `notify` itself. It is registered separately so `RegisterBuiltins` keeps its signature. `internal/cli` has the helper the composition root calls next to `RegisterBuiltins`:
+
+```go
+err := registerBackupGate(registry, lookupEnv, userAgent(), time.Now)
+// = gates.RegisterBackup(registry, gates.BackupDeps{
+//	Client:     notify.NewHTTPClient() with a 20s timeout, redirects not followed,
+//	ReadSecret: config.SecretRef reader over the environment and secret files,
+//	Sign:       notify.Sign,
+// })
+```
 
 ### checks
 
@@ -323,6 +339,69 @@ A typical flow for an after-deploy test job:
 
 Reports for a gate in `gates.after` are accepted only while the deployment is `verifying`, so a result about the old version cannot be posted before Argo CD synced the new one; earlier posts answer `409 gate_not_ready` with `Retry-After: 5`. The checks use the configuration, not the engine, and live in `gates.Reporter`, which the API calls.
 
+### backup
+
+Asks an operator-owned webhook to back the database up before a release is pinned, and holds the deploy until the backup is done. Whatever takes the backup (a Kubernetes Job launcher, a script on a NAS, a managed database API) belongs to the operator; doorstep only sends an HTTP request, so it still never writes to the cluster ([ADR 0015](decisions/0015-migration-aware-releases.md)).
+
+```yaml
+gates:
+  before:
+    - type: checks
+    - type: backup
+      when: migration          # default; or always
+      apply_to_rollbacks: true # default false
+      timeout: 45m             # default 30m
+      webhook:
+        url_env: BLOG_BACKUP_URL   # or url, or url_file
+        secret_env: BLOG_BACKUP_SECRET  # required, or secret_file
+```
+
+> **Not active yet.** `serve` builds no gate plans and evaluates no gates until the engine (bead doorstep-ehl.4.4) lands, so a configured `backup` gate is validated at startup but no backup is requested yet. Do not rely on it until then.
+
+When it runs:
+
+- For a rollback without `apply_to_rollbacks: true` it is `skipped` with `skipped for rollback`. With it, `when` applies to the rollback row's own flag, which a [confirmed rollback across migrations](rollback.md#confirmation) sets.
+- With `when: migration` (the default) a deployment that is not [flagged as containing database migrations](rollback.md#migration-aware-releases) is `skipped` with `release is not flagged as a database migration`. With `when: always` it runs for every deploy.
+- It is [deferred](#deferred-gates): it is first called once every other `before` gate has passed or been skipped, wherever it is listed, so the backup is taken right before the pin, not while CI is still running.
+
+Protocol: the gate `POST`s the same JSON document on its first call and on every poll, at most every 15 seconds, each with a 20 second request timeout:
+
+```json
+{
+  "event": "backup.requested",
+  "gate": "backup",
+  "requested_at": "2026-11-24T12:00:00Z",
+  "deployment": {
+    "id": 44, "app": "blog", "environment": "default", "kind": "deploy",
+    "commit": {"repository": "example-user/blog", "sha": "0123..."},
+    "image": {"repository": "ghcr.io/example-user/blog", "tag": "0123...", "digest": "sha256:..."},
+    "migration": true, "migration_reason": "label db-migration on #12 (0123456)"
+  }
+}
+```
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | `application/json` |
+| `User-Agent` | `doorstep/<version>` |
+| `X-Doorstep-Event` | `backup` |
+| `Idempotency-Key` | `doorstep-backup-<deployment id>-<gate name>-<requested_at>`, the same on every poll of one backup request; a re-run after a verdict (`Reevaluate`) starts a new request with a new `requested_at` and so a new key |
+| `X-Doorstep-Signature-256` | `sha256=<hex HMAC-SHA256 of the body>`, exactly as for [notification webhooks](notifications.md); the secret is required, because the endpoint starts a database backup |
+
+The receiver may answer with an optional JSON body `{"status": "running" | "succeeded" | "failed", "message": "...", "reference": "..."}` (at most 4 KiB is read). The verdict:
+
+| Answer | Verdict |
+| --- | --- |
+| body `status: failed` (any HTTP status) | `failed` |
+| `2xx` with `status: succeeded` | `passed` |
+| `202`, or `2xx` with `status: running` | `pending`, polled again |
+| any other `2xx` | `passed` |
+| `3xx` | `failed`: redirects are not followed |
+| `408`, `425`, `429`, `5xx`, a network error or no answer within 20 seconds | `pending`, retried |
+| any other `4xx` | `failed` |
+
+A gate still `pending` when its timeout (default `30m`) is reached fails: no backup, no deploy. A receiver must either answer within 20 seconds with the final result (`200` when done) or treat the `Idempotency-Key` as the identity of one backup: start it on the first request, answer `202` (or `running`) while it runs and the final status afterwards, without starting a second backup. It must verify the signature over the raw body before acting. Because a re-run uses a new key, a receiver that caches a `failed` answer per key still lets an operator retry the gate. Evidence: `{"requested_at", "last_request_at", "requests", "status_code", "state", "reference"}`; the URL is never stored or logged. `message` and `reference` appear in the gate message, so they must not carry secrets.
+
 ## Limits
 
 - Messages are cut to 1024 bytes (on a UTF-8 boundary); NUL bytes are removed and invalid UTF-8 is replaced.
@@ -340,7 +419,7 @@ type Gate interface {
 }
 ```
 
-It must honour `ctx`. A gate type is registered once at startup with the metrics kind it reports as, whether rollbacks skip it, and a factory that builds one instance per configured gate from the typed `config.App` and `config.Gate`:
+It must honour `ctx`. A gate type is registered once at startup with the metrics kind it reports as, whether rollbacks skip it, whether it is [deferred](#deferred-gates), and a factory that builds one instance per configured gate from the typed `config.App` and `config.Gate`:
 
 ```go
 registry := gates.NewRegistry()
@@ -351,7 +430,7 @@ err := registry.Register(config.GateHealth, gates.Definition{
 plans, err := registry.Plans(catalog)
 ```
 
-`Plans` turns every app's `gates.before` and `gates.after` into a `Plan` of `Binding`s (name, type, kind, phase, timeout, skip-on-rollback and the built gate). A gate type with no registered definition, or a factory error, is a startup error naming the app, phase and gate, never a silently passing gate. All errors are reported together. `NewRegistry` returns an empty registry; `RegisterBuiltins` adds the [built-in types](#wiring).
+`Plans` turns every app's `gates.before` and `gates.after` into a `Plan` of `Binding`s (name, type, kind, phase, timeout, skip-on-rollback, deferred and the built gate). A gate type with no registered definition, or a factory error, is a startup error naming the app, phase and gate, never a silently passing gate. All errors are reported together. `NewRegistry` returns an empty registry; `RegisterBuiltins` adds the [built-in types](#wiring).
 
 ## Observers
 

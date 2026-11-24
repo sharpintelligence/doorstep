@@ -24,24 +24,26 @@ type deploymentDetail struct {
 }
 
 type deployment struct {
-	ID             core.DeploymentID  `json:"id"`
-	App            string             `json:"app"`
-	Environment    string             `json:"environment"`
-	Kind           core.Kind          `json:"kind"`
-	State          core.State         `json:"state"`
-	Trigger        trigger            `json:"trigger"`
-	Commit         commit             `json:"commit"`
-	Image          image              `json:"image"`
-	GitOps         gitops             `json:"gitops"`
-	ArgoCD         argocd             `json:"argocd"`
-	ParentID       *core.DeploymentID `json:"parent_id,omitempty"`
-	RollbackOfID   *core.DeploymentID `json:"rollback_of_id,omitempty"`
-	SupersededByID *core.DeploymentID `json:"superseded_by_id,omitempty"`
-	FailureReason  string             `json:"failure_reason,omitempty"`
-	CreatedAt      time.Time          `json:"created_at"`
-	UpdatedAt      time.Time          `json:"updated_at"`
-	StartedAt      *time.Time         `json:"started_at,omitempty"`
-	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
+	ID              core.DeploymentID  `json:"id"`
+	App             string             `json:"app"`
+	Environment     string             `json:"environment"`
+	Kind            core.Kind          `json:"kind"`
+	State           core.State         `json:"state"`
+	Trigger         trigger            `json:"trigger"`
+	Commit          commit             `json:"commit"`
+	Image           image              `json:"image"`
+	GitOps          gitops             `json:"gitops"`
+	ArgoCD          argocd             `json:"argocd"`
+	ParentID        *core.DeploymentID `json:"parent_id,omitempty"`
+	RollbackOfID    *core.DeploymentID `json:"rollback_of_id,omitempty"`
+	SupersededByID  *core.DeploymentID `json:"superseded_by_id,omitempty"`
+	FailureReason   string             `json:"failure_reason,omitempty"`
+	Migration       bool               `json:"migration,omitempty"`
+	MigrationReason string             `json:"migration_reason,omitempty"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
+	StartedAt       *time.Time         `json:"started_at,omitempty"`
+	FinishedAt      *time.Time         `json:"finished_at,omitempty"`
 }
 
 type trigger struct {
@@ -146,24 +148,26 @@ func newDeployments(ds []core.Deployment) []deployment {
 
 func newDeployment(d core.Deployment) deployment {
 	return deployment{
-		ID:             d.ID,
-		App:            d.Target.App,
-		Environment:    d.Target.Environment,
-		Kind:           d.Kind,
-		State:          d.State,
-		Trigger:        trigger{Source: d.Source, RequestedBy: d.RequestedBy},
-		Commit:         commit{Repository: d.Commit.Repository, SHA: d.Commit.SHA},
-		Image:          image{Repository: d.Image.Repository, Tag: d.Image.Tag, Digest: d.Digest, PreviousDigest: d.PreviousDigest},
-		GitOps:         gitops{Repository: d.GitOpsRepository, CommitSHA: d.PinCommitSHA},
-		ArgoCD:         argocd{Revision: d.ArgoCDRevision},
-		ParentID:       d.ParentID,
-		RollbackOfID:   d.RollbackOfID,
-		SupersededByID: d.SupersededByID,
-		FailureReason:  d.FailureReason,
-		CreatedAt:      d.CreatedAt.UTC(),
-		UpdatedAt:      d.UpdatedAt.UTC(),
-		StartedAt:      utc(d.StartedAt),
-		FinishedAt:     utc(d.FinishedAt),
+		ID:              d.ID,
+		App:             d.Target.App,
+		Environment:     d.Target.Environment,
+		Kind:            d.Kind,
+		State:           d.State,
+		Trigger:         trigger{Source: d.Source, RequestedBy: d.RequestedBy},
+		Commit:          commit{Repository: d.Commit.Repository, SHA: d.Commit.SHA},
+		Image:           image{Repository: d.Image.Repository, Tag: d.Image.Tag, Digest: d.Digest, PreviousDigest: d.PreviousDigest},
+		GitOps:          gitops{Repository: d.GitOpsRepository, CommitSHA: d.PinCommitSHA},
+		ArgoCD:          argocd{Revision: d.ArgoCDRevision},
+		ParentID:        d.ParentID,
+		RollbackOfID:    d.RollbackOfID,
+		SupersededByID:  d.SupersededByID,
+		FailureReason:   d.FailureReason,
+		Migration:       d.Migration,
+		MigrationReason: d.MigrationReason,
+		CreatedAt:       d.CreatedAt.UTC(),
+		UpdatedAt:       d.UpdatedAt.UTC(),
+		StartedAt:       utc(d.StartedAt),
+		FinishedAt:      utc(d.FinishedAt),
 	}
 }
 

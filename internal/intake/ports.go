@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/github"
 )
 
 type Queue interface {
@@ -31,4 +32,15 @@ type CheckSource interface {
 
 type Branches interface {
 	BranchHead(ctx context.Context, repository, branch string) (string, error)
+}
+
+type MigrationSource interface {
+	Range(ctx context.Context, repository, base, head string, limit int) (github.CommitRange, error)
+	Commit(ctx context.Context, repository, sha string) (github.CommitInfo, error)
+	PullRequests(ctx context.Context, repository, sha string) ([]github.CommitPullRequest, error)
+}
+
+type Baselines interface {
+	LastDeployCommit(ctx context.Context, t core.Target) (core.Commit, bool, error)
+	UnreleasedMigrations(ctx context.Context, t core.Target) ([]core.DeploymentID, error)
 }

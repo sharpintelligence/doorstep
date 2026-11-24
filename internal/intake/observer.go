@@ -22,6 +22,7 @@ const (
 type Observer interface {
 	WebhookDelivery(event string, result WebhookResult)
 	PollCycle(result PollResult)
+	MigrationDetectionFailed(app string)
 }
 
 type nopObserver struct{}
@@ -29,3 +30,5 @@ type nopObserver struct{}
 func (nopObserver) WebhookDelivery(string, WebhookResult) {}
 
 func (nopObserver) PollCycle(PollResult) {}
+
+func (nopObserver) MigrationDetectionFailed(string) {}

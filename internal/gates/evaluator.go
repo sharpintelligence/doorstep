@@ -117,37 +117,60 @@ func (e *Evaluator) evaluate(ctx context.Context, d core.Deployment, phase core.
 		return core.GateOutcome{}, fmt.Errorf("%w %s", ErrNoPlan, d.Target.App)
 	}
 	bindings := plan.Phase(phase)
-	results := make([]core.GateResult, 0, len(bindings))
-	if len(bindings) > 0 {
-		recorded, err := e.store.ListGateResults(ctx, d.ID)
-		if err != nil {
-			return core.GateOutcome{}, fmt.Errorf("evaluate %s gates of deployment %d: %w", phase, d.ID, err)
-		}
-		previous := make(map[string]core.GateResult, len(recorded))
-		for _, r := range recorded {
-			previous[r.Name] = r
-		}
-		for _, b := range bindings {
+	if len(bindings) == 0 {
+		return core.GateOutcome{Phase: phase, Status: core.AggregateGateStatus(nil), Results: []core.GateResult{}}, nil
+	}
+	recorded, err := e.store.ListGateResults(ctx, d.ID)
+	if err != nil {
+		return core.GateOutcome{}, fmt.Errorf("evaluate %s gates of deployment %d: %w", phase, d.ID, err)
+	}
+	previous := make(map[string]core.GateResult, len(recorded))
+	for _, r := range recorded {
+		previous[r.Name] = r
+	}
+	slots := make([]*core.GateResult, len(bindings))
+	settled := true
+	for _, deferred := range []bool{false, true} {
+		for i, b := range bindings {
+			if b.Deferred != deferred {
+				continue
+			}
 			if err := ctx.Err(); err != nil {
 				return core.GateOutcome{}, err
 			}
-			prev, found := previous[b.Name]
-			if found && prev.Status.Terminal() && !rerun {
-				results = append(results, prev)
-				continue
-			}
-			var prevPtr *core.GateResult
-			if found {
-				prevPtr = &prev
-			}
-			result, err := e.evaluateGate(ctx, d, b, prevPtr)
+			result, ok, err := e.settle(ctx, d, b, previous, rerun, settled)
 			if err != nil {
 				return core.GateOutcome{}, err
 			}
-			results = append(results, result)
+			if ok {
+				slots[i] = &result
+			}
+			settled = settled && ok && cleared(result.Status)
+		}
+	}
+	results := make([]core.GateResult, 0, len(bindings))
+	for _, r := range slots {
+		if r != nil {
+			results = append(results, *r)
 		}
 	}
 	return core.GateOutcome{Phase: phase, Status: core.AggregateGateStatus(results), Results: results}, nil
+}
+
+func (e *Evaluator) settle(ctx context.Context, d core.Deployment, b Binding, previous map[string]core.GateResult, rerun, settled bool) (core.GateResult, bool, error) {
+	prev, found := previous[b.Name]
+	if found && prev.Status.Terminal() && !rerun {
+		return prev, true, nil
+	}
+	if b.Deferred && !settled {
+		return prev, found, nil
+	}
+	var prevPtr *core.GateResult
+	if found {
+		prevPtr = &prev
+	}
+	result, err := e.evaluateGate(ctx, d, b, prevPtr)
+	return result, err == nil, err
 }
 
 func (e *Evaluator) evaluateGate(ctx context.Context, d core.Deployment, b Binding, previous *core.GateResult) (core.GateResult, error) {
@@ -297,6 +320,10 @@ func (e *Evaluator) callReturned(key callKey, state *callState) {
 	if e.abandoned[key]--; e.abandoned[key] <= 0 {
 		delete(e.abandoned, key)
 	}
+}
+
+func cleared(status core.GateStatus) bool {
+	return status == core.GatePassed || status == core.GateSkipped
 }
 
 func validateEvaluation(ev Evaluation) error {

@@ -71,6 +71,20 @@ doorstep_intake_poll_cycles_total{result="unknown"} 1
 `,
 		},
 		{
+			name: "migration detection failures per app",
+			calls: func(r *Recorder) {
+				r.MigrationDetectionFailed("web")
+				r.MigrationDetectionFailed("web")
+				r.MigrationDetectionFailed("api")
+			},
+			want: `
+# HELP doorstep_migration_detection_failures_total Green commits not enqueued because their migration flags could not be read, by application.
+# TYPE doorstep_migration_detection_failures_total counter
+doorstep_migration_detection_failures_total{app="api"} 1
+doorstep_migration_detection_failures_total{app="web"} 2
+`,
+		},
+		{
 			name: "rollbacks per app and reason",
 			calls: func(r *Recorder) {
 				r.Rollback("web", RollbackReasonGateFailed)

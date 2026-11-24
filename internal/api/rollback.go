@@ -12,9 +12,10 @@ import (
 const appRollbackPath = Prefix + "apps/{app}/rollback"
 
 type rollbackRequest struct {
-	ToDeploymentID *core.DeploymentID `json:"to_deployment_id"`
-	ToDigest       *string            `json:"to_digest"`
-	Reason         string             `json:"reason"`
+	ToDeploymentID           *core.DeploymentID `json:"to_deployment_id"`
+	ToDigest                 *string            `json:"to_digest"`
+	Reason                   string             `json:"reason"`
+	ConfirmMigrationRollback bool               `json:"confirm_migration_rollback"`
 }
 
 type rollbackResponse struct {
@@ -22,6 +23,13 @@ type rollbackResponse struct {
 	RolledBack deployment          `json:"rolled_back"`
 	Block      *blockResponse      `json:"block"`
 	Cancelled  []core.DeploymentID `json:"cancelled"`
+	Migrations []deployment        `json:"migrations"`
+}
+
+type migrationConfirmationResponse struct {
+	Error      errorBody    `json:"error"`
+	To         deployment   `json:"to"`
+	Migrations []deployment `json:"migrations"`
 }
 
 type rollbackInProgressResponse struct {
@@ -51,11 +59,12 @@ func (a *api) rollbackApp(w http.ResponseWriter, r *http.Request, caller Caller)
 		return
 	}
 	req := rollback.Request{
-		Target:       core.AppTarget(app),
-		ToDeployment: body.ToDeploymentID,
-		Reason:       body.Reason,
-		Actor:        caller.Actor,
-		Role:         caller.Role,
+		Target:           core.AppTarget(app),
+		ToDeployment:     body.ToDeploymentID,
+		Reason:           body.Reason,
+		ConfirmMigration: body.ConfirmMigrationRollback,
+		Actor:            caller.Actor,
+		Role:             caller.Role,
 	}
 	if body.ToDigest != nil {
 		if body.ToDeploymentID != nil {
@@ -79,6 +88,7 @@ func (a *api) rollbackApp(w http.ResponseWriter, r *http.Request, caller Caller)
 		Deployment: newDeployment(result.Rollback),
 		RolledBack: newDeployment(result.RolledBack),
 		Cancelled:  result.Cancelled,
+		Migrations: newDeployments(result.Migrations),
 	}
 	if resp.Cancelled == nil {
 		resp.Cancelled = []core.DeploymentID{}
@@ -96,6 +106,14 @@ func (a *api) rollbackError(w http.ResponseWriter, r *http.Request, err error) {
 		writeJSON(w, http.StatusConflict, rollbackInProgressResponse{
 			Error:      errorBody{Code: codeRollbackInProgress, Message: inProgress.Error()},
 			Deployment: newDeployment(inProgress.Deployment),
+		})
+		return
+	}
+	if crossing, ok := errors.AsType[*core.MigrationRollbackError](err); ok {
+		writeJSON(w, http.StatusConflict, migrationConfirmationResponse{
+			Error:      errorBody{Code: codeMigrationConfirmationRequired, Message: crossing.Error()},
+			To:         newDeployment(crossing.To),
+			Migrations: newDeployments(crossing.Migrations),
 		})
 		return
 	}
