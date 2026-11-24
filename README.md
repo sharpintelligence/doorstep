@@ -89,6 +89,7 @@ Images are signed and attested; see [Verifying an image](docs/releasing.md#verif
 Get started:
 
 - [Installing on Kubernetes](docs/install.md)
+- [MVP walkthrough](docs/mvp-walkthrough.md)
 - [Configuration](docs/configuration.md)
 - [GitHub App](docs/github-app.md)
 - [Authentication and roles](docs/authentication.md)
