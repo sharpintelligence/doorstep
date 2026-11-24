@@ -1191,12 +1191,12 @@ func TestRunServeMetrics(t *testing.T) {
 				if code != http.StatusNotFound {
 					t.Errorf("main GET /metrics = %d, want %d", code, http.StatusNotFound)
 				}
-				if code, _ := get(t, "http://"+metricsAddr+"/api/v1/locks"); code != http.StatusNotFound {
-					t.Errorf("metrics GET /api/v1/locks = %d, want %d", code, http.StatusNotFound)
+				if code, body := get(t, "http://"+metricsAddr+"/api/v1/locks"); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"unauthorized"`) {
+					t.Errorf("metrics GET /api/v1/locks = %d %q, want 401 until API authentication is wired", code, body)
 				}
 			}
-			if code, body := get(t, "http://"+mainAddr+"/api/v1/locks"); code != http.StatusUnauthorized || !strings.Contains(body, `"code":"unauthorized"`) {
-				t.Errorf("main GET /api/v1/locks = %d %q, want 401 until API authentication is wired", code, body)
+			if code, body := get(t, "http://"+mainAddr+"/api/v1/locks"); code != http.StatusNotFound || strings.Contains(body, `"code":"not_found"`) {
+				t.Errorf("main GET /api/v1/locks = %d %q, want the API unmounted", code, body)
 			}
 
 			code, body := get(t, "http://"+metricsAddr+"/metrics")

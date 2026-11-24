@@ -560,7 +560,7 @@ func TestListLocks(t *testing.T) {
 			name:       "internal error",
 			locks:      &fakeLocks{listErr: errBoom},
 			wantStatus: http.StatusInternalServerError,
-			wantBody:   `{"error":{"code":"internal","message":"internal server error"}}`,
+			wantBody:   `{"error":{"code":"internal","message":"internal error"}}`,
 		},
 	}
 	for _, tt := range tests {
