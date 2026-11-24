@@ -16,6 +16,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/api"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 )
 
 type recordedRequest struct {
@@ -446,21 +447,21 @@ type memoryLocks struct {
 	locks map[string]core.Lock
 }
 
-func (m *memoryLocks) Lock(_ context.Context, req core.LockRequest) (core.Lock, error) {
+func (m *memoryLocks) Lock(_ context.Context, req locks.Request) (core.Lock, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if held, ok := m.locks[req.Scope()]; ok {
+	if held, ok := m.locks[core.LockRequest{Target: req.Target}.Scope()]; ok {
 		return core.Lock{}, &core.LockHeldError{Lock: held}
 	}
-	l := core.Lock{Global: req.Target == nil, Kind: core.LockFreeze, Owner: req.Owner, Reason: req.Reason}
+	l := core.Lock{Global: req.Target == nil, Kind: core.LockFreeze, Owner: req.Actor.String(), Reason: req.Reason}
 	if req.Target != nil {
 		l.Target = *req.Target
 	}
-	m.locks[req.Scope()] = l
+	m.locks[core.LockRequest{Target: req.Target}.Scope()] = l
 	return l, nil
 }
 
-func (m *memoryLocks) Unlock(_ context.Context, target *core.Target, _ string) (core.Lock, error) {
+func (m *memoryLocks) Unlock(_ context.Context, target *core.Target, _ core.Actor, _ core.Role) (core.Lock, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	scope := core.LockRequest{Target: target}.Scope()

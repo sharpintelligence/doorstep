@@ -11,6 +11,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/auth"
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/deploys"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
 )
 
@@ -203,6 +204,40 @@ func rollbackError(err error) (int, string) {
 	}
 }
 
+func (h *Handler) block(w http.ResponseWriter, r *http.Request) {
+	app, ok := h.lookupApp(w, r)
+	if !ok {
+		return
+	}
+	principal, ok := h.formPrincipal(w, r)
+	if !ok {
+		return
+	}
+	values := appForm{BlockRef: r.PostFormValue("ref"), BlockReason: r.PostFormValue("reason")}
+	ref, err := core.ParseBlockRef(strings.ToLower(strings.TrimSpace(values.BlockRef)))
+	if err != nil {
+		h.renderApp(w, r, app, 0, http.StatusBadRequest, "Not blocked: name a sha256 digest or a full commit SHA.", values)
+		return
+	}
+	_, created, err := h.blocks.Block(r.Context(), rollback.BlockRequest{
+		Target: app.Target,
+		Ref:    ref,
+		Reason: values.BlockReason,
+		Actor:  principal.Actor,
+		Role:   principal.Role,
+	})
+	switch {
+	case errors.Is(err, core.ErrInvalidBlock):
+		h.renderApp(w, r, app, 0, http.StatusBadRequest, "Not blocked: "+err.Error(), values)
+	case err != nil:
+		h.internalError(w, r, err)
+	case created:
+		seeOther(w, appPath(app), "blocked")
+	default:
+		seeOther(w, appPath(app), "block_exists")
+	}
+}
+
 func (h *Handler) unblock(w http.ResponseWriter, r *http.Request) {
 	app, ok := h.lookupApp(w, r)
 	if !ok {
@@ -230,13 +265,13 @@ func (h *Handler) unblock(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func lockRequest(r *http.Request, owner string, target *core.Target) (core.LockRequest, lockForm, string) {
+func lockRequest(r *http.Request, principal auth.Principal, target *core.Target) (locks.Request, lockForm, string) {
 	form := lockForm{Reason: r.PostFormValue("reason"), ExpiresIn: strings.TrimSpace(r.PostFormValue("expires_in"))}
-	req := core.LockRequest{Target: target, Owner: owner, Reason: form.Reason}
+	req := locks.Request{Target: target, Reason: form.Reason, Actor: principal.Actor, Role: principal.Role}
 	if form.ExpiresIn != "" {
 		d, err := time.ParseDuration(form.ExpiresIn)
 		if err != nil {
-			return core.LockRequest{}, form, `Not locked: the expiry must be a duration with a unit, such as "2h" or "30m".`
+			return locks.Request{}, form, `Not locked: the expiry must be a duration with a unit, such as "2h" or "30m".`
 		}
 		req.ExpiresIn = &d
 	}
@@ -267,7 +302,7 @@ func (h *Handler) lockApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := app.Target
-	req, form, message := lockRequest(r, principal.Actor.String(), &target)
+	req, form, message := lockRequest(r, principal, &target)
 	values := appForm{LockReason: form.Reason, LockExpiresIn: form.ExpiresIn}
 	if message != "" {
 		h.renderApp(w, r, app, 0, http.StatusBadRequest, message, values)
@@ -295,7 +330,7 @@ func (h *Handler) unlockApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := app.Target
-	_, err := h.locks.Unlock(r.Context(), &target, principal.Actor.String())
+	_, err := h.locks.Unlock(r.Context(), &target, principal.Actor, principal.Role)
 	switch {
 	case err == nil:
 		seeOther(w, appPath(app), "unlocked")
@@ -311,7 +346,7 @@ func (h *Handler) lockGlobal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	req, form, message := lockRequest(r, principal.Actor.String(), nil)
+	req, form, message := lockRequest(r, principal, nil)
 	if message != "" {
 		h.renderLocks(w, r, http.StatusBadRequest, message, form)
 		return
@@ -333,7 +368,7 @@ func (h *Handler) unlockGlobal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := h.locks.Unlock(r.Context(), nil, principal.Actor.String())
+	_, err := h.locks.Unlock(r.Context(), nil, principal.Actor, principal.Role)
 	switch {
 	case err == nil:
 		seeOther(w, "/locks", "global_unlocked")

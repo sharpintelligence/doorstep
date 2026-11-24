@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 )
 
 type lockRequest struct {
@@ -80,29 +81,29 @@ func (a *api) lockApp(w http.ResponseWriter, r *http.Request, caller Caller) {
 		return
 	}
 	target := core.AppTarget(app)
-	a.lock(w, r, caller.Actor.String(), &target)
+	a.lock(w, r, caller, &target)
 }
 
 func (a *api) lockGlobal(w http.ResponseWriter, r *http.Request, caller Caller) {
-	a.lock(w, r, caller.Actor.String(), nil)
+	a.lock(w, r, caller, nil)
 }
 
 func (a *api) unlockApp(w http.ResponseWriter, r *http.Request, caller Caller) {
 	target := core.AppTarget(r.PathValue("app"))
-	a.unlock(w, r, caller.Actor.String(), &target)
+	a.unlock(w, r, caller, &target)
 }
 
 func (a *api) unlockGlobal(w http.ResponseWriter, r *http.Request, caller Caller) {
-	a.unlock(w, r, caller.Actor.String(), nil)
+	a.unlock(w, r, caller, nil)
 }
 
-func (a *api) lock(w http.ResponseWriter, r *http.Request, actor string, target *core.Target) {
+func (a *api) lock(w http.ResponseWriter, r *http.Request, caller Caller, target *core.Target) {
 	var body lockRequest
 	if reqErr := decodeJSON(w, r, &body); reqErr != nil {
 		writeError(w, reqErr.status, reqErr.code, reqErr.message)
 		return
 	}
-	req := core.LockRequest{Target: target, Owner: actor, Reason: body.Reason, ExpiresAt: body.ExpiresAt}
+	req := locks.Request{Target: target, Reason: body.Reason, ExpiresAt: body.ExpiresAt, Actor: caller.Actor, Role: caller.Role}
 	if body.ExpiresIn != nil {
 		if body.ExpiresAt != nil {
 			writeError(w, http.StatusBadRequest, codeInvalidRequest, "set at most one of expires_in and expires_at")
@@ -140,8 +141,8 @@ func (a *api) lock(w http.ResponseWriter, r *http.Request, actor string, target 
 	writeJSON(w, http.StatusCreated, toLockResponse(lock))
 }
 
-func (a *api) unlock(w http.ResponseWriter, r *http.Request, actor string, target *core.Target) {
-	_, err := a.locks.Unlock(r.Context(), target, actor)
+func (a *api) unlock(w http.ResponseWriter, r *http.Request, caller Caller, target *core.Target) {
+	_, err := a.locks.Unlock(r.Context(), target, caller.Actor, caller.Role)
 	if errors.Is(err, core.ErrNotFound) {
 		writeError(w, http.StatusNotFound, codeNotFound, core.LockRequest{Target: target}.Scope()+" is not locked")
 		return

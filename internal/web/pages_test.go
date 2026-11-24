@@ -51,6 +51,23 @@ func richFakes() *fakes {
 		Rollbacks: []core.Deployment{deployment(12, core.StateQueued)},
 	}
 	f.history.histories[7] = store.DeploymentHistory{Deployment: current}
+	f.history.histories[10] = store.DeploymentHistory{Deployment: deployment(10, core.StateFailed), Events: []core.Event{
+		{ID: 20, Type: core.EventTransition, From: core.StateSyncing, To: core.StateSyncing, Actor: "worker", Message: "attempt 1 failed; retrying (attempt 2 of 3) in 1m0s", OccurredAt: started, Data: json.RawMessage(`{
+			"stage":"syncing","failure_class":"transient","sync_reason":"degraded",
+			"retry":{"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":60000,"reason":"transient","summary":"transient: image pull failing on node pi-3"},
+			"diagnosis":{"verdict":"transient","summary":"transient: image pull failing on node pi-3","attempt":1,"findings":[{"signal":"image_pull","node":"pi-3","pods":2,"reason":"ImagePullBackOff","detail":"back-off pulling image"}],"nodes":["pi-3"],"evidence":["pi-3 pulled nothing for 9m"],"pods_inspected":true}}`)},
+		{ID: 21, Type: core.EventTransition, From: core.StateSyncing, To: core.StateSyncing, Actor: "worker", OccurredAt: started, Data: json.RawMessage(`{
+			"retry":{"attempt":2,"next_attempt":3,"max_attempts":3,"delay_ms":120000,"reason":"unknown","summary":"unknown"},
+			"diagnosis":{"verdict":"unknown","summary":"no evidence","attempt":2,"findings":[{"signal":"crash_loop","node":"pi-4","pods":1,"reason":"CrashLoopBackOff","exit_code":137,"detail":"d"}],"pods_inspected":false}}`)},
+		{ID: 22, Type: core.EventTransition, From: core.StateSyncing, To: core.StateFailed, Actor: "worker", Message: "failed while syncing after 3 attempts", OccurredAt: started, Data: json.RawMessage(`{
+			"stage":"syncing","attempts":3,"decision":"retries_exhausted","rollback_eligible":true,
+			"diagnosis":{"verdict":"version","summary":"crash loop on every node","attempt":3,"findings":[],"nodes":["pi-3","pi-4"]}}`)},
+	}}
+	f.history.histories[11] = store.DeploymentHistory{Deployment: deployment(11, core.StateSyncing), Events: []core.Event{
+		{ID: 30, Type: core.EventTransition, From: core.StateSyncing, To: core.StateSyncing, OccurredAt: started, Data: json.RawMessage(`{
+			"retry":{"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1000,"reason":"configuration","summary":"` + hostile + `"},
+			"diagnosis":{"verdict":"configuration","summary":"` + hostile + `","findings":[{"signal":"s","node":"` + hostile + `","pods":1,"reason":"r","detail":"javascript:alert(1)"}],"nodes":["` + hostile + `"],"evidence":["https://evil.example/x ` + hostile + `"]}}`)},
+	}}
 	f.queue.entries = []core.QueueEntry{
 		{Position: 1, Deployment: running, Priority: core.PriorityNormal, EnqueuedAt: started, AvailableAt: started},
 		{Position: 2, Deployment: deployment(10, core.StateQueued), Priority: core.PriorityUrgent, EnqueuedAt: started, AvailableAt: started},
@@ -117,6 +134,7 @@ func TestPagesRender(t *testing.T) {
 				`<span class="badge active">in flight</span>`,
 				"urgent",
 				`action="/apps/blog/deployments"`,
+				`action="/apps/blog/block"`,
 				`action="/apps/blog/unblock"`,
 				`name="ref" value="` + string(digestB) + `"`,
 				`action="/apps/blog/unlock"`,
@@ -131,7 +149,7 @@ func TestPagesRender(t *testing.T) {
 			path: "/apps/blog",
 			want: []string{"Older deployments"},
 			reject: []string{
-				`action="/apps/blog/deployments"`, `action="/apps/blog/rollback"`, `action="/apps/blog/unblock"`, `action="/apps/blog/lock"`, `action="/apps/blog/unlock"`,
+				`action="/apps/blog/deployments"`, `action="/apps/blog/rollback"`, `action="/apps/blog/block"`, `action="/apps/blog/unblock"`, `action="/apps/blog/lock"`, `action="/apps/blog/unlock"`,
 			},
 		},
 		{
@@ -159,7 +177,32 @@ func TestPagesRender(t *testing.T) {
 				`hx-trigger="every 5s"`,
 				"label db-migration on #4",
 			},
-			reject: []string{hostile, `href="javascript:`, ">url</a>"},
+			reject: []string{hostile, `href="javascript:`, ">url</a>", "<h2>Attempts</h2>", `class="badge active">retry`},
+		},
+		{
+			name: "failed deployment with retries shows each attempt and the final decision",
+			path: "/deployments/10",
+			want: []string{
+				"<h2>Attempts</h2>", "Attempt 1 of 3", "Attempt 2 of 3", "Attempt 3 of 3 (final)",
+				`<span class="badge active">transient</span>`, `<span class="badge muted">unknown</span>`, `<span class="badge bad">version</span>`,
+				"transient: image pull failing on node pi-3",
+				"Sync result", "degraded",
+				"Retrying as attempt 2 after 1m0s", "Retrying as attempt 3 after 2m0s",
+				"Decision: retries_exhausted", `<span class="badge bad">rollback eligible</span>`,
+				`<th scope="row">image_pull</th><td>pi-3</td><td>2</td><td>ImagePullBackOff</td><td></td><td>back-off pulling image</td>`,
+				`<td>137</td>`,
+				"<caption>Findings for attempt 1</caption>",
+				"<li><code>pi-3</code></li>", "<li>pi-3 pulled nothing for 9m</li>",
+				"Pods were not inspected",
+				`<span class="badge active">retry</span>`,
+			},
+		},
+		{
+			name:      "hostile diagnosis text is escaped and never linked",
+			path:      "/deployments/11",
+			principal: deployer,
+			want:      []string{"<h2>Attempts</h2>", "&lt;script&gt;alert(1)&lt;/script&gt;", "javascript:alert(1)"},
+			reject:    []string{hostile, `href="javascript:`, `href="https://evil.example`, "<details>"},
 		},
 		{
 			name:   "finished deployment does not poll",
@@ -258,6 +301,8 @@ func TestNoticesAreFixedMessages(t *testing.T) {
 	}{
 		{query: "?notice=deploy_queued", want: `<p class="notice" role="status">Deploy queued.</p>`},
 		{query: "?notice=" + hostile, want: ""},
+		{query: "?notice=blocked", want: `<p class="notice" role="status">Version blocked. It will not be deployed automatically until it is unblocked.</p>`},
+		{query: "?notice=block_exists", want: `<p class="notice" role="status">This version was already blocked.</p>`},
 		{query: "?notice=unknown", want: ""},
 	}
 	for _, tt := range tests {
@@ -373,7 +418,7 @@ func TestLinksWithoutCommitURL(t *testing.T) {
 
 var (
 	detailsPattern     = regexp.MustCompile(`(?s)<details\b[^>]*>.*?</details>`)
-	destructivePattern = regexp.MustCompile(`action="[^"]*/(rollback|unblock|unlock|release|revoke|cancel)"`)
+	destructivePattern = regexp.MustCompile(`action="[^"]*/(rollback|block|unblock|unlock|release|revoke|cancel)"`)
 	livePattern        = regexp.MustCompile(`(?s)<div id="live"[^>]*>.*?</div>`)
 )
 
@@ -422,6 +467,9 @@ func TestDestructiveActionsNeedASecondStep(t *testing.T) {
 			if !slices.Contains(disclosed, form) {
 				t.Errorf("%s: %s form is a single click, not inside <details>:\n%s", page.path, action[1], form)
 			}
+			if action[1] == "block" && !regexp.MustCompile(`name="reason"[^>]*\brequired\b|\brequired\b[^>]*name="reason"`).MatchString(form) {
+				t.Errorf("%s: block form without a required reason field:\n%s", page.path, form)
+			}
 			if action[1] == "rollback" {
 				rollbackForms++
 				if !strings.Contains(form, `name="reason"`) {
@@ -430,7 +478,7 @@ func TestDestructiveActionsNeedASecondStep(t *testing.T) {
 			}
 		}
 	}
-	for _, action := range []string{"rollback", "unblock", "unlock", "release", "revoke", "cancel"} {
+	for _, action := range []string{"rollback", "block", "unblock", "unlock", "release", "revoke", "cancel"} {
 		if seen[action] == 0 {
 			t.Errorf("no %s form found; the test is not looking at the pages", action)
 		}
@@ -453,7 +501,7 @@ func TestStateDependentActionsAreRefreshed(t *testing.T) {
 		{
 			name: "locked app", fakes: richFakes, path: "/apps/blog",
 			inLive:  []string{`action="/apps/blog/unlock"`, `action="/apps/blog/unblock"`, `name="to_deployment_id" value="8"`},
-			outside: []string{`action="/apps/blog/deployments"`, `id="rollback_reason"`},
+			outside: []string{`action="/apps/blog/deployments"`, `id="rollback_reason"`, `action="/apps/blog/block"`},
 		},
 		{
 			name: "unlocked app", fakes: unlockedFakes, path: "/apps/blog",

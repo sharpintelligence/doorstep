@@ -6,6 +6,7 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/auth"
 	"github.com/sharpintelligence/doorstep/internal/core"
 	"github.com/sharpintelligence/doorstep/internal/deploys"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
 	"github.com/sharpintelligence/doorstep/internal/store"
 )
@@ -23,8 +24,8 @@ type Queue interface {
 }
 
 type Locks interface {
-	Lock(ctx context.Context, req core.LockRequest) (core.Lock, error)
-	Unlock(ctx context.Context, target *core.Target, actor string) (core.Lock, error)
+	Lock(ctx context.Context, req locks.Request) (core.Lock, error)
+	Unlock(ctx context.Context, target *core.Target, actor core.Actor, role core.Role) (core.Lock, error)
 	List(ctx context.Context) ([]core.Lock, error)
 }
 
@@ -38,6 +39,7 @@ type Rollbacks interface {
 
 type Blocks interface {
 	ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error)
+	Block(ctx context.Context, req rollback.BlockRequest) (core.Block, bool, error)
 	Unblock(ctx context.Context, t core.Target, ref core.BlockRef, actor core.Actor, role core.Role) ([]core.Block, error)
 }
 

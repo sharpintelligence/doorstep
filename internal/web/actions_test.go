@@ -298,6 +298,73 @@ func TestMigrationConfirmationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBlockAction(t *testing.T) {
+	t.Parallel()
+
+	upperSHA := strings.ToUpper(shaApp)
+	forwarded := func(wantRef core.BlockRef, wantReason string) func(t *testing.T, f *fakes) {
+		return func(t *testing.T, f *fakes) {
+			t.Helper()
+			if len(f.rollbacks.blockReqs) != 1 {
+				t.Fatalf("block requests = %+v, want one", f.rollbacks.blockReqs)
+			}
+			req := f.rollbacks.blockReqs[0]
+			if req.Target != blog || req.Ref != wantRef || req.Reason != wantReason || req.Actor != alice || req.Role != core.RoleDeployer {
+				t.Errorf("block request = %+v", req)
+			}
+		}
+	}
+	notForwarded := func(t *testing.T, f *fakes) {
+		t.Helper()
+		if len(f.rollbacks.blockReqs) != 0 {
+			t.Errorf("block requests = %+v, want none", f.rollbacks.blockReqs)
+		}
+	}
+	runActions(t, []actionCase{
+		{
+			name: "digest", path: "/apps/blog/block", form: url.Values{"ref": {" " + string(digestB) + " "}, "reason": {"leaks memory"}},
+			wantStatus: http.StatusSeeOther, wantLocation: "/apps/blog?notice=blocked",
+			check: forwarded(core.BlockRef{Digest: digestB}, "leaks memory"),
+		},
+		{
+			name: "upper case commit", path: "/apps/blog/block", form: url.Values{"ref": {upperSHA}, "reason": {"bad"}},
+			wantStatus: http.StatusSeeOther, wantLocation: "/apps/blog?notice=blocked",
+			check: forwarded(core.BlockRef{CommitSHA: shaApp}, "bad"),
+		},
+		{
+			name: "already blocked", path: "/apps/blog/block", form: url.Values{"ref": {shaApp}, "reason": {"again"}},
+			setup:      func(f *fakes) { f.rollbacks.blockExists = true },
+			wantStatus: http.StatusSeeOther, wantLocation: "/apps/blog?notice=block_exists",
+			check: forwarded(core.BlockRef{CommitSHA: shaApp}, "again"),
+		},
+		{
+			name: "malformed ref keeps the values", path: "/apps/blog/block", form: url.Values{"ref": {"latest"}, "reason": {"why"}},
+			wantStatus: http.StatusBadRequest, wantBody: `value="latest"`,
+			check: notForwarded,
+		},
+		{
+			name: "malformed ref opens the disclosure", path: "/apps/blog/block", form: url.Values{"ref": {"latest"}, "reason": {"why"}},
+			wantStatus: http.StatusBadRequest, wantBody: `<details class="card" open>` + "\n<summary>Block a version of blog",
+			check: notForwarded,
+		},
+		{
+			name: "missing reason", path: "/apps/blog/block", form: url.Values{"ref": {shaApp}},
+			setup:      func(f *fakes) { f.rollbacks.blockErr = fmt.Errorf("%w: a reason is required", core.ErrInvalidBlock) },
+			wantStatus: http.StatusBadRequest, wantBody: "a reason is required",
+		},
+		{name: "unknown app", path: "/apps/nope/block", form: url.Values{"ref": {shaApp}, "reason": {"x"}}, wantStatus: http.StatusNotFound, check: notForwarded},
+		{
+			name: "service error", path: "/apps/blog/block", form: url.Values{"ref": {shaApp}, "reason": {"x"}},
+			setup:      func(f *fakes) { f.rollbacks.blockErr = errBoom },
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "viewer", path: "/apps/blog/block", form: url.Values{"ref": {shaApp}, "reason": {"x"}}, principal: &viewer,
+			wantStatus: http.StatusForbidden, check: notForwarded,
+		},
+	})
+}
+
 func TestBlockAndLockActions(t *testing.T) {
 	t.Parallel()
 
@@ -324,7 +391,7 @@ func TestBlockAndLockActions(t *testing.T) {
 			check: func(t *testing.T, f *fakes) {
 				t.Helper()
 				req := f.locks.requests[0]
-				if req.Target == nil || *req.Target != blog || req.Owner != alice.String() || req.Reason != "db work" || *req.ExpiresIn != 2*time.Hour {
+				if req.Target == nil || *req.Target != blog || req.Actor != alice || req.Role != core.RoleDeployer || req.Reason != "db work" || *req.ExpiresIn != 2*time.Hour {
 					t.Errorf("lock request = %+v", req)
 				}
 			},
@@ -358,6 +425,9 @@ func TestBlockAndLockActions(t *testing.T) {
 				t.Helper()
 				if len(f.locks.unlocks) != 1 || f.locks.unlocks[0] != "blog by user:oidc:alice" {
 					t.Errorf("unlocks = %v", f.locks.unlocks)
+				}
+				if len(f.locks.roles) != 1 || f.locks.roles[0] != core.RoleDeployer {
+					t.Errorf("unlock roles = %v, want deployer", f.locks.roles)
 				}
 			},
 		},

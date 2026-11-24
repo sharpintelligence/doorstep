@@ -2,7 +2,7 @@
 
 A freeze lock stops new deploys from starting, for one app or for every app, while someone does something that must not race with a deploy: a database migration, an incident, a holiday freeze. A lock has an owner, a reason and an optional expiry, and anyone with API access can see who holds it and why.
 
-The code lives in `internal/locks` (validation, notifications, the reminder loop), `internal/store/locks.go` (SQL) and `internal/api` (HTTP handlers); the design is recorded in [ADR 0004](decisions/0004-freeze-locks.md).
+The code lives in `internal/locks` (validation, audit rows, notifications, the reminder loop, and the `Repository` adapter over the store), `internal/store/locks.go` (SQL) and `internal/api` (HTTP handlers); the design is recorded in [ADR 0004](decisions/0004-freeze-locks.md).
 
 ## What a freeze blocks
 
@@ -59,11 +59,13 @@ Every change is a `core.LockEvent` with an action, the lock, the actor and the t
 
 Every event is also logged at info level, the default: `locked` and `unlocked` (with scope, owner, reason or actor), `lock expired` and `lock still held` (with scope, owner and reason). `serve` passes the same notifier to the service and the reminder; it turns `locked` into `lock.changed` (acquired), `unlocked` and `expired` into `lock.changed` (released) and `reminded` into `lock.reminder`, and sends a global freeze to every app's targets once ([notifications.md](notifications.md#events)).
 
+Locking and unlocking also write a `lock.acquire` or `lock.release` row to the `audit_log` ([authentication.md](authentication.md#audit-log)) in the same transaction as the change (`locks.Repository.InTx` wraps the lock change and `RecordAudit`), so a failed audit row undoes the change. The row carries the caller's actor and role; a release records who released it and, in the detail, who held the lock, why and since when. The detail also holds the scope (`app` name or `global`) and, for a lock, its expiry. Expiry and reminders have no actor, so they appear only in `lock_events`. The Audit page of the web UI filters on both actions.
+
 Independently of notifications, every change is written to the append-only `lock_events` table in the same transaction as the change itself ([database.md](database.md#lock_events)), so who locked or unlocked what, when and why survives after the lock row is gone. `Store.ListLockEvents` reads it newest first; the web UI's Locks page shows the newest 50 events.
 
 ## Web UI
 
-The [web UI](ui.md) shows live locks on the overview, on each app page and on the Locks page. A deployer can lock and unlock an app from its page (reason required, optional expiry such as `2h`), and take or release the global lock from the Locks page. The UI calls the same `locks.Service`, so owners, validation, conflicts and notifications are the same as for the API; the owner is the signed-in user's actor string.
+The [web UI](ui.md) shows live locks on the overview, on each app page and on the Locks page. A deployer can lock and unlock an app from its page (reason required, optional expiry such as `2h`), and take or release the global lock from the Locks page. The UI calls the same `locks.Service`, so owners, validation, conflicts and notifications are the same as for the API; the owner is the signed-in user's actor string, and the same `lock.acquire` and `lock.release` audit rows are written as for the API.
 
 ## API
 

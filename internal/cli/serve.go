@@ -377,7 +377,7 @@ func drainNotifications(ctx context.Context, dispatcher *notify.Dispatcher, time
 }
 
 func newLocks(st *store.Store, cfg config.Locks, notifier locks.Notifier, logger *slog.Logger) (*locks.Service, *locks.Reminder, error) {
-	service, err := locks.New(locks.Options{Repository: st, Notifier: notifier, Logger: logger})
+	service, err := locks.New(locks.Options{Repository: locks.NewRepository(st), Notifier: notifier, Logger: logger})
 	if err != nil {
 		return nil, nil, err
 	}

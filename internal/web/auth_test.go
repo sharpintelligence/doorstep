@@ -289,8 +289,38 @@ func TestRealAuthenticator(t *testing.T) {
 		if got := len(a.fakes.locks.requests); got != 2 {
 			t.Fatalf("lock requests = %d, want 2 (only the requests with a valid token)", got)
 		}
-		if owner := a.fakes.locks.requests[0].Owner; owner != "user:oidc:alice-sub" {
-			t.Errorf("lock owner = %q", owner)
+		if req := a.fakes.locks.requests[0]; req.Actor.String() != "user:oidc:alice-sub" {
+			t.Errorf("lock actor = %q", req.Actor)
+		}
+	})
+
+	t.Run("csrf on the block form", func(t *testing.T) {
+		t.Parallel()
+		a := newRealAuth(t)
+		b := a.browser(t)
+		b.signIn("/")
+		token := b.csrfToken("/apps/blog")
+		form := func(token string) url.Values {
+			return url.Values{"ref": {shaApp}, "reason": {"bad"}, "csrf_token": {token}}
+		}
+		steps := []struct {
+			name       string
+			form       url.Values
+			header     map[string]string
+			wantStatus int
+		}{
+			{name: "missing token", form: url.Values{"ref": {shaApp}, "reason": {"bad"}}, wantStatus: http.StatusForbidden},
+			{name: "wrong token", form: form("nope"), wantStatus: http.StatusForbidden},
+			{name: "cross-origin", form: form(token), header: map[string]string{"Sec-Fetch-Site": "cross-site"}, wantStatus: http.StatusForbidden},
+			{name: "valid", form: form(token), header: map[string]string{"Origin": publicURL}, wantStatus: http.StatusSeeOther},
+		}
+		for _, step := range steps {
+			if rec := b.do(http.MethodPost, "/apps/blog/block", step.form, step.header); rec.Code != step.wantStatus {
+				t.Fatalf("%s: POST = %d, want %d: %s", step.name, rec.Code, step.wantStatus, rec.Body.String())
+			}
+		}
+		if got := len(a.fakes.rollbacks.blockReqs); got != 1 {
+			t.Fatalf("block requests = %d, want 1", got)
 		}
 	})
 

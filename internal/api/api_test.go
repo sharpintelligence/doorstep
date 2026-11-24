@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/locks"
 )
 
 const goodToken = "Bearer good-token"
@@ -44,7 +45,8 @@ func (emptyActorAuth) Authenticate(*http.Request, core.Role) (Caller, error) { r
 
 type fakeLocks struct {
 	mu        sync.Mutex
-	lockReqs  []core.LockRequest
+	lockReqs  []locks.Request
+	roles     []core.Role
 	unlocks   []string
 	lockErr   error
 	unlockErr error
@@ -52,14 +54,14 @@ type fakeLocks struct {
 	listed    []core.Lock
 }
 
-func (f *fakeLocks) Lock(_ context.Context, req core.LockRequest) (core.Lock, error) {
+func (f *fakeLocks) Lock(_ context.Context, req locks.Request) (core.Lock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lockReqs = append(f.lockReqs, req)
 	if f.lockErr != nil {
 		return core.Lock{}, f.lockErr
 	}
-	l := core.Lock{Global: req.Target == nil, Kind: core.LockFreeze, Owner: req.Owner, Reason: req.Reason, CreatedAt: createdAt}
+	l := core.Lock{Global: req.Target == nil, Kind: core.LockFreeze, Owner: req.Actor.String(), Reason: req.Reason, CreatedAt: createdAt}
 	if req.Target != nil {
 		l.Target = *req.Target
 	}
@@ -73,10 +75,11 @@ func (f *fakeLocks) Lock(_ context.Context, req core.LockRequest) (core.Lock, er
 	return l, nil
 }
 
-func (f *fakeLocks) Unlock(_ context.Context, target *core.Target, actor string) (core.Lock, error) {
+func (f *fakeLocks) Unlock(_ context.Context, target *core.Target, actor core.Actor, role core.Role) (core.Lock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.unlocks = append(f.unlocks, core.LockRequest{Target: target}.Scope()+" by "+actor)
+	f.unlocks = append(f.unlocks, core.LockRequest{Target: target}.Scope()+" by "+actor.String())
+	f.roles = append(f.roles, role)
 	return core.Lock{}, f.unlockErr
 }
 
@@ -303,16 +306,16 @@ func TestLock(t *testing.T) {
 		wantStatus int
 		wantCode   string
 		wantBody   map[string]any
-		wantReq    func(t *testing.T, req core.LockRequest)
+		wantReq    func(t *testing.T, req locks.Request)
 	}{
 		{
 			name:       "app lock",
 			req:        request{method: http.MethodPost, path: "/api/v1/apps/web/lock", body: `{"reason":"database migration"}`},
 			wantStatus: http.StatusCreated,
 			wantBody:   map[string]any{"scope": "app", "app": "web", "owner": "user:alice", "reason": "database migration", "created_at": "2026-11-23T12:00:00Z", "expires_at": nil},
-			wantReq: func(t *testing.T, req core.LockRequest) {
+			wantReq: func(t *testing.T, req locks.Request) {
 				t.Helper()
-				if req.Target == nil || *req.Target != web || req.Owner != "user:alice" || req.ExpiresIn != nil || req.ExpiresAt != nil {
+				if req.Target == nil || *req.Target != web || req.Actor != alice || req.Role != core.RoleDeployer || req.ExpiresIn != nil || req.ExpiresAt != nil {
 					t.Errorf("request = %+v", req)
 				}
 			},
@@ -322,7 +325,7 @@ func TestLock(t *testing.T) {
 			req:        request{method: http.MethodPost, path: "/api/v1/lock", body: `{"reason":"holiday","expires_in":"2h"}`, contentType: "application/json; charset=utf-8"},
 			wantStatus: http.StatusCreated,
 			wantBody:   map[string]any{"scope": "global", "owner": "user:alice", "reason": "holiday", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
-			wantReq: func(t *testing.T, req core.LockRequest) {
+			wantReq: func(t *testing.T, req locks.Request) {
 				t.Helper()
 				if req.Target != nil || req.ExpiresIn == nil || *req.ExpiresIn != 2*time.Hour {
 					t.Errorf("request = %+v", req)
@@ -334,7 +337,7 @@ func TestLock(t *testing.T) {
 			req:        request{method: http.MethodPost, path: "/api/v1/apps/api/lock", body: `{"reason":"r","expires_at":"2026-11-23T16:00:00+02:00"}`},
 			wantStatus: http.StatusCreated,
 			wantBody:   map[string]any{"scope": "app", "app": "api", "owner": "user:alice", "reason": "r", "created_at": "2026-11-23T12:00:00Z", "expires_at": "2026-11-23T14:00:00Z"},
-			wantReq: func(t *testing.T, req core.LockRequest) {
+			wantReq: func(t *testing.T, req locks.Request) {
 				t.Helper()
 				if req.ExpiresAt == nil || !req.ExpiresAt.Equal(expiresAt) || req.ExpiresIn != nil {
 					t.Errorf("request = %+v", req)
@@ -583,6 +586,11 @@ func TestUnlock(t *testing.T) {
 			}
 			if strings.Join(locks.unlocks, ",") != strings.Join(tt.wantUnlocks, ",") {
 				t.Errorf("unlocks = %q, want %q", locks.unlocks, tt.wantUnlocks)
+			}
+			for _, role := range locks.roles {
+				if role != core.RoleDeployer {
+					t.Errorf("unlock role = %q, want %q", role, core.RoleDeployer)
+				}
 			}
 		})
 	}

@@ -142,5 +142,18 @@
 <button type="submit" class="danger">Roll back</button>
 </form>
 </details>
+
+<details class="card"{{if or .Content.Form.BlockRef .Content.Form.BlockReason}} open{{end}}>
+<summary>Block a version of {{$app.Name}}</summary>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/block">
+{{template "csrf" .}}
+<p class="hint">Blocking does not deploy, cancel or roll back anything. It only stops automatic deploys of that version; rollbacks are never stopped.</p>
+<label for="block_ref">Digest or full commit SHA</label>
+<input id="block_ref" name="ref" required maxlength="71" autocomplete="off" spellcheck="false" value="{{.Content.Form.BlockRef}}">
+<label for="block_reason">Reason</label>
+<input id="block_reason" name="reason" required maxlength="500" value="{{.Content.Form.BlockReason}}">
+<button type="submit" class="danger">Block version</button>
+</form>
+</details>
 {{end}}
 {{end}}
