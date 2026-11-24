@@ -36,6 +36,8 @@ Repository permissions:
 
 No organization or account permissions are needed.
 
+To decide whether a commit is green, doorstep reads, per tracked commit and with the installation token, `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?filter=latest`, `GET /repos/{owner}/{repo}/commits/{sha}/status` and, for apps without `required_checks`, `GET /repos/{owner}/{repo}/commits/{sha}/check-suites`. These need only the Checks and Commit statuses read permissions above. Results are read 100 per page; a commit with more than 1,000 check runs, statuses or suites is treated as an error rather than evaluated on a partial list.
+
 **GitHub applies one permission set to every repository an installation can reach.** The table says which repositories *need* each permission, but GitHub cannot express that: if the App can write contents in the GitOps repository, it can write contents in every repository the installation includes. Least privilege therefore comes from the repository selection:
 
 - install with **Only select repositories**, never *All repositories*;

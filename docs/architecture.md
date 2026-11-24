@@ -56,12 +56,12 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/buildinfo` | version, commit and commit time from `-ldflags -X` link-time variables, overridden by VCS revision/time and the dirty flag from `runtime/debug` when present; Go version from `runtime/debug` | built |
 | `internal/server` | HTTP lifecycle: `http.Server` with timeouts, graceful shutdown, middleware, `/healthz`, `/readyz` and readiness checks | built |
 | `internal/core` | domain types (`Deployment`, `Target`, `State`, `Event`, `ImageRef`, `Digest`, ...), the state machine and shared errors such as `ErrNotFound`; imports nothing internal | built |
-| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
+| `internal/store` | Postgres via pgx, embedded goose migrations, transactions, deployment creation, tracked commits, compare-and-set transitions with their event log, lineage, deploy history read models, queue claims with batching, leases and `LISTEN/NOTIFY` (claims honour freeze locks) and the freeze lock repository; see [database.md](database.md) | built |
 | `internal/queue` | per-app deploy queue adapter: priorities, lease length, per-app batch limit, and the `Runner` worker loop (claims, wake-ups, polling, heartbeats); see [queue.md](queue.md) | built |
 | `internal/locks` | manual freeze locks per app and global: validation, lock/unlock/list, `Blocking` for the engine, post-commit notifications through a `Notifier` port, and the expiry and reminder sweep; depends only on `core` through a `Repository` port that `*store.Store` satisfies; see [locks.md](locks.md). Per-target deployment locks are left to the engine | built |
-| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, webhook signature verification | built |
-| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, authenticates extra handlers with installation tokens | built |
-| `internal/intake` | turns GitHub webhooks, registry polls, API and CLI requests into queued deployments | planned |
+| `internal/github` | GitHub App auth (RS256 JWT, cached installation tokens), small REST client, check runs, commit statuses and check suites, webhook signature verification | built |
+| `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs, statuses and check suites, authenticates extra handlers with installation tokens | built |
+| `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; see [Merge and CI detection](#merge-and-ci-detection). The webhook handler and poller that call it, and API and CLI requests, are later beads | built |
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, committed through the GitHub API | planned |
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API | planned |
@@ -82,7 +82,7 @@ The design is ports and adapters.
 
 - `core` imports nothing from `internal/`. Every other package may import it.
 - `engine` declares the small interfaces it consumes (its ports) and depends only on `core` and those interfaces.
-- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers.
+- Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops` and `intake` use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, and later `gates` persistence and `auth`) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config`.
 - `store` imports only `core`.
 - `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers; `server` owns the listener, middleware and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port.
 - `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
@@ -181,6 +181,41 @@ Credentials come from a Docker `config.json` (the `.dockerconfigjson` key of a `
 
 `serve` loads the credentials file once at startup only to fail fast on a missing or malformed file; nothing in `serve` resolves images yet. The engine bead wires a `Resolver` into `serve` with `Credentials: registry.FileCredentials{Path: cfg.Registry.CredentialsFile}`, the same source `doorstep image resolve` uses, so rotation works at runtime.
 
+## Merge and CI detection
+
+`internal/intake` decides when a commit merged to an app's branch becomes deployable. It is driven from outside: the GitHub webhook handler and the poller (a later bead) parse payloads and call it with plain strings.
+
+```
+push to app branch ──► Service.HandlePush(Push{Repository, Branch, SHA, Source, PushedBy})
+                          │ match apps: repository case-insensitive, branch exact
+                          ▼
+                       Commits.Track      one tracked commit per app and SHA; older open commits
+                          │                of the app are superseded in the same transaction
+                          ▼
+check_run / status ──► Service.Reevaluate(repository, sha)   tracked and open commits only;
+poller             ──► Service.Pending(limit)                 untracked SHAs cost no API call
+                          │
+                          ▼
+                       CheckSource.Checks  one snapshot per repository and SHA, shared by apps
+                          │
+                          ▼
+                       Evaluate(required, snapshot) → pending | success | failure, evidence
+                          │
+                          ▼  success
+                       Commits.Promote ── Queue.Enqueue(Deployment) in one transaction
+```
+
+- **Ports.** `Commits` (track, look up, save checks, promote, list pending), `CheckSource` (one `Snapshot` of check runs, commit statuses and, when asked, check suites) and `Queue` (`Enqueue(ctx, core.Deployment)`). `GitHubChecks` implements `CheckSource` over anything with `RepoClient`, such as `*github.App`. `PostgresCommits` implements `Commits` over `*store.Store` and is built with a factory `func(tx *store.Store) Queue`, so the queue the promotion uses is bound to the promotion's transaction.
+- **States.** A tracked commit's `checks_state` is `pending`, `success` or `failure` (`core.ChecksState`). None is terminal: a failed commit can turn green after a CI re-run. A commit is final once it has a deployment (enqueued) or has been superseded; closed commits are never evaluated again and saving checks on them is a no-op.
+- **Exactly once.** `store.PromoteTrackedCommit` locks the commit's app row and the tracked row, returns without enqueueing unless the commit is `success` and still open, calls the enqueue callback with the transaction-scoped store, and links the new deployment, all in one transaction. Webhook deliveries, the poller and several replicas can evaluate the same commit concurrently; one deployment is created, and an enqueue error rolls back both the deployment and the link.
+- **Supersession.** Recording a new commit for an app supersedes every older commit of that app that is not yet enqueued. A slow CI run on an older commit therefore never deploys after a newer push. If the newest commit is red, the previous one does not deploy either; re-tracking a superseded SHA (for example after a force-push back to it) returns the superseded row, so that case needs a manual deploy. Queue supersession of deployments that already exist is a separate rule owned by the queue.
+- **Evaluation.** `Evaluate(required, snapshot)` is pure and exported so the `checks` gate can reuse it. Rules are in [configuration.md](configuration.md#required-checks). Evidence is a list of `core.Check` sorted by name and stored as `jsonb` on the tracked commit.
+- **Enqueued deployment.** `core.Deployment{Target, Kind: deploy, Source and RequestedBy from the push, Commit{Repository, SHA}, Image{ImageRepository, Tag: full SHA}}`, following the convention that images are tagged with the full commit SHA.
+- **Errors.** A commit is recorded before GitHub is asked about it; if GitHub fails, the commit stays tracked as `pending` and the wrapped error is returned (`github.ErrNotInstalled` and friends stay inspectable with `errors.Is`). Failures for one app are joined with `errors.Join` and do not block other apps. There are no retries inside `intake`: webhook redeliveries, later check events and the poller retry.
+- **Ignored input.** Pushes to repositories or branches no app follows and the all-zero SHA of a deleted branch return no results and no error. The caller strips `refs/heads/` before calling.
+- **Wiring.** Nothing constructs `intake.Service` in `serve` yet. The engine bead maps each `config.App` to an `intake.App{Target, Repository, Branch, RequiredChecks, ImageRepository}` (including the target environment) and supplies the `Queue` factory over the queue adapter; the webhook bead calls `HandlePush` and `Reevaluate`, and the poller calls `Pending` and `Reevaluate`.
+- **Not here.** `intake` applies no timeout to commits that stay pending (the `checks` gate owns the 30 minute timeout) and records no metrics yet.
+
 ## State machine and concurrency
 
 Deployment state is persisted in Postgres:
@@ -247,7 +282,7 @@ Client.Do(ctx, method, path, in, out)   JSON in/out, non-2xx → *APIError
 - `RepoClient` rejects owner and repository names that are not valid GitHub names (`ErrInvalidRepository`), so names from configuration or webhooks cannot reach other API routes. Owners may contain `_` for Enterprise Managed User accounts (`handle_shortcode`). A missing or suspended installation is `ErrNotInstalled` / `ErrInstallationSuspended` and is never cached.
 - Lookups and mints go through a small in-package single-flight group: concurrent callers for the same repository or installation share one call and its result or error, each waiting under its own context. The shared call runs detached from any one caller's cancellation and is bounded to 30 s. A `401` drops the cached token; a `404` or a suspension `403` while minting evicts the token and every lookup that pointed at that installation. Expired lookups are swept whenever a new one is stored. Nothing retries automatically; engine steps are idempotent and retried by the engine.
 - Every request, with an App JWT or an installation token, goes through a transport that only sends it when the scheme and host match the configured API URL and refuses anything else with `ErrForeignHost`, including redirects. Tokens are never exported from the package.
-- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Later beads add typed methods (contents, pull requests, statuses, checks) on top of `Client.Do`.
+- Responses are read through a 10 MiB limit, error messages from GitHub are cut to 512 bytes, and the default HTTP client times out after 30 s. Typed methods sit on top of `Client.Do`: `ListCheckRuns`, `CombinedStatus` and `ListCheckSuites` (see [Merge and CI detection](#merge-and-ci-detection)); later beads add contents, pull requests and status writes.
 - `VerifySignature` checks `X-Hub-Signature-256` webhook signatures against the raw body with a constant-time comparison.
 
 Setup, permissions and the least-privilege model are described in [github-app.md](github-app.md).
