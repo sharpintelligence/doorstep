@@ -106,7 +106,10 @@ func syncFailedAt(sha string) argocdtest.Application {
 	app := argocdtest.Synced("argocd", "blog", engineHomelabURL, sha)
 	app.Sync = "OutOfSync"
 	app.Health = "Degraded"
-	app.Operation = &argocdtest.Operation{Phase: "Failed", Message: "one or more objects failed to apply", Revision: sha}
+	app.Operation = &argocdtest.Operation{
+		Phase: "Failed", Message: "one or more synchronization tasks completed unsuccessfully", Revision: sha,
+		Resources: []argocdtest.SyncResource{{Group: "batch", Kind: "Job", Namespace: "blog", Name: "migrate", Status: "Synced", HookPhase: "Failed", Message: "job failed"}},
+	}
 	return app
 }
 
