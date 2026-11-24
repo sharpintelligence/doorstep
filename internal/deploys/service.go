@@ -133,6 +133,7 @@ func (s *Service) Deploy(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	req.Reason = reason
+	req.CommitSHA = strings.ToLower(strings.TrimSpace(req.CommitSHA))
 	if err := validateCaller(req.Actor, req.Role, core.ValidateCommitSHA(req.CommitSHA)); err != nil {
 		return Result{}, err
 	}

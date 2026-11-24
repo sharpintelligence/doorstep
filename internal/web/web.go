@@ -17,7 +17,6 @@ const (
 	historyLimit  = 25
 	auditLimit    = 50
 	lockEventsMax = 50
-	maxFormBytes  = 64 << 10
 )
 
 type App struct {

@@ -66,10 +66,8 @@
 <h2>Retries</h2>
 <ul>{{range .}}<li><a href="/deployments/{{.ID}}">#{{.ID}}</a> {{template "state" .State}} {{template "time" .CreatedAt}}</li>{{end}}</ul>
 {{end}}
-</div>
-
 {{if .Content.CanCancel}}
-<details class="card">
+<details class="card"{{if .Content.CancelReason}} open{{end}}>
 <summary>Cancel deployment #{{$d.ID}}</summary>
 <form method="post" action="/deployments/{{$d.ID}}/cancel">
 {{template "csrf" .}}
@@ -80,4 +78,5 @@
 </form>
 </details>
 {{end}}
+</div>
 {{end}}

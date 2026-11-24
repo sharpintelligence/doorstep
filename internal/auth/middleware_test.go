@@ -254,7 +254,7 @@ func TestMiddleware(t *testing.T) {
 		{name: "session post with oversized form", req: func(t *testing.T, e *env) request {
 			t.Helper()
 			raw := e.session(t, core.RoleAdmin)
-			return request{method: http.MethodPost, session: raw, form: url.Values{"pad": {strings.Repeat("x", maxFormBytes)}, CSRFField: {csrfTokenFor(raw)}}}
+			return request{method: http.MethodPost, session: raw, form: url.Values{"pad": {strings.Repeat("x", MaxFormBytes)}, CSRFField: {csrfTokenFor(raw)}}}
 		}, wantCode: http.StatusForbidden, wantErrMsg: "forbidden"},
 		{name: "session post with another session's csrf", req: func(t *testing.T, e *env) request {
 			t.Helper()
@@ -322,6 +322,49 @@ func TestMiddleware(t *testing.T) {
 				if !s.Authenticated || s.Method != string(MethodSession) || s.Role != string(tt.wantRole) || s.Actor != "user:oidc:sub" || s.CSRF == "" {
 					t.Errorf("principal = %+v, want session alice with role %s", s, tt.wantRole)
 				}
+			}
+		})
+	}
+}
+
+func TestCSRFRejectionNegotiatesHTML(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		accept   string
+		wantHTML bool
+	}{
+		{name: "browser form post", accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", wantHTML: true},
+		{name: "mixed case with parameters", accept: "Text/HTML; q=0.9", wantHTML: true},
+		{name: "json client", accept: "application/json"},
+		{name: "no accept header"},
+		{name: "anything", accept: "*/*"},
+		{name: "malformed", accept: "text/html;;;=", wantHTML: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSessionEnv(t)
+			req := request{method: http.MethodPost, session: e.session(t, core.RoleAdmin), headers: map[string]string{}}
+			if tt.accept != "" {
+				req.headers["Accept"] = tt.accept
+			}
+			rec := serve(t, e.handler, req.build(t))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+			if !tt.wantHTML {
+				assertJSONError(t, rec, http.StatusForbidden, "forbidden")
+				return
+			}
+			header := rec.Header()
+			if header.Get("Content-Type") != "text/html; charset=utf-8" || header.Get("Cache-Control") != "no-store" ||
+				header.Get("X-Content-Type-Options") != "nosniff" || !strings.Contains(header.Get("Content-Security-Policy"), "default-src 'none'") {
+				t.Errorf("headers = %v", header)
+			}
+			if body := rec.Body.String(); !strings.Contains(body, "Nothing was changed") || !strings.Contains(body, "reload the page and try again") {
+				t.Errorf("body = %q", body)
 			}
 		})
 	}

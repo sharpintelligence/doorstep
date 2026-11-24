@@ -65,7 +65,7 @@ func newDeployCommand(lookupEnv LookupEnv) *cobra.Command {
 			"  doorstep deploy blog 3f1c0d9e8b7a6f5e4d3c2b1a09f8e7d6c5b4a392 --urgent --reason \"checkout hotfix\"",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			app, sha := args[0], args[1]
+			app, sha := args[0], strings.ToLower(args[1])
 			if err := config.ValidateAppName(app); err != nil {
 				return fmt.Errorf("app name: %w", err)
 			}

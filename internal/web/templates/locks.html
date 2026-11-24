@@ -4,9 +4,32 @@
 <h2>Global lock</h2>
 {{with .Content.Global}}
 <p class="banner" role="note"><span class="badge bad">frozen</span> All apps are locked by {{template "lock" .}}.</p>
-{{if $.CanOperate}}<form method="post" action="/locks/global/release">{{template "csrf" $}}<button type="submit">Release the global lock</button></form>{{end}}
+{{if $.CanOperate}}
+<details class="card">
+<summary>Release the global lock</summary>
+<form method="post" action="/locks/global/release">
+{{template "csrf" $}}
+<p class="hint">Releasing lets queued deploys of every app that is not locked on its own run again.</p>
+<button type="submit" class="danger">Release the global lock</button>
+</form>
+</details>
+{{end}}
 {{else}}
 <p class="muted">No global lock.</p>
+{{if $.CanOperate}}
+<details class="card"{{if or $.Content.Form.Reason $.Content.Form.ExpiresIn}} open{{end}}>
+<summary>Lock all apps</summary>
+<form method="post" action="/locks/global">
+{{template "csrf" $}}
+<p class="hint">A global lock stops new deploys of every app. Rollbacks still run.</p>
+<label for="global_reason">Reason</label>
+<input id="global_reason" name="reason" required maxlength="500" value="{{$.Content.Form.Reason}}">
+<label for="global_expires_in">Expires in (optional, such as 2h)</label>
+<input id="global_expires_in" name="expires_in" maxlength="20" value="{{$.Content.Form.ExpiresIn}}">
+<button type="submit" class="danger">Lock all apps</button>
+</form>
+</details>
+{{end}}
 {{end}}
 
 <h2>App locks</h2>
@@ -22,7 +45,7 @@
 <td>{{.Reason}}</td>
 <td>{{template "time" .CreatedAt}}</td>
 <td>{{with .ExpiresAt}}{{template "time" .}}{{else}}never{{end}}</td>
-{{if $.CanOperate}}<td><form method="post" action="/apps/{{pathEscape .Target.App}}/unlock">{{template "csrf" $}}<button type="submit">Unlock</button></form></td>{{end}}
+{{if $.CanOperate}}<td><details class="row-action"><summary>Unlock</summary><form method="post" action="/apps/{{pathEscape .Target.App}}/unlock">{{template "csrf" $}}<p class="hint">Lets queued deploys of {{.Target.App}} run again.</p><button type="submit" class="danger">Unlock {{.Target.App}}</button></form></details></td>{{end}}
 </tr>
 {{end}}
 </tbody>
@@ -53,19 +76,4 @@
 <p class="muted">No lock events yet.</p>
 {{end}}
 </div>
-
-{{if and .CanOperate (not .Content.Global)}}
-<details class="card">
-<summary>Lock all apps</summary>
-<form method="post" action="/locks/global">
-{{template "csrf" .}}
-<p class="hint">A global lock stops new deploys of every app. Rollbacks still run.</p>
-<label for="global_reason">Reason</label>
-<input id="global_reason" name="reason" required maxlength="500" value="{{.Content.Form.Reason}}">
-<label for="global_expires_in">Expires in (optional, such as 2h)</label>
-<input id="global_expires_in" name="expires_in" maxlength="20" value="{{.Content.Form.ExpiresIn}}">
-<button type="submit" class="danger">Lock all apps</button>
-</form>
-</details>
-{{end}}
 {{end}}

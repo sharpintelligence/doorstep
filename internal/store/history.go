@@ -99,6 +99,31 @@ WHERE a.name = $1
 ORDER BY COALESCE(d.started_at, d.created_at) DESC, d.id DESC
 LIMIT 1`
 
+const currentDeploymentsSQL = `SELECT` + deploymentColumns + `
+FROM apps a
+CROSS JOIN LATERAL (
+    SELECT * FROM deployments c
+    WHERE c.app_id = a.id
+      AND (
+          c.state = ANY($1::text[])
+          OR c.state = 'succeeded'
+          OR (c.state IN ('failed', 'cancelled') AND c.pin_commit_sha IS NOT NULL)
+      )
+    ORDER BY COALESCE(c.started_at, c.created_at) DESC, c.id DESC
+    LIMIT 1
+) d
+ORDER BY a.name, a.environment`
+
+const latestDeploymentsSQL = `SELECT` + deploymentColumns + `
+FROM apps a
+CROSS JOIN LATERAL (
+    SELECT * FROM deployments l
+    WHERE l.app_id = a.id
+    ORDER BY l.id DESC
+    LIMIT 1
+) d
+ORDER BY a.name, a.environment`
+
 func (f DeploymentFilter) validate() error {
 	var errs []error
 	for _, s := range f.States {
@@ -266,6 +291,22 @@ func (s *Store) CurrentDeployment(ctx context.Context, t core.Target) (core.Depl
 		return core.Deployment{}, fmt.Errorf("current deployment of %s: %w", t, err)
 	}
 	return d, nil
+}
+
+func (s *Store) CurrentDeployments(ctx context.Context) ([]core.Deployment, error) {
+	items, err := s.queryDeployments(ctx, currentDeploymentsSQL, core.ActiveStates())
+	if err != nil {
+		return nil, fmt.Errorf("current deployments: %w", err)
+	}
+	return items, nil
+}
+
+func (s *Store) LatestDeployments(ctx context.Context) ([]core.Deployment, error) {
+	items, err := s.queryDeployments(ctx, latestDeploymentsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("latest deployments: %w", err)
+	}
+	return items, nil
 }
 
 func (s *Store) TimeInState(ctx context.Context, id core.DeploymentID, state core.State) (time.Duration, error) {

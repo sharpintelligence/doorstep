@@ -74,9 +74,9 @@ SELECT` + deploymentColumns + `,
 FROM queue_entries q
 JOIN deployments d ON d.id = q.deployment_id
 JOIN apps a ON a.id = q.app_id
-WHERE a.name = $1
+WHERE ($1::text = '' OR a.name = $1)
   AND d.state = ANY($2::text[])
-ORDER BY a.environment,
+ORDER BY a.name, a.environment,
     (d.state <> 'queued' OR COALESCE(q.lease_expires_at > now(), false)) DESC,
     q.priority DESC,
     q.deployment_id`
@@ -275,10 +275,10 @@ func (s *Store) QueueEntries(ctx context.Context, app string) ([]core.QueueEntry
 	if err != nil {
 		return nil, fmt.Errorf("list queue of %s: %w", app, err)
 	}
-	position, environment := 0, ""
+	position, target := 0, core.Target{}
 	for i := range entries {
-		if entries[i].Deployment.Target.Environment != environment {
-			position, environment = 0, entries[i].Deployment.Target.Environment
+		if entries[i].Deployment.Target != target {
+			position, target = 0, entries[i].Deployment.Target
 		}
 		position++
 		entries[i].Position = position

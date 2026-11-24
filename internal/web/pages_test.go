@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,5 +368,154 @@ func TestLinksWithoutCommitURL(t *testing.T) {
 	rec := serve(t, newMux(t, opts), call{path: "/deployments/9", principal: &viewer})
 	if html := rec.Body.String(); strings.Contains(html, "github.example") || !strings.Contains(html, "<code>"+shortSHA(shaApp)+"</code>") {
 		t.Fatalf("commit links rendered without a commit URL:\n%s", html)
+	}
+}
+
+var (
+	detailsPattern     = regexp.MustCompile(`(?s)<details\b[^>]*>.*?</details>`)
+	destructivePattern = regexp.MustCompile(`action="[^"]*/(rollback|unblock|unlock|release|revoke|cancel)"`)
+	livePattern        = regexp.MustCompile(`(?s)<div id="live"[^>]*>.*?</div>`)
+)
+
+func pageAs(t *testing.T, f *fakes, path string, principal auth.Principal) string {
+	t.Helper()
+	rec := serve(t, newMux(t, f.options(io.Discard)), call{path: path, principal: &principal})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d:\n%s", path, rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+func unlockedFakes() *fakes {
+	f := richFakes()
+	f.locks.locks = nil
+	return f
+}
+
+func TestDestructiveActionsNeedASecondStep(t *testing.T) {
+	t.Parallel()
+
+	pages := []struct {
+		fakes func() *fakes
+		path  string
+	}{
+		{richFakes, "/apps/blog"},
+		{unlockedFakes, "/apps/blog"},
+		{richFakes, "/deployments/9"},
+		{richFakes, "/locks"},
+		{richFakes, "/tokens"},
+	}
+	seen := map[string]int{}
+	rollbackForms := 0
+	for _, page := range pages {
+		html := pageAs(t, page.fakes(), page.path, admin)
+		var disclosed []string
+		for _, d := range detailsPattern.FindAllString(html, -1) {
+			disclosed = append(disclosed, formPattern.FindAllString(d, -1)...)
+		}
+		for _, form := range formPattern.FindAllString(html, -1) {
+			action := destructivePattern.FindStringSubmatch(form)
+			if action == nil {
+				continue
+			}
+			seen[action[1]]++
+			if !slices.Contains(disclosed, form) {
+				t.Errorf("%s: %s form is a single click, not inside <details>:\n%s", page.path, action[1], form)
+			}
+			if action[1] == "rollback" {
+				rollbackForms++
+				if !strings.Contains(form, `name="reason"`) {
+					t.Errorf("%s: rollback form without a reason field:\n%s", page.path, form)
+				}
+			}
+		}
+	}
+	for _, action := range []string{"rollback", "unblock", "unlock", "release", "revoke", "cancel"} {
+		if seen[action] == 0 {
+			t.Errorf("no %s form found; the test is not looking at the pages", action)
+		}
+	}
+	if rollbackForms < 3 {
+		t.Errorf("found %d rollback forms, want the app form and one per successful deployment", rollbackForms)
+	}
+}
+
+func TestStateDependentActionsAreRefreshed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fakes   func() *fakes
+		path    string
+		inLive  []string
+		outside []string
+	}{
+		{
+			name: "locked app", fakes: richFakes, path: "/apps/blog",
+			inLive:  []string{`action="/apps/blog/unlock"`, `action="/apps/blog/unblock"`, `name="to_deployment_id" value="8"`},
+			outside: []string{`action="/apps/blog/deployments"`, `id="rollback_reason"`},
+		},
+		{
+			name: "unlocked app", fakes: unlockedFakes, path: "/apps/blog",
+			inLive: []string{`action="/apps/blog/lock"`},
+		},
+		{
+			name: "running deployment", fakes: richFakes, path: "/deployments/9",
+			inLive: []string{`action="/deployments/9/cancel"`},
+		},
+		{
+			name: "global lock held", fakes: richFakes, path: "/locks",
+			inLive: []string{`action="/locks/global/release"`, `action="/apps/blog/unlock"`},
+		},
+		{
+			name: "no global lock", fakes: unlockedFakes, path: "/locks",
+			inLive: []string{`action="/locks/global"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			html := pageAs(t, tt.fakes(), tt.path, deployer)
+			live := livePattern.FindString(html)
+			for _, want := range tt.inLive {
+				if !strings.Contains(live, want) {
+					t.Errorf("%s is not in the refreshed region", want)
+				}
+			}
+			for _, want := range tt.outside {
+				if !strings.Contains(html, want) || strings.Contains(live, want) {
+					t.Errorf("%s should be on the page but outside the refreshed region", want)
+				}
+			}
+		})
+	}
+}
+
+func TestOverviewQueriesDoNotGrowWithApps(t *testing.T) {
+	t.Parallel()
+
+	f := richFakes()
+	opts := f.options(io.Discard)
+	for _, name := range []string{"shop", "wiki", "mail"} {
+		opts.Apps = append(opts.Apps, App{Name: name, Target: core.AppTarget(name), Repository: "acme/" + name, Branch: "main"})
+	}
+	rec := serve(t, newMux(t, opts), call{path: "/", principal: &viewer})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !slices.Equal(f.queue.apps, []string{""}) {
+		t.Errorf("queue reads = %q, want one read of every app", f.queue.apps)
+	}
+	if f.history.bulk != 2 || len(f.history.filters) != 0 {
+		t.Errorf("history reads = %d bulk and %d per app, want 2 bulk and none per app", f.history.bulk, len(f.history.filters))
+	}
+	html := rec.Body.String()
+	for _, name := range []string{"shop", "wiki", "mail"} {
+		if !strings.Contains(html, `<a href="/apps/`+name+`">`+name+`</a>`) {
+			t.Errorf("overview does not list %s", name)
+		}
+	}
+	if strings.Count(html, "0 waiting") != 3 || !strings.Contains(html, "1 waiting, 1 in flight") {
+		t.Errorf("queue counts are not per app:\n%s", html)
 	}
 }

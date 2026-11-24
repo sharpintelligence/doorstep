@@ -55,7 +55,7 @@ Queues a deploy of one commit of the app.
 
 | Field | Meaning |
 | --- | --- |
-| `commit_sha` | required: the full 40 character lowercase SHA of a commit reachable from the branch the app follows (`source.branch` of `source.repo`). doorstep asks GitHub, so a commit only on another branch, a fork or an open pull request is refused with `409 commit_not_on_branch`: merging stays the approval ([ADR 0001](decisions/0001-go-and-core-design.md)) |
+| `commit_sha` | required: the full 40 character hex SHA of a commit (either case; doorstep stores it lowercase) reachable from the branch the app follows (`source.branch` of `source.repo`). doorstep asks GitHub, so a commit only on another branch, a fork or an open pull request is refused with `409 commit_not_on_branch`: merging stays the approval ([ADR 0001](decisions/0001-go-and-core-design.md)) |
 | `urgent` | queue at urgent priority, ahead of normal deploys ([queue.md](queue.md#priorities)) |
 | `reason` | optional, recorded in the audit row; whitespace is collapsed and at most 500 characters are accepted |
 

@@ -297,6 +297,23 @@ td button {
   margin-top: 0;
 }
 
+details.row-action summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+details.row-action[open] {
+  min-width: 16rem;
+}
+
+details.row-action form {
+  margin-top: 0.25rem;
+}
+
+details.row-action button {
+  margin-top: 0.5rem;
+}
+
 button.danger {
   border-color: var(--bad-fg);
   color: var(--bad-fg);

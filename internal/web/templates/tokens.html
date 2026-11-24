@@ -13,7 +13,7 @@
 <td>{{.CreatedBy}}, {{template "time" .CreatedAt}}</td>
 <td>{{with .ExpiresAt}}{{template "time" .}}{{else}}never{{end}}</td>
 <td>{{with .LastUsedAt}}{{template "time" .}}{{else}}never{{end}}</td>
-<td>{{if not .RevokedAt}}<form method="post" action="/tokens/{{pathEscape .Name}}/revoke">{{template "csrf" $}}<button type="submit" class="danger">Revoke</button></form>{{end}}</td>
+<td>{{if not .RevokedAt}}<details class="row-action"><summary>Revoke</summary><form method="post" action="/tokens/{{pathEscape .Name}}/revoke">{{template "csrf" $}}<p class="hint">Anything that uses {{.Name}} stops working at once. A revoked token cannot be restored.</p><button type="submit" class="danger">Revoke {{.Name}}</button></form></details>{{end}}</td>
 </tr>
 {{end}}
 </tbody>

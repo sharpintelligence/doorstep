@@ -41,7 +41,8 @@ The actions call the same services as the API, so validation, conflicts and audi
 
 - **Deploy** takes a full commit SHA that must be on the branch the app follows, an optional reason and an Urgent box ([api.md](api.md#manual-deploys-and-cancellation)). A deploy of a commit that is already queued or running opens that deployment.
 - **Cancel** stops a deployment that has not finished, with an optional reason. When the deployment already pinned its version, the form warns that the version stays pinned in git until a rollback or a newer deploy replaces it.
-- **Roll back** queues a rollback to the previous good version; "Roll back to this" on a successful deployment in the history picks that one. When the rollback would cross a release flagged as containing database migrations, nothing is changed and a confirmation page lists the target and every crossed migration deployment with its reason; confirming re-posts the same request with `confirm_migration_rollback=1` ([rollback.md](rollback.md#confirmation)).
+- **Roll back** queues a rollback to the previous good version; "Roll back to this" on a successful deployment in the history picks that one. It opens a small form that names the commit and digest it re-pins and takes an optional reason, so a single click never queues a rollback. When the rollback would cross a release flagged as containing database migrations, nothing is changed and a confirmation page lists the target and every crossed migration deployment with its reason; confirming re-posts the same request with `confirm_migration_rollback=1` ([rollback.md](rollback.md#confirmation)).
+- **Unblock**, **Unlock**, **Release the global lock** and **Revoke** open a disclosure that says what the action does, and act only on its confirm button.
 - **Lock** needs a reason and takes an optional expiry such as `2h` ([locks.md](locks.md#web-ui)). The owner is the signed-in user.
 - **Tokens**: a new token is shown once, in the response to the form, with `Cache-Control: no-store`; it is never put in a URL or cookie. Token audit rows carry `origin.via: ui`.
 
@@ -49,11 +50,13 @@ A successful action answers `303 See Other` to the page that shows the result, w
 
 ## Live refresh
 
-Pages that change while you watch (the overview, app pages, a running deployment and the locks page) wrap their changing part in `<div id="live">`, which htmx fetches again every 5 seconds from the same URL and swaps in place (`hx-select="#live"`, `hx-swap="outerHTML"`). There are no fragment endpoints: a poll renders the whole page and htmx keeps only that region, so a poll and a reload can never disagree. A deployment page stops polling once the deployment has finished. Forms with text fields sit outside the refreshed region, so typing is never interrupted.
+Pages that change while you watch (the overview, app pages, a running deployment and the locks page) wrap their changing part in `<div id="live">`, which htmx fetches again every 5 seconds from the same URL and swaps in place (`hx-select="#live"`, `hx-swap="outerHTML"`). There are no fragment endpoints: a poll renders the whole page and htmx keeps only that region, so a poll and a reload can never disagree. A deployment page stops polling once the deployment has finished.
+
+Actions that depend on the state shown sit inside the refreshed region, so they never go stale: the lock or unlock panel and the per-row unblock and "Roll back to this" disclosures on an app page, the cancel form of a deployment (which disappears with the last poll once the deployment finishes), and the global lock or release form and per-app unlocks on the locks page. While you use the region, `app.js` skips the poll: as long as a `<details>` in it is open, a field in it has focus, or a text field in it holds text. Rows therefore cannot move under the cursor while a confirm button is showing, and typing is never interrupted. The deploy form and the app-wide rollback form do not depend on the state, so they sit below the region.
 
 When a session expires, a poll answers `401` with an `HX-Redirect` header to the sign-in page (with the current page as `return_to`), and `app.js` reloads the page on any other `401`. Polls are logged at `debug` rather than `info` ([configuration.md](configuration.md#doorstep-serve)).
 
-Everything works without JavaScript: forms post and redirect, destructive actions sit in `<details>` disclosures with a reason field instead of `confirm()` dialogs, and only the live refresh and local time tooltips are lost.
+Everything works without JavaScript: forms post and redirect, destructive actions sit in `<details>` disclosures (with a reason field where the action records one: rollback and cancel) instead of `confirm()` dialogs, and only the live refresh and local time tooltips are lost. A test checks that every rollback, unblock, unlock, release, revoke and cancel form is inside a disclosure and that every rollback form has a reason field.
 
 ## Accessibility
 
@@ -65,7 +68,8 @@ Times are rendered as `<time datetime="...">` in UTC with a relative label ("5 m
 - htmx is configured with a `htmx-config` meta tag: `allowEval` and `allowScriptTags` off, `selfRequestsOnly` on, `includeIndicatorStyles` off (no injected styles) and `historyCacheSize` 0 (no page snapshots in local storage).
 - `html/template` escapes everything. Gate messages, evidence, commit data, lock reasons and audit details come from outside doorstep and are shown as text. Evidence is pretty-printed in a `<pre>`; only its `logs_url` and `url` keys become links, and only when they are absolute `http` or `https` URLs without user information (`rel="noopener noreferrer"`).
 - CSRF protection is the authenticator's ([authentication.md](authentication.md#csrf-protection)): every form carries the session's `csrf_token`, the page body carries it for htmx as `hx-headers`, and cross-origin posts are refused. A test checks that every rendered `POST` form has the token, and tests drive the real authenticator through sign-in to prove missing, wrong and cross-origin tokens are refused.
-- Form bodies are limited to 64 KiB.
+- Form bodies are limited to 1 MiB (`auth.MaxFormBytes`). The authenticator reads a signed-in browser's form with that limit when it checks the CSRF token, and the UI applies the same limit to any request the authenticator did not read.
+- A post whose CSRF token is stale, for example from a tab opened before signing in again elsewhere, gets an HTML `403` page saying nothing was changed and to reload and retry, not the API's JSON error ([authentication.md](authentication.md#csrf-protection)).
 
 ## Static files and vendored htmx
 
@@ -83,7 +87,7 @@ To update it:
 
 ## Limitations
 
-- Every poll renders the whole page, with a few queries per app on the overview. That is fine for a homelab's handful of apps and viewers; it is not built for hundreds of apps.
+- Every poll renders the whole page. The overview reads locks, current and latest deployments and the queue in four queries whatever the number of apps, and an app page in five; the rendered page still grows with the catalog. That is fine for a homelab's apps and viewers; it is not built for hundreds of apps.
 - One environment per app, like the rest of doorstep; there is no environment switcher.
 - There is no link into the Argo CD UI and no log streaming; gate evidence links (`logs_url`, `url`) lead to external logs.
 - Blocks are created by rollbacks or with `doorstep block`; the UI only removes them.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -17,7 +18,7 @@ import (
 const (
 	CSRFHeader       = "X-CSRF-Token"
 	CSRFField        = "csrf_token"
-	maxFormBytes     = 1 << 20
+	MaxFormBytes     = 1 << 20
 	maxReturnPathLen = 2048
 )
 
@@ -94,7 +95,7 @@ func (a *Authenticator) serveSession(w http.ResponseWriter, r *http.Request, nex
 			a.logger.WarnContext(ctx, "request rejected",
 				slog.String("method", r.Method), slog.String("path", r.URL.Path),
 				slog.String("actor", p.Actor.String()), slog.String("reason", err.Error()))
-			writeJSONError(w, http.StatusForbidden, "forbidden")
+			writeCSRFRejected(w, r)
 			return
 		}
 	}
@@ -107,11 +108,11 @@ func (a *Authenticator) checkCSRF(w http.ResponseWriter, r *http.Request, want s
 	}
 	got := r.Header.Get(CSRFHeader)
 	if got == "" {
-		r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, MaxFormBytes)
 		mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		var err error
 		if mediaType == "multipart/form-data" {
-			err = r.ParseMultipartForm(maxFormBytes)
+			err = r.ParseMultipartForm(MaxFormBytes)
 		} else {
 			err = r.ParseForm()
 		}
@@ -191,6 +192,48 @@ func SafeReturnPath(raw string) string {
 		return "/"
 	}
 	return raw
+}
+
+const csrfRejectedPage = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Form expired · doorstep</title>
+</head>
+<body>
+<main>
+<h1>This form has expired</h1>
+<p>Nothing was changed. The page you sent it from is out of date, for example because you signed in again in another tab.</p>
+<p>Go back, reload the page and try again.</p>
+<p><a href="/">Back to doorstep</a></p>
+</main>
+</body>
+</html>
+`
+
+func acceptsHTML(r *http.Request) bool {
+	for part := range strings.SplitSeq(r.Header.Get("Accept"), ",") {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err == nil && mediaType == "text/html" {
+			return true
+		}
+	}
+	return false
+}
+
+func writeCSRFRejected(w http.ResponseWriter, r *http.Request) {
+	if !acceptsHTML(r) {
+		writeJSONError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	header := w.Header()
+	header.Set("Content-Type", "text/html; charset=utf-8")
+	header.Set("Cache-Control", "no-store")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, csrfRejectedPage)
 }
 
 func writeUnauthenticated(w http.ResponseWriter) {

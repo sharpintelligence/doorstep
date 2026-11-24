@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	"github.com/sharpintelligence/doorstep/internal/core"
-	"github.com/sharpintelligence/doorstep/internal/store"
 )
 
 type appSummary struct {
@@ -57,53 +56,60 @@ func (h *Handler) current(ctx context.Context, t core.Target) (*core.Deployment,
 }
 
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	locks, err := h.readLocks(ctx)
+	view, err := h.loadOverview(r.Context())
 	if err != nil {
 		h.internalError(w, r, err)
 		return
-	}
-	view := overviewView{GlobalLock: locks.global}
-	for _, app := range h.apps {
-		summary, err := h.summarize(ctx, app)
-		if err != nil {
-			h.internalError(w, r, err)
-			return
-		}
-		summary.Lock = locks.apps[app.Name]
-		view.Apps = append(view.Apps, summary)
 	}
 	p := h.newPage(r, "Apps", "apps", view)
 	p.Live = "/"
 	h.render(w, r, http.StatusOK, "overview", p)
 }
 
-func (h *Handler) summarize(ctx context.Context, app App) (appSummary, error) {
-	s := appSummary{App: app}
-	var err error
-	if s.Current, err = h.current(ctx, app.Target); err != nil {
-		return appSummary{}, err
+func byTarget(deployments []core.Deployment) map[core.Target]*core.Deployment {
+	out := make(map[core.Target]*core.Deployment, len(deployments))
+	for i := range deployments {
+		out[deployments[i].Target] = &deployments[i]
 	}
-	page, err := h.history.ListDeployments(ctx, store.DeploymentFilter{App: app.Target.App, Environment: app.Target.Environment, Limit: 1})
+	return out
+}
+
+func (h *Handler) loadOverview(ctx context.Context) (overviewView, error) {
+	locks, err := h.readLocks(ctx)
 	if err != nil {
-		return appSummary{}, fmt.Errorf("latest deployment of %s: %w", app.Target, err)
+		return overviewView{}, err
 	}
-	if len(page.Items) > 0 {
-		s.Latest = &page.Items[0]
-	}
-	entries, err := h.queue.Entries(ctx, app.Name)
+	current, err := h.history.CurrentDeployments(ctx)
 	if err != nil {
-		return appSummary{}, fmt.Errorf("queue of %s: %w", app.Name, err)
+		return overviewView{}, fmt.Errorf("current deployments: %w", err)
 	}
+	latest, err := h.history.LatestDeployments(ctx)
+	if err != nil {
+		return overviewView{}, fmt.Errorf("latest deployments: %w", err)
+	}
+	entries, err := h.queue.Entries(ctx, "")
+	if err != nil {
+		return overviewView{}, fmt.Errorf("queue: %w", err)
+	}
+	currentByTarget, latestByTarget := byTarget(current), byTarget(latest)
+	waiting, inFlight := map[core.Target]int{}, map[core.Target]int{}
 	for _, e := range entries {
-		if e.Deployment.Target != app.Target {
-			continue
-		}
 		if e.InFlight() {
-			s.InFlight++
+			inFlight[e.Deployment.Target]++
 		} else {
-			s.QueueDepth++
+			waiting[e.Deployment.Target]++
 		}
 	}
-	return s, nil
+	view := overviewView{GlobalLock: locks.global, Apps: make([]appSummary, 0, len(h.apps))}
+	for _, app := range h.apps {
+		view.Apps = append(view.Apps, appSummary{
+			App:        app,
+			Current:    currentByTarget[app.Target],
+			Latest:     latestByTarget[app.Target],
+			QueueDepth: waiting[app.Target],
+			InFlight:   inFlight[app.Target],
+			Lock:       locks.apps[app.Name],
+		})
+	}
+	return view, nil
 }

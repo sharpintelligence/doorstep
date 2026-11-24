@@ -12,7 +12,7 @@ doorstep rollback blog --to 41 --reason "checkout errors"
 doorstep rollback blog --to 41 --confirm-migration-rollback
 ```
 
-The [web UI](ui.md) offers the same request: the app page has a Roll back form for the previous good version and a "Roll back to this" button on every successful deployment in the history.
+The [web UI](ui.md) offers the same request: the app page has a Roll back form for the previous good version and a "Roll back to this" disclosure on every successful deployment in the history, which names the commit and digest it re-pins and takes a reason before the rollback is queued.
 
 One request does all of the following in one Postgres transaction, under the app's row lock (the lock intake and the queue use for the same app), so it either happens completely or not at all:
 

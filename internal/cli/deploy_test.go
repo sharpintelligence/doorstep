@@ -38,6 +38,14 @@ func TestDeployCommand(t *testing.T) {
 			wantStdout: "deployment 42 queued for blog: commit 3f1c0d9e8b7a (urgent); flagged as a database migration: trailer Doorstep-Migration in 3f1c0d9\n",
 		},
 		{
+			name:       "uppercase sha is sent lowercase",
+			args:       []string{"deploy", "blog", strings.ToUpper(deploySHA)},
+			status:     http.StatusCreated,
+			body:       `{"deployment":{"id":42,"app":"blog","state":"queued","commit":{"sha":"` + deploySHA + `"}},"created":true}`,
+			wantBody:   `{"commit_sha":"` + deploySHA + `"}`,
+			wantStdout: "deployment 42 queued for blog: commit 3f1c0d9e8b7a\n",
+		},
+		{
 			name:       "already running",
 			args:       []string{"deploy", "blog", deploySHA},
 			status:     http.StatusOK,

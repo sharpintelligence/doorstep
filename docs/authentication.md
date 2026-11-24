@@ -174,7 +174,7 @@ Requests authenticated by the session cookie with an unsafe method (anything but
 1. The Fetch Metadata and `Origin` check of Go's `http.CrossOriginProtection`, with the public URL's origin trusted. Cross-origin browser requests are rejected.
 2. A per-session CSRF token, sent in the `X-CSRF-Token` header or as the `csrf_token` form field. It is derived from the session token with HMAC-SHA256, so it needs no storage and changes with every session.
 
-A request that fails either check gets `403 {"error":"forbidden"}`. Requests with a bearer token are exempt, since browsers never attach one by themselves.
+A request that fails either check gets `403 {"error":"forbidden"}`, unless its `Accept` header lists `text/html` (a browser form post): then it gets a short HTML `403` page saying that nothing was changed and that the page should be reloaded, since the usual cause is a tab whose form token predates signing in again. The form is read with a 1 MiB limit (`auth.MaxFormBytes`); a larger body fails the check. Requests with a bearer token are exempt, since browsers never attach one by themselves.
 
 UI authors get the token for the current request from `auth.CSRFToken(r.Context())`:
 

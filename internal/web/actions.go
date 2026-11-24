@@ -23,7 +23,7 @@ type confirmMigrationView struct {
 }
 
 func (h *Handler) formPrincipal(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, auth.MaxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
 			h.renderError(w, r, http.StatusRequestEntityTooLarge, "Form too large", "The form was larger than doorstep accepts.")
@@ -57,7 +57,7 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := appForm{
-		CommitSHA:    strings.ToLower(strings.TrimSpace(r.PostFormValue("commit_sha"))),
+		CommitSHA:    strings.TrimSpace(r.PostFormValue("commit_sha")),
 		Urgent:       r.PostFormValue("urgent") != "",
 		DeployReason: r.PostFormValue("reason"),
 	}

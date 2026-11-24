@@ -14,6 +14,8 @@ type History interface {
 	ListDeployments(ctx context.Context, f store.DeploymentFilter) (store.DeploymentPage, error)
 	GetDeploymentHistory(ctx context.Context, id core.DeploymentID) (store.DeploymentHistory, error)
 	CurrentDeployment(ctx context.Context, t core.Target) (core.Deployment, error)
+	CurrentDeployments(ctx context.Context) ([]core.Deployment, error)
+	LatestDeployments(ctx context.Context) ([]core.Deployment, error)
 }
 
 type Queue interface {

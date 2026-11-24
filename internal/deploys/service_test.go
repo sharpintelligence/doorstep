@@ -15,6 +15,7 @@ var (
 	alice   = core.Actor{Kind: core.ActorUser, ID: "oidc:alice", Name: "alice"}
 	sha1    = strings.Repeat("1", 40)
 	sha2    = strings.Repeat("2", 40)
+	shaHex  = strings.Repeat("ab", 20)
 	unknown = strings.Repeat("e", 40)
 	blogApp = deploys.App{Target: blog, Repository: "acme/blog", Branch: "main", ImageRepository: "ghcr.io/acme/blog"}
 )
@@ -27,7 +28,7 @@ type harness struct {
 
 func newHarness(t *testing.T, migrations fakeMigrations) *harness {
 	t.Helper()
-	h := &harness{repo: newFakeRepo(), commits: &fakeCommits{onBranch: map[string]bool{sha1: true, sha2: false}}}
+	h := &harness{repo: newFakeRepo(), commits: &fakeCommits{onBranch: map[string]bool{sha1: true, sha2: false, shaHex: true}}}
 	svc, err := deploys.New(deploys.Options{Repository: h.repo, Apps: []deploys.App{blogApp}, Commits: h.commits, Migrations: migrations})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -118,6 +119,14 @@ func TestDeploy(t *testing.T) {
 			wantChecked:  true,
 		},
 		{
+			name:         "normalises an uppercase sha with surrounding space",
+			req:          deploys.Request{Target: blog, CommitSHA: " " + strings.ToUpper(shaHex) + "\n", Actor: alice, Role: core.RoleDeployer},
+			wantCreated:  true,
+			wantPriority: core.PriorityNormal,
+			wantDetail:   map[string]any{"commit": shaHex, "urgent": false, "created": true},
+			wantChecked:  true,
+		},
+		{
 			name: "an active deploy of the commit is returned and raised",
 			req:  deploys.Request{Target: blog, CommitSHA: sha1, Urgent: true, Actor: alice, Role: core.RoleDeployer},
 			setup: func(h *harness) {
@@ -132,7 +141,7 @@ func TestDeploy(t *testing.T) {
 		},
 		{name: "unknown app", req: deploys.Request{Target: core.AppTarget("shop"), CommitSHA: sha1, Actor: alice}, wantErr: deploys.ErrUnknownApp},
 		{name: "short sha", req: deploys.Request{Target: blog, CommitSHA: "abc123", Actor: alice}, wantErr: deploys.ErrInvalidRequest},
-		{name: "uppercase sha", req: deploys.Request{Target: blog, CommitSHA: strings.Repeat("A", 40), Actor: alice}, wantErr: deploys.ErrInvalidRequest},
+		{name: "non-hex sha", req: deploys.Request{Target: blog, CommitSHA: strings.Repeat("g", 40), Actor: alice}, wantErr: deploys.ErrInvalidRequest},
 		{name: "no actor", req: deploys.Request{Target: blog, CommitSHA: sha1}, wantErr: deploys.ErrInvalidRequest},
 		{name: "unknown role", req: deploys.Request{Target: blog, CommitSHA: sha1, Actor: alice, Role: "root"}, wantErr: deploys.ErrInvalidRequest},
 		{name: "reason too long", req: deploys.Request{Target: blog, CommitSHA: sha1, Actor: alice, Reason: strings.Repeat("x", 501)}, wantErr: deploys.ErrInvalidRequest},
@@ -230,9 +239,10 @@ func TestDeploy(t *testing.T) {
 				return
 			}
 			d := got.Deployment
+			sha := tt.wantDetail["commit"].(string)
 			want := core.Deployment{
 				ID: d.ID, Target: blog, Kind: core.KindDeploy, State: core.StateQueued, Source: core.SourceAPI, RequestedBy: alice.String(),
-				Commit: core.Commit{Repository: "acme/blog", SHA: sha1}, Image: core.ImageRef{Repository: "ghcr.io/acme/blog", Tag: sha1},
+				Commit: core.Commit{Repository: "acme/blog", SHA: sha}, Image: core.ImageRef{Repository: "ghcr.io/acme/blog", Tag: sha},
 				Migration: tt.migrations.flagged, MigrationReason: tt.migrations.reason,
 			}
 			if d != want {

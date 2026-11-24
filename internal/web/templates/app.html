@@ -54,7 +54,7 @@
 <td>{{.Reason}}</td>
 <td>{{.CreatedBy}}</td>
 <td>{{template "time" .CreatedAt}}</td>
-{{if $.CanOperate}}<td><form method="post" action="/apps/{{pathEscape $app.Name}}/unblock">{{template "csrf" $}}<input type="hidden" name="ref" value="{{.Ref.String}}"><button type="submit">Unblock</button></form></td>{{end}}
+{{if $.CanOperate}}<td><details class="row-action"><summary>Unblock</summary><form method="post" action="/apps/{{pathEscape $app.Name}}/unblock">{{template "csrf" $}}<input type="hidden" name="ref" value="{{.Ref.String}}"><p class="hint">Lets this version be deployed again, automatically or by hand.</p><button type="submit" class="danger">Unblock this version</button></form></details></td>{{end}}
 </tr>
 {{end}}
 </tbody>
@@ -79,7 +79,7 @@
 <td>{{with .PinCommitSHA}}{{template "link" (commitLink $d.GitOpsRepository .)}}{{end}}</td>
 <td>{{with .ArgoCDRevision}}{{template "link" (revisionLink $d.GitOpsRepository .)}}{{end}}</td>
 <td>{{.RequestedBy}}, {{template "time" .CreatedAt}}</td>
-{{if $.CanOperate}}<td>{{if and (eq .State "succeeded") .Digest}}<form method="post" action="/apps/{{pathEscape $app.Name}}/rollback">{{template "csrf" $}}<input type="hidden" name="to_deployment_id" value="{{.ID}}"><button type="submit">Roll back to this</button></form>{{end}}</td>{{end}}
+{{if $.CanOperate}}<td>{{if and (eq .State "succeeded") .Digest}}<details class="row-action"><summary>Roll back to this</summary><form method="post" action="/apps/{{pathEscape $app.Name}}/rollback">{{template "csrf" $}}<input type="hidden" name="to_deployment_id" value="{{.ID}}"><p class="hint">Re-pins commit <code>{{shortSHA .Commit.SHA}}</code>, digest <code title="{{.Digest}}">{{shortDigest .Digest}}</code> from #{{.ID}}, cancels the deploy in flight and blocks the version it replaces.</p><label for="rollback_reason_{{.ID}}">Reason (optional)</label><input id="rollback_reason_{{.ID}}" name="reason" maxlength="500"><button type="submit" class="danger">Roll back to #{{.ID}}</button></form></details>{{end}}</td>{{end}}
 </tr>
 {{end}}
 </tbody>
@@ -89,10 +89,35 @@
 {{else}}
 <p class="muted">No deployments{{if .Content.Before}} on this page{{end}}.</p>
 {{end}}
+{{if .CanOperate}}
+<h2>Actions</h2>
+{{if .Content.Lock}}
+<details class="card">
+<summary>Unlock {{$app.Name}}</summary>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/unlock">
+{{template "csrf" .}}
+<p class="hint">Unlocking lets queued deploys of {{$app.Name}} run again.</p>
+<button type="submit" class="danger">Unlock {{$app.Name}}</button>
+</form>
+</details>
+{{else}}
+<details class="card"{{if or .Content.Form.LockReason .Content.Form.LockExpiresIn}} open{{end}}>
+<summary>Lock {{$app.Name}}</summary>
+<form method="post" action="/apps/{{pathEscape $app.Name}}/lock">
+{{template "csrf" .}}
+<p class="hint">A lock stops new deploys of {{$app.Name}}. Rollbacks still run.</p>
+<label for="lock_reason">Reason</label>
+<input id="lock_reason" name="reason" required maxlength="500" value="{{.Content.Form.LockReason}}">
+<label for="lock_expires_in">Expires in (optional, such as 2h)</label>
+<input id="lock_expires_in" name="expires_in" maxlength="20" value="{{.Content.Form.LockExpiresIn}}">
+<button type="submit" class="danger">Lock</button>
+</form>
+</details>
+{{end}}
+{{end}}
 </div>
 
 {{if .CanOperate}}
-<h2>Actions</h2>
 {{if .Content.CanDeploy}}
 <form method="post" action="/apps/{{pathEscape $app.Name}}/deployments" class="card">
 <h3>Deploy a commit</h3>
@@ -107,7 +132,7 @@
 </form>
 {{end}}
 
-<details class="card">
+<details class="card"{{if .Content.Form.RollbackReason}} open{{end}}>
 <summary>Roll back {{$app.Name}}</summary>
 <form method="post" action="/apps/{{pathEscape $app.Name}}/rollback">
 {{template "csrf" .}}
@@ -117,27 +142,5 @@
 <button type="submit" class="danger">Roll back</button>
 </form>
 </details>
-
-{{if .Content.Lock}}
-<form method="post" action="/apps/{{pathEscape $app.Name}}/unlock" class="card">
-<h3>Lock</h3>
-{{template "csrf" .}}
-<p>{{$app.Name}} is locked. Unlocking lets queued deploys run again.</p>
-<button type="submit">Unlock {{$app.Name}}</button>
-</form>
-{{else}}
-<details class="card">
-<summary>Lock {{$app.Name}}</summary>
-<form method="post" action="/apps/{{pathEscape $app.Name}}/lock">
-{{template "csrf" .}}
-<p class="hint">A lock stops new deploys of {{$app.Name}}. Rollbacks still run.</p>
-<label for="lock_reason">Reason</label>
-<input id="lock_reason" name="reason" required maxlength="500" value="{{.Content.Form.LockReason}}">
-<label for="lock_expires_in">Expires in (optional, such as 2h)</label>
-<input id="lock_expires_in" name="expires_in" maxlength="20" value="{{.Content.Form.LockExpiresIn}}">
-<button type="submit" class="danger">Lock</button>
-</form>
-</details>
-{{end}}
 {{end}}
 {{end}}

@@ -51,6 +51,7 @@ type fakeHistory struct {
 	histories map[core.DeploymentID]store.DeploymentHistory
 	current   *core.Deployment
 	filters   []store.DeploymentFilter
+	bulk      int
 	err       error
 }
 
@@ -87,11 +88,37 @@ func (f *fakeHistory) CurrentDeployment(context.Context, core.Target) (core.Depl
 	return *f.current, nil
 }
 
-type fakeQueue struct {
-	entries []core.QueueEntry
+func (f *fakeHistory) CurrentDeployments(context.Context) ([]core.Deployment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bulk++
+	if f.current == nil {
+		return nil, f.err
+	}
+	return []core.Deployment{*f.current}, f.err
 }
 
-func (f *fakeQueue) Entries(context.Context, string) ([]core.QueueEntry, error) {
+func (f *fakeHistory) LatestDeployments(context.Context) ([]core.Deployment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bulk++
+	newest := f.pages[0].Items
+	if len(newest) == 0 {
+		return nil, f.err
+	}
+	return newest[:1], f.err
+}
+
+type fakeQueue struct {
+	mu      sync.Mutex
+	entries []core.QueueEntry
+	apps    []string
+}
+
+func (f *fakeQueue) Entries(_ context.Context, app string) ([]core.QueueEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.apps = append(f.apps, app)
 	return f.entries, nil
 }
 

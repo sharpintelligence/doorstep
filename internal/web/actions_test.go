@@ -83,7 +83,7 @@ func TestDeployAction(t *testing.T) {
 			wantStatus: http.StatusSeeOther, wantLocation: "/deployments/41?notice=deploy_queued",
 			check: func(t *testing.T, f *fakes) {
 				t.Helper()
-				want := deploys.Request{Target: blog, CommitSHA: shaApp, Urgent: true, Reason: "hotfix", Actor: alice, Role: core.RoleDeployer}
+				want := deploys.Request{Target: blog, CommitSHA: strings.ToUpper(shaApp), Urgent: true, Reason: "hotfix", Actor: alice, Role: core.RoleDeployer}
 				if len(f.deploys.deploys) != 1 || f.deploys.deploys[0] != want {
 					t.Errorf("Deploy requests = %+v, want %+v", f.deploys.deploys, want)
 				}
@@ -393,7 +393,7 @@ func TestBlockAndLockActions(t *testing.T) {
 			wantStatus: http.StatusNotFound, wantBody: "no global lock",
 		},
 		{
-			name: "form too large", path: "/apps/blog/lock", form: url.Values{"reason": {strings.Repeat("x", maxFormBytes)}},
+			name: "form too large", path: "/apps/blog/lock", form: url.Values{"reason": {strings.Repeat("x", auth.MaxFormBytes)}},
 			wantStatus: http.StatusRequestEntityTooLarge, wantBody: "larger than doorstep accepts",
 		},
 	})
