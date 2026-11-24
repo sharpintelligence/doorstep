@@ -1,6 +1,6 @@
 # 0004: Freeze locks stop new deploys, not recovery
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-23
 
 ## Context

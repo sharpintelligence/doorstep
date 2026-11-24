@@ -15,6 +15,42 @@ A secret with several possible sources is resolved as a whole: when any flag or 
 
 Apps, notification targets and the `auth` section are only read from the configuration file; they have no flags or environment variables.
 
+## Environment variable index
+
+Every environment variable doorstep reads, with the section that defines it. The CLI client variables apply to every command that calls the API.
+
+| Variable | Defined in |
+| --- | --- |
+| `DOORSTEP_CONFIG` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_LISTEN_ADDR` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_METRICS_LISTEN_ADDR` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_SHUTDOWN_DELAY` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_SHUTDOWN_TIMEOUT` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_PUBLIC_URL` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_LOG_LEVEL` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_LOG_FORMAT` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_KUBECONFIG` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_KUBE_CONTEXT` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_KUBE_POD_DIAGNOSTICS` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_LOCK_REMINDER_INTERVAL` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_POLL_INTERVAL` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_DATABASE_URL_FILE` | [`doorstep serve`](#doorstep-serve) |
+| `DOORSTEP_DATABASE_URL` | [Database](#database) |
+| `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | [Registry credentials](#registry-credentials) |
+| `DOORSTEP_GITHUB_APP_ID` | [GitHub App](#github-app) |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY` | [GitHub App](#github-app) |
+| `DOORSTEP_GITHUB_APP_PRIVATE_KEY_FILE` | [GitHub App](#github-app) |
+| `DOORSTEP_GITHUB_API_URL` | [GitHub App](#github-app) |
+| `DOORSTEP_GITHUB_WEBHOOK_SECRET` | [GitHub App](#github-app) |
+| `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` | [GitHub App](#github-app) |
+| `DOORSTEP_ENGINE_CONCURRENCY` | [Engine](#engine) |
+| `DOORSTEP_SERVER_URL` | [`doorstep lock`, `unlock` and `locks`](#doorstep-lock-unlock-and-locks) |
+| `DOORSTEP_TOKEN` | [`doorstep lock`, `unlock` and `locks`](#doorstep-lock-unlock-and-locks) |
+| `DOORSTEP_TOKEN_FILE` | [`doorstep lock`, `unlock` and `locks`](#doorstep-lock-unlock-and-locks) |
+| `DOORSTEP_ACTOR` | [`doorstep token`](#doorstep-token) |
+
+`DOORSTEP_TEST_DATABASE_URL` and `DOORSTEP_TEST_REQUIRE_DATABASE` are for tests only and are described in [development.md](development.md#integration-tests). Names such as `DOORSTEP_HOOKS_SECRET` in examples are secret references you choose, not settings.
+
 ## `doorstep serve`
 
 | Flag | Environment variable | Default | Description |

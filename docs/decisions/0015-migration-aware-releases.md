@@ -1,6 +1,6 @@
 # 0015: Migration-aware releases
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

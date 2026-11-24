@@ -1,6 +1,6 @@
 # 0016: The validation Job gate reads a PostSync hook
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

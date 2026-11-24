@@ -1,6 +1,6 @@
 # 0020: Automatic rollback
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context

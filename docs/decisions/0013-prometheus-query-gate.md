@@ -1,6 +1,6 @@
 # 0013: Prometheus query gate
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-24
 
 ## Context
