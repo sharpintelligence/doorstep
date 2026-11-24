@@ -131,6 +131,11 @@ func (c catalogApps) RetrySettings(t core.Target) (retry.Settings, bool) {
 	return a.retry(), true
 }
 
+func (c catalogApps) AutoRollback(t core.Target) bool {
+	a, ok := c.byTarget(t)
+	return ok && a.app.AutoRollback
+}
+
 func intakeApps(catalog config.Catalog) []intake.App {
 	apps := make([]intake.App, 0, len(catalog.Apps))
 	for _, a := range catalog.Apps {

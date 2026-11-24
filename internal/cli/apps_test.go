@@ -257,3 +257,47 @@ apps:
 		})
 	}
 }
+
+func TestCatalogAppsAutoRollback(t *testing.T) {
+	t.Parallel()
+
+	catalog := loadCatalog(t, `
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    auto_rollback: true
+  - name: shop
+    source:
+      repo: example-user/shop
+    image:
+      repository: ghcr.io/example-user/shop
+    gitops:
+      repo: example-user/homelab
+      path: apps/shop
+`)
+	apps := newCatalogApps(catalog)
+	tests := []struct {
+		name   string
+		target core.Target
+		want   bool
+	}{
+		{name: "opted in", target: core.AppTarget("blog"), want: true},
+		{name: "default is off", target: core.AppTarget("shop")},
+		{name: "unknown app", target: core.AppTarget("wiki")},
+		{name: "other environment", target: core.Target{App: "blog", Environment: "staging"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := apps.AutoRollback(tt.target); got != tt.want {
+				t.Errorf("AutoRollback(%s) = %t, want %t", tt.target, got, tt.want)
+			}
+		})
+	}
+}

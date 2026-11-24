@@ -84,6 +84,48 @@ type BlockList interface {
 	MarkMirrored(ctx context.Context, t core.Target, trailers core.BlockTrailers, commit core.Commit) error
 }
 
+type RollbackTrigger string
+
+const (
+	RollbackTriggerGateFailed RollbackTrigger = "gate_failed"
+	RollbackTriggerSyncFailed RollbackTrigger = "sync_failed"
+)
+
+type RollbackOutcome string
+
+const (
+	RollbackQueued             RollbackOutcome = "queued"
+	RollbackWithheldMigrations RollbackOutcome = "withheld_migrations"
+	RollbackNoTarget           RollbackOutcome = "no_target"
+	RollbackSameVersion        RollbackOutcome = "same_version"
+	RollbackInProgress         RollbackOutcome = "rollback_in_progress"
+)
+
+type RollbackPlan struct {
+	Outcome    RollbackOutcome
+	Rollback   *core.Deployment
+	To         *core.Deployment
+	Migrations []core.DeploymentID
+}
+
+type AutoRollbackRequest struct {
+	Deployment core.Deployment
+	Trigger    RollbackTrigger
+	Reason     string
+	Fail       func(RollbackPlan) (Transition, error)
+}
+
+type AutoRollbackResult struct {
+	Plan      RollbackPlan
+	Failed    core.Deployment
+	Cancelled []core.DeploymentID
+}
+
+type AutoRollbacker interface {
+	Enabled(t core.Target) bool
+	FailAndRollBack(ctx context.Context, req AutoRollbackRequest) (AutoRollbackResult, error)
+}
+
 type Notifier interface {
 	Notify(ctx context.Context, n core.Notification)
 }

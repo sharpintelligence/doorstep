@@ -200,6 +200,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 			watcher:   watcher,
 			locks:     locksService,
 			blocks:    rollbacks,
+			rollbacks: rollbacks,
 			notifier:  dispatcher,
 			recorder:  m.Recorder(),
 			logger:    logger,
@@ -404,8 +405,20 @@ type rollbackMetrics struct {
 	recorder *metrics.Recorder
 }
 
-func (o rollbackMetrics) RollbackRequested(app string) {
-	o.recorder.Rollback(app, metrics.RollbackReasonManual)
+func (o rollbackMetrics) RollbackRequested(app string, trigger rollback.Trigger) {
+	o.recorder.Rollback(app, rollbackReason(trigger))
+}
+
+func rollbackReason(trigger rollback.Trigger) metrics.RollbackReason {
+	switch trigger {
+	case rollback.TriggerGateFailed:
+		return metrics.RollbackReasonGateFailed
+	case rollback.TriggerSyncFailed:
+		return metrics.RollbackReasonSyncFailed
+	case rollback.TriggerManual:
+		return metrics.RollbackReasonManual
+	}
+	return metrics.RollbackReason(trigger)
 }
 
 func knownApp(catalog config.Catalog) api.KnownApp {

@@ -451,6 +451,7 @@ One app is one deploy target: one image, one place in a GitOps repository and on
 | `notify` | none | Names of `notifications[]` targets to notify about this app. Each must exist and appear once. |
 | `migrations` | none | Flag releases that contain database migrations; see [Migrations](#migrations). Without the block nothing is detected and no extra GitHub calls are made. |
 | `retry` | on, 3 attempts | Retry a deploy or rollback that did not become healthy on the same pin before failing it; see [Retries](#retries). |
+| `auto_rollback` | `false` | Roll back automatically when a deploy fails its after-deploy gates, or its sync after the retries, by re-pinning the last successful, unblocked digest and blocking the failed version. Never crosses a release flagged as containing migrations ([Migrations](#migrations)), never rolls back a rollback. See [rollback.md](rollback.md#automatic-rollbacks). |
 
 #### Required checks
 
@@ -492,7 +493,7 @@ apps:
 | `migrations.labels` | none | Pull request labels that mark a migration, compared case-insensitively. At most 10, each at most 50 characters, unique, without control characters or surrounding whitespace. A label counts only on a merged pull request whose base is `source.branch`. |
 | `migrations.trailer` | `true` | Also flag a commit whose message has a `Doorstep-Migration: true` (or `yes`) line. |
 
-The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches, or when an earlier flagged deploy has not reached the cluster (it is still queued, was batched away, or failed before its pin); the flag makes a rollback across it require `--confirm-migration-rollback`, withholds automatic rollbacks across it, and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can, and `doorstep_migration_detection_failures_total` counts each refusal. See [rollback.md](rollback.md#migration-aware-releases).
+The block needs at least one label or the trailer. A release is flagged when any commit since the app's previously enqueued deploy matches, or when an earlier flagged deploy has not reached the cluster (it is still queued, was batched away, or failed before its pin); the flag makes a rollback across it require `--confirm-migration-rollback`, withholds [automatic rollbacks](rollback.md#automatic-rollbacks) across it (with `auto_rollback: true` the deploy fails with a hint to roll back with `--confirm-migration-rollback` instead), and triggers `backup` gates. Labels need the GitHub App's **Pull requests: read** permission on the application repository ([github-app.md](github-app.md#permissions)). If GitHub cannot be read, the release is not queued until it can, and `doorstep_migration_detection_failures_total` counts each refusal. See [rollback.md](rollback.md#migration-aware-releases).
 
 #### Retries
 
@@ -830,6 +831,7 @@ apps:
     retry:
       max_attempts: 2
       backoff: 2m
+    auto_rollback: true
     gates:
       before:
         - type: checks

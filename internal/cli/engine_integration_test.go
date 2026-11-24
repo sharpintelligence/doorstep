@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -417,8 +418,20 @@ func TestEngineFailsOnSyncFailure(t *testing.T) {
 		t.Errorf("transitions = %v, want %v", got, want)
 	}
 	s.sink.await(t, id, []string{"deploy.queued", "deploy.started", "deploy.failed"})
-	if body := s.metrics(); !strings.Contains(body, `doorstep_deployment_duration_seconds_count{app="blog",outcome="failed"} 1`) {
+	body := s.metrics()
+	if !strings.Contains(body, `doorstep_deployment_duration_seconds_count{app="blog",outcome="failed"} 1`) {
 		t.Errorf("metrics do not count the failure")
+	}
+	if !strings.Contains(body, `doorstep_rollbacks_total{app="blog",reason="sync_failed"} 0`) {
+		t.Errorf("metrics count a rollback although auto_rollback is off")
+	}
+	page, err := s.store.ListDeployments(t.Context(), store.DeploymentFilter{App: "blog", Kinds: []core.Kind{core.KindRollback}})
+	if err != nil || len(page.Items) != 0 {
+		t.Errorf("rollback deployments = %+v, %v, want none without auto_rollback", page.Items, err)
+	}
+	events := s.events(id)
+	if last := events[len(events)-1]; strings.Contains(string(last.Data), "auto_rollback") {
+		t.Errorf("failed event data = %s, want no auto_rollback without the opt-in", last.Data)
 	}
 	s.stop()
 }
@@ -596,5 +609,189 @@ func TestEngineFailsWhenTheRetryBudgetIsSpent(t *testing.T) {
 		t.Errorf("failed event message = %q", last.Message)
 	}
 	s.sink.await(t, id, []string{"deploy.queued", "deploy.started", "deploy.retrying", "deploy.failed"})
+	s.stop()
+}
+
+const autoRollbackEngineConfig = `
+notifications:
+  - name: hooks
+    type: webhook
+    url_env: TEST_HOOK_URL
+    events: [deploy.queued, deploy.started, deploy.succeeded, deploy.failed, deploy.rolled_back, deploy.cancelled, deploy.superseded]
+apps:
+  - name: blog
+    source:
+      repo: example-user/blog
+      required_checks: [test]
+      deployments: false
+    image:
+      repository: ghcr.io/example-user/blog
+    gitops:
+      repo: example-user/homelab
+      path: apps/blog
+    gates:
+      after:
+        - type: health
+        - type: external
+          name: e2e
+    auto_rollback: true
+    notify: [hooks]
+`
+
+func (s *engineServe) reportGate(id core.DeploymentID, gate, status, token string) {
+	s.t.Helper()
+	url := "http://" + s.addr + "/api/v1/deployments/" + strconv.FormatInt(int64(id), 10) + "/gates/" + gate
+	req, err := http.NewRequestWithContext(s.t.Context(), http.MethodPost, url, strings.NewReader(`{"status":"`+status+`","message":"e2e `+status+`"}`))
+	if err != nil {
+		s.t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.t.Fatalf("POST %s: %v", url, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.t.Fatalf("POST %s = %d %s", url, resp.StatusCode, body)
+	}
+}
+
+func (s *engineServe) rollbackOf(id core.DeploymentID) core.Deployment {
+	s.t.Helper()
+	deadline := time.Now().Add(engineWaitLimit)
+	for {
+		page, err := s.store.ListDeployments(s.t.Context(), store.DeploymentFilter{App: "blog", Kinds: []core.Kind{core.KindRollback}})
+		if err != nil {
+			s.t.Fatalf("ListDeployments: %v", err)
+		}
+		for _, d := range page.Items {
+			if d.RollbackOfID != nil && *d.RollbackOfID == id {
+				return d
+			}
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("no rollback of deployment %d\n%s", id, s.stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (s *engineServe) assertRolledBack(bad core.DeploymentID, goodDigest, badDigest core.Digest, reason string) {
+	s.t.Helper()
+	t := s.t
+	rb := s.awaitState(s.rollbackOf(bad).ID, core.StateSucceeded, core.StateFailed)
+	if rb.State != core.StateSucceeded || rb.Kind != core.KindRollback || rb.Source != core.SourceSystem ||
+		rb.RequestedBy != "system:doorstep" || rb.Digest != goodDigest || rb.PreviousDigest != badDigest {
+		t.Fatalf("rollback = %+v, want succeeded back to %s", rb, goodDigest)
+	}
+	content, _ := s.fixture.homelab.File("main", enginePinFile)
+	if !strings.Contains(content, "digest: "+string(goodDigest)) {
+		t.Errorf("pin file does not hold %s after the rollback:\n%s", goodDigest, content)
+	}
+	if msg := s.fixture.homelab.Commits("main")[0].Message; !strings.Contains(msg, gitops.TrailerBlock+": "+string(badDigest)) {
+		t.Errorf("rollback pin commit does not mirror the block of %s: %q", badDigest, msg)
+	}
+
+	events := s.events(bad)
+	last := events[len(events)-1]
+	var data struct {
+		RollbackEligible bool `json:"rollback_eligible"`
+		AutoRollback     struct {
+			Outcome    string            `json:"outcome"`
+			RollbackID core.DeploymentID `json:"rollback_id"`
+			Digest     core.Digest       `json:"digest"`
+		} `json:"auto_rollback"`
+	}
+	if err := json.Unmarshal(last.Data, &data); err != nil || last.To != core.StateFailed || !data.RollbackEligible ||
+		data.AutoRollback.Outcome != "queued" || data.AutoRollback.RollbackID != rb.ID || data.AutoRollback.Digest != goodDigest {
+		t.Errorf("failed event = %q %s (%v)", last.Message, last.Data, err)
+	}
+
+	code, body := s.getAuthorized("/api/v1/apps/blog/blocks")
+	if code != http.StatusOK || !strings.Contains(body, string(badDigest)) || !strings.Contains(body, `"created_by":"system:doorstep"`) {
+		t.Errorf("GET blocks = %d %s, want the automatic block of %s", code, body, badDigest)
+	}
+
+	s.sink.await(t, bad, []string{"deploy.queued", "deploy.started", "deploy.failed"})
+	s.sink.await(t, rb.ID, []string{"deploy.queued", "deploy.started", "deploy.rolled_back"})
+	if metrics := s.metrics(); !strings.Contains(metrics, `doorstep_rollbacks_total{app="blog",reason="`+reason+`"} 1`) {
+		t.Errorf("metrics do not count the %s rollback", reason)
+	}
+}
+
+func (s *engineServe) getAuthorized(path string) (int, string) {
+	s.t.Helper()
+	req, err := http.NewRequestWithContext(s.t.Context(), http.MethodGet, "http://"+s.addr+path, nil)
+	if err != nil {
+		s.t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token(core.RoleViewer))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func TestEngineRollsBackAutomaticallyWhenAnAfterGateFails(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.followGitOps(ctx, syncedTo)
+	s := startEngineServeWith(t, f, autoRollbackEngineConfig)
+	reporter := s.token(core.RoleReporter)
+
+	first, firstDigest := s.push(strings.Repeat("a", 40))
+	s.awaitState(first, core.StateVerifying)
+	s.reportGate(first, "e2e", "passed", reporter)
+	if d := s.awaitState(first, core.StateSucceeded, core.StateFailed); d.State != core.StateSucceeded {
+		t.Fatalf("first deployment = %+v, want succeeded", d)
+	}
+
+	second, secondDigest := s.push(strings.Repeat("b", 40))
+	s.awaitState(second, core.StateVerifying)
+	s.reportGate(second, "e2e", "failed", reporter)
+	d := s.awaitState(second, core.StateSucceeded, core.StateFailed)
+	if d.State != core.StateFailed || !strings.Contains(d.FailureReason, "after gates failed") {
+		t.Fatalf("second deployment = %+v, want failed by its after gates", d)
+	}
+	s.assertRolledBack(second, firstDigest, secondDigest, "gate_failed")
+	s.stop()
+}
+
+func TestEngineRollsBackAutomaticallyWhenTheSyncFails(t *testing.T) {
+	t.Parallel()
+
+	f := newEngineFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstSHA, secondSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	f.followGitOps(ctx, func(sha string) argocdtest.Application {
+		for _, c := range f.homelab.Commits("main") {
+			if c.SHA == sha && strings.Contains(c.Message, gitops.TrailerKind+": deploy") && strings.Contains(c.Message, secondSHA) {
+				return syncFailedAt(sha)
+			}
+		}
+		return syncedTo(sha)
+	})
+	cfg := strings.Replace(engineConfig, "    notify: [hooks]", "    auto_rollback: true\n    notify: [hooks]", 1)
+	s := startEngineServeWith(t, f, cfg)
+
+	first, firstDigest := s.push(firstSHA)
+	if d := s.awaitState(first, core.StateSucceeded, core.StateFailed); d.State != core.StateSucceeded {
+		t.Fatalf("first deployment = %+v, want succeeded", d)
+	}
+	second, secondDigest := s.push(secondSHA)
+	d := s.awaitState(second, core.StateSucceeded, core.StateFailed)
+	if d.State != core.StateFailed || !strings.Contains(d.FailureReason, "Argo CD sync failed") {
+		t.Fatalf("second deployment = %+v, want failed by the sync", d)
+	}
+	s.assertRolledBack(second, firstDigest, secondDigest, "sync_failed")
 	s.stop()
 }

@@ -19,6 +19,7 @@ type fakeState struct {
 	priorities  map[core.DeploymentID]core.Priority
 	blocks      []core.Block
 	audit       []core.AuditEntry
+	transitions []store.Transition
 	mirrored    []mirrorCall
 	nextID      core.DeploymentID
 	nextBlockID core.BlockID
@@ -39,6 +40,7 @@ func (s fakeState) clone() fakeState {
 	}
 	c.blocks = slices.Clone(s.blocks)
 	c.audit = slices.Clone(s.audit)
+	c.transitions = slices.Clone(s.transitions)
 	c.mirrored = slices.Clone(s.mirrored)
 	return c
 }
@@ -267,12 +269,16 @@ func (f *fakeRepo) TransitionDeployment(_ context.Context, t store.Transition) (
 			return core.Deployment{}, err
 		}
 		d.State = t.To
+		if t.FailureReason != "" {
+			d.FailureReason = t.FailureReason
+		}
 		if t.To.Terminal() {
 			finished := f.now
 			d.FinishedAt = &finished
 			delete(f.state.priorities, d.ID)
 		}
 		f.state.deployments[i] = d
+		f.state.transitions = append(f.state.transitions, t)
 		return d, nil
 	}
 	return core.Deployment{}, fmt.Errorf("deployment %d: %w", t.ID, core.ErrNotFound)
@@ -403,20 +409,28 @@ func (f *fakeRepo) RecordAudit(_ context.Context, e core.AuditEntry) error {
 }
 
 type recordingObserver struct {
-	mu   sync.Mutex
-	apps []string
+	mu       sync.Mutex
+	apps     []string
+	triggers []rollback.Trigger
 }
 
-func (o *recordingObserver) RollbackRequested(app string) {
+func (o *recordingObserver) RollbackRequested(app string, trigger rollback.Trigger) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.apps = append(o.apps, app)
+	o.triggers = append(o.triggers, trigger)
 }
 
 func (o *recordingObserver) calls() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return slices.Clone(o.apps)
+}
+
+func (o *recordingObserver) triggered() []rollback.Trigger {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.triggers)
 }
 
 var errBoom = errors.New("boom")

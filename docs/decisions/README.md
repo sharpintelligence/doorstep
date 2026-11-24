@@ -25,6 +25,7 @@ This directory holds architecture decision records (ADRs). An ADR records one de
 | [0017](0017-retry-before-rollback.md) | Retry before rollback | Proposed | 2026-11-24 |
 | [0018](0018-server-rendered-web-ui.md) | Server-rendered web UI | Proposed | 2026-11-24 |
 | [0019](0019-manual-deploys-and-cancellation.md) | Manual deploys and cancellation | Proposed | 2026-11-24 |
+| [0020](0020-automatic-rollback.md) | Automatic rollback | Proposed | 2026-11-24 |
 
 ## When to write one
 

@@ -90,7 +90,7 @@ Every failure, from any step, goes through one method that builds an `engine.Fai
 | `Delay`, `MaxAttempts` | the backoff before the next attempt and the attempt budget |
 | `Diagnosis` | an opaque JSON object the engine stores under `diagnosis` |
 
-`serve` uses `retry.Policy` ([below](#retry-before-rollback)); `engine.FailPolicy`, the default when no policy is wired, always fails with `not_retryable`. A policy error, an unknown action, or `retry` for anything but an Argo CD wait failure in `syncing` is logged and treated as `fail`. Automatic rollback (doorstep-ehl.6.2) plugs in here and acts on failures marked `rollback_eligible`; until it lands, the pin of a deploy that failed after pinning stays in git until someone requests a rollback.
+`serve` uses `retry.Policy` ([below](#retry-before-rollback)); `engine.FailPolicy`, the default when no policy is wired, always fails with `not_retryable`. A policy error, an unknown action, or `retry` for anything but an Argo CD wait failure in `syncing` is logged and treated as `fail`. The failure policy only judges; it never rolls back. The engine acts on its own verdict: for a failure marked `rollback_eligible` of an app with `auto_rollback: true` it fails the deploy and queues the rollback in one transaction ([Automatic rollback](#automatic-rollback)). Otherwise the pin of a deploy that failed after pinning stays in git until someone requests a rollback.
 
 The failure reason is cleaned to one line of at most 500 characters. A deploy that failed in `pinning` abandons its pull request, if any, except after `engine.ErrNeedsAttention`, which leaves it open for inspection. The `failed` transition event carries:
 
@@ -102,11 +102,26 @@ The failure reason is cleaned to one line of at most 500 characters. A deploy th
   "attempts": 3,
   "decision": "retries_exhausted",
   "rollback_eligible": true,
-  "diagnosis": {"verdict": "transient", "summary": "transient: image pull failing on node pi-3", "...": "..."}
+  "diagnosis": {"verdict": "transient", "summary": "transient: image pull failing on node pi-3", "...": "..."},
+  "auto_rollback": {"outcome": "queued", "rollback_id": 43, "to_deployment_id": 41, "digest": "sha256:1111aaaa2222..."}
 }
 ```
 
-Its message is `failed while <stage>`, with `after N attempts` appended when there was more than one. `rollback_eligible` is true for a deploy (not a rollback) that failed in `syncing` or `verifying` with a pin recorded, when the decision is `version_caused` or `retries_exhausted`, or the failure is an after-gate failure of class `version`. Configuration failures and `newer_release_queued` are never eligible. Manual rollback is available regardless.
+Its message is `failed while <stage>`, with `after N attempts` appended when there was more than one. `rollback_eligible` is true for a deploy (not a rollback) that failed in `syncing` or `verifying` with a pin recorded, when the decision is `version_caused` or `retries_exhausted`, or the failure is an after-gate failure of class `version`. Configuration failures and `newer_release_queued` are never eligible. Manual rollback is available regardless. `auto_rollback` is present only when the engine attempted an automatic rollback (see below).
+
+### Automatic rollback
+
+When a failure is `rollback_eligible` and the optional `AutoRollbacker` port reports that the app opted in (`auto_rollback: true`, [configuration.md](configuration.md#apps)), the engine does not transition the deploy itself. It calls `FailAndRollBack` with the deployment, a trigger (`gate_failed` for a failure in `verifying`, `sync_failed` for one in `syncing`), the block reason `automatic rollback of deployment N: <failure reason>` and a callback that builds the failed transition from the plan. `(*rollback.Service).Automatic` locks the app, decides the plan, queues the rollback, calls the callback, applies the transition with a compare-and-set, cancels queued deploys of the blocked commit, creates the block and audits, all in one transaction ([rollback.md](rollback.md#automatic-rollbacks)). So there is never a rollback without a failed deploy or the other way round. The callback keeps the event schema and the reason text in the engine, and the decision that needs the row lock in `rollback`.
+
+| Outcome | What happened | `failure_reason` | Appended to the event message and `deploy.failed` |
+| --- | --- | --- | --- |
+| `queued` | rollback queued, version blocked | unchanged | `rolling back automatically to sha256:1111aaaa2222 (deployment 41) as deployment 43` |
+| `withheld_migrations` | nothing queued or blocked | original (shortened to fit) + `; automatic rollback withheld: release contains database migrations; roll back with --confirm-migration-rollback` | `automatic rollback withheld: release contains database migrations (deployment 44); roll back with --confirm-migration-rollback` |
+| `no_target` | no earlier successful, unblocked deployment | unchanged | `automatic rollback not possible: no earlier successful deployment` |
+| `same_version` | the failing digest is the last one that succeeded | unchanged | `automatic rollback skipped: this digest is the last one that succeeded` |
+| `rollback_in_progress` | a rollback is already queued or running | unchanged | `automatic rollback skipped: a rollback is already in progress` |
+
+The `failed` event's `auto_rollback` object records `outcome` and, when known, `rollback_id`, `to_deployment_id`, `digest` and `migration_deployment_ids`; the event message is `failed while <stage>; <sentence above>`. After the transaction commits the engine announces `deploy.failed`, then, for `queued`, `deploy.queued` for the rollback (through `Engine.Queued`) and `deploy.cancelled` for the cancelled duplicates. A `core.ErrStateConflict` from the port (someone cancelled or rolled back the deploy by hand) stops quietly like any lost transition; any other error rolls the whole transaction back and is returned to the runner, and the next claim re-runs the step, whose sticky gate verdicts or sync check lead to the same decision.
 
 ## Retry before rollback
 
@@ -206,19 +221,19 @@ The worker emits each `deploy.*` event right after its own successful transition
 
 | Event | Emitted by | Metric |
 | --- | --- | --- |
-| `deploy.queued` | `Engine.Queued`, called after the enqueue committed: by a decorator around intake's settlement, by a decorator around rollback requests and by `announcingDeploys` around manual deploys (API, web UI, CLI) in `cli`; a manual request that returned an existing deployment is not announced again | |
+| `deploy.queued` | `Engine.Queued`, called after the enqueue committed: by a decorator around intake's settlement, by a decorator around rollback requests, by the worker right after an automatic rollback committed, and by `announcingDeploys` around manual deploys (API, web UI, CLI) in `cli`; a manual request that returned an existing deployment is not announced again | |
 | `deploy.started` | the worker, on `queued → resolving` | `doorstep_deployments_started_total` |
 | `deploy.retrying` | the worker, on the first `syncing → syncing` retry only | `doorstep_deployment_retries_total` on every retry |
 | `deploy.succeeded`, `deploy.rolled_back` | the worker, on `verifying → succeeded` (a rollback carries the deployment it reverts; after a retry the message is `succeeded on attempt N of M`) | duration with outcome `succeeded` or `rolled_back` |
-| `deploy.failed` | the worker, on `→ failed`, with the final decision as its message | duration with outcome `failed` or `rollback_failed` |
+| `deploy.failed` | the worker, on `→ failed`, with the final decision as its message, followed by the [automatic rollback](#automatic-rollback) outcome when there was one | duration with outcome `failed` or `rollback_failed` |
 | `deploy.superseded` | the worker that claimed the newer deployment, for each deployment the claim superseded | duration with outcome `superseded` |
-| `deploy.cancelled` | `Engine.Cancelled`, after a rollback request cancelled deployments and after a manual cancel (`announcingDeploys`) | duration with outcome `cancelled` |
+| `deploy.cancelled` | `Engine.Cancelled`, after a rollback request (manual or automatic) cancelled deployments and after a manual cancel (`announcingDeploys`) | duration with outcome `cancelled` |
 
 `deploy.queued` is announced after the enqueue transaction commits, so a worker that claims the deployment at once can announce `deploy.started` first. The duration is from `started_at` to `finished_at`, zero when the deployment never started. Gate durations come from the gate evaluator.
 
 ## Ports
 
-The engine imports only `core` and the standard library and declares the ports it uses, with its own small types (`Claim`, `Result`, `Transition`, `PinRequest`, `PinResult`, `Outcome`, `RetryState`, `Failure`, `Decision`). The adapters live in `internal/cli`:
+The engine imports only `core` and the standard library and declares the ports it uses, with its own small types (`Claim`, `Result`, `Transition`, `PinRequest`, `PinResult`, `Outcome`, `RetryState`, `Failure`, `Decision`, `RollbackPlan`, `AutoRollbackRequest`, `AutoRollbackResult`). The adapters live in `internal/cli`:
 
 | Port | Adapter |
 | --- | --- |
@@ -228,6 +243,7 @@ The engine imports only `core` and the standard library and declares the ports i
 | `SyncWatcher` (`WaitSynced`, `Check`, `Health`) | `*argocd.Watcher` |
 | `GateEvaluator` (`Evaluate`, `Reevaluate`) | `*gates.Evaluator` built by `newGateEvaluator` |
 | `BlockList` | `*rollback.Service` |
+| `AutoRollbacker` (`Enabled`, `FailAndRollBack`), optional | `autoRollbacks` over `catalogApps.AutoRollback` and `(*rollback.Service).Automatic`, mapping the engine's `RollbackPlan`, `RollbackTrigger` and `Transition` to the `rollback` and `store` types; the actor is `system:doorstep`. Without it the engine never rolls back on its own |
 | `Notifier` | `*notify.Dispatcher` |
 | `Metrics` (`DeploymentStarted`, `DeploymentFinished`, `DeploymentRetried`) | `engineMetrics` over `metrics.Recorder` |
 | `FailurePolicy` | `*retry.Policy` built by `newRetryPolicy` in `internal/cli/retry.go`: app settings from the catalog, `retryHistory` and `retryQueue` over `*store.Store`, and `podDiagnostics` (`*argocd.Watcher` plus `*pods.Reader`) when pod diagnostics are on |

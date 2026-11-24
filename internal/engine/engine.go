@@ -29,6 +29,7 @@ type Options struct {
 	Sync        SyncWatcher
 	Gates       GateEvaluator
 	Blocks      BlockList
+	Rollbacks   AutoRollbacker
 	Notifier    Notifier
 	Metrics     Metrics
 	Policy      FailurePolicy
@@ -53,6 +54,7 @@ type Engine struct {
 	sync        SyncWatcher
 	gates       GateEvaluator
 	blocks      BlockList
+	rollbacks   AutoRollbacker
 	notifier    Notifier
 	metrics     Metrics
 	policy      FailurePolicy
@@ -101,6 +103,7 @@ func New(opts Options) (*Engine, error) {
 		sync:           opts.Sync,
 		gates:          opts.Gates,
 		blocks:         opts.Blocks,
+		rollbacks:      opts.Rollbacks,
 		notifier:       opts.Notifier,
 		metrics:        opts.Metrics,
 		policy:         opts.Policy,
