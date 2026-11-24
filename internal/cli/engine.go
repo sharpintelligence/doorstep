@@ -35,6 +35,7 @@ type engineInput struct {
 	watcher   *argocd.Watcher
 	locks     *locks.Service
 	blocks    engine.BlockList
+	rollbacks automaticRollbacker
 	notifier  notify.Notifier
 	recorder  *metrics.Recorder
 	logger    *slog.Logger
@@ -98,6 +99,7 @@ func newEngine(in engineInput) (engineWiring, error) {
 		Sync:        in.watcher,
 		Gates:       evaluator,
 		Blocks:      in.blocks,
+		Rollbacks:   autoRollbacks{apps: in.apps, rollbacks: in.rollbacks},
 		Notifier:    in.notifier,
 		Metrics:     engineMetrics{recorder: in.recorder},
 		Policy:      policy,
@@ -146,7 +148,11 @@ func (s engineStore) Get(ctx context.Context, id core.DeploymentID) (core.Deploy
 }
 
 func (s engineStore) Transition(ctx context.Context, t engine.Transition) (core.Deployment, error) {
-	return s.store.TransitionDeployment(ctx, store.Transition{
+	return s.store.TransitionDeployment(ctx, storeTransition(t))
+}
+
+func storeTransition(t engine.Transition) store.Transition {
+	return store.Transition{
 		ID:            t.ID,
 		From:          t.From,
 		To:            t.To,
@@ -156,7 +162,7 @@ func (s engineStore) Transition(ctx context.Context, t engine.Transition) (core.
 		FailureReason: t.FailureReason,
 		Lineage:       t.Lineage,
 		ExpectRetries: t.ExpectRetries,
-	})
+	}
 }
 
 func (s engineStore) SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error) {
@@ -173,6 +179,44 @@ func (s engineStore) RetryState(ctx context.Context, id core.DeploymentID) (engi
 		return engine.RetryState{}, err
 	}
 	return engine.RetryState{Retries: state.Retries, Delay: state.Delay, MaxAttempts: state.MaxAttempts}, nil
+}
+
+type automaticRollbacker interface {
+	Automatic(ctx context.Context, req rollback.AutomaticRequest) (rollback.AutomaticResult, error)
+}
+
+type autoRollbacks struct {
+	apps      catalogApps
+	rollbacks automaticRollbacker
+}
+
+func (a autoRollbacks) Enabled(t core.Target) bool {
+	return a.rollbacks != nil && a.apps.AutoRollback(t)
+}
+
+func (a autoRollbacks) FailAndRollBack(ctx context.Context, req engine.AutoRollbackRequest) (engine.AutoRollbackResult, error) {
+	result, err := a.rollbacks.Automatic(ctx, rollback.AutomaticRequest{
+		Deployment: req.Deployment,
+		Trigger:    rollback.Trigger(req.Trigger),
+		Reason:     req.Reason,
+		Actor:      core.Actor{Kind: core.ActorSystem, ID: engine.Actor},
+		Fail: func(p rollback.Plan) (store.Transition, error) {
+			t, err := req.Fail(enginePlan(p))
+			return storeTransition(t), err
+		},
+	})
+	if err != nil {
+		return engine.AutoRollbackResult{}, err
+	}
+	return engine.AutoRollbackResult{Plan: enginePlan(result.Plan), Failed: result.Failed, Cancelled: result.Cancelled}, nil
+}
+
+func enginePlan(p rollback.Plan) engine.RollbackPlan {
+	plan := engine.RollbackPlan{Outcome: engine.RollbackOutcome(p.Outcome), Rollback: p.Rollback, To: p.To}
+	for _, d := range p.Migrations {
+		plan.Migrations = append(plan.Migrations, d.ID)
+	}
+	return plan
 }
 
 type commitResolver interface {

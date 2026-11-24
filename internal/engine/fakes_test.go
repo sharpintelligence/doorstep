@@ -714,3 +714,51 @@ func failedGate(name, message string) core.GateOutcome {
 func pending() core.GateOutcome {
 	return core.GateOutcome{Status: core.GatePending}
 }
+
+type fakeRollbacks struct {
+	store *fakeStore
+
+	mu        sync.Mutex
+	enabled   bool
+	plan      engine.RollbackPlan
+	cancelled []core.DeploymentID
+	err       error
+	requests  []engine.AutoRollbackRequest
+	asked     []core.Target
+}
+
+func (r *fakeRollbacks) Enabled(t core.Target) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.asked = append(r.asked, t)
+	return r.enabled
+}
+
+func (r *fakeRollbacks) FailAndRollBack(ctx context.Context, req engine.AutoRollbackRequest) (engine.AutoRollbackResult, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req)
+	plan, cancelled, err := r.plan, r.cancelled, r.err
+	r.mu.Unlock()
+	if err != nil {
+		return engine.AutoRollbackResult{}, err
+	}
+	if plan.Rollback != nil {
+		rb := r.store.add(*plan.Rollback)
+		plan.Rollback = &rb
+	}
+	t, err := req.Fail(plan)
+	if err != nil {
+		return engine.AutoRollbackResult{}, err
+	}
+	failed, err := r.store.Transition(ctx, t)
+	if err != nil {
+		return engine.AutoRollbackResult{}, err
+	}
+	return engine.AutoRollbackResult{Plan: plan, Failed: failed, Cancelled: cancelled}, nil
+}
+
+func (r *fakeRollbacks) received() []engine.AutoRollbackRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]engine.AutoRollbackRequest(nil), r.requests...)
+}

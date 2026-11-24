@@ -204,7 +204,7 @@ Returns one deployment with its timeline. `{id}` must be a positive integer; the
 ```
 
 - `events` are the newest 500 events of the deployment, listed oldest first, so the terminal transition and the latest lineage notes are always included; `events_truncated` is `true` when older events were left out.
-- An automatic [retry](engine.md#retry-before-rollback) is a `transition` event from `syncing` to `syncing` whose `data` holds `stage`, `failure_class`, `sync_reason`, `retry` (`attempt`, `next_attempt`, `max_attempts`, `delay_ms`, `reason`, `summary`) and `diagnosis` (the classifier's `verdict`, `summary`, `findings`, `nodes`, `evidence` and whether pods were inspected). The `failed` transition's `data` holds `stage`, `failure_class`, `sync_reason`, `attempts`, `decision` (`transient`, `version_caused`, `retries_exhausted`, `not_retryable`, `retries_disabled` or `newer_release_queued`), `rollback_eligible` and, for Argo CD failures, `diagnosis`. Clients should ignore keys they do not know.
+- An automatic [retry](engine.md#retry-before-rollback) is a `transition` event from `syncing` to `syncing` whose `data` holds `stage`, `failure_class`, `sync_reason`, `retry` (`attempt`, `next_attempt`, `max_attempts`, `delay_ms`, `reason`, `summary`) and `diagnosis` (the classifier's `verdict`, `summary`, `findings`, `nodes`, `evidence` and whether pods were inspected). The `failed` transition's `data` holds `stage`, `failure_class`, `sync_reason`, `attempts`, `decision` (`transient`, `version_caused`, `retries_exhausted`, `not_retryable`, `retries_disabled` or `newer_release_queued`), `rollback_eligible`, for Argo CD failures `diagnosis`, and, when an automatic rollback was attempted, `auto_rollback` (`outcome`: `queued`, `withheld_migrations`, `no_target`, `same_version` or `rollback_in_progress`; `rollback_id`, `to_deployment_id`, `digest` and `migration_deployment_ids` when known, see [engine.md](engine.md#automatic-rollback)). Clients should ignore keys they do not know.
 - `gates` holds the latest result of each named gate, ordered by name. `type` is the configured gate type and `phase` is `before` or `after`, so a client can find the `external` gates it may [report](#external-gate-results).
 - `rollbacks` are the deployments whose `rollback_of_id` is this deployment ("was it rolled back, and did that work"); `retries` are those whose `parent_id` is this deployment. Both are newest first.
 - The deployment, its events, gates and related deployments are read from one database snapshot, so they always agree with each other.
@@ -296,8 +296,8 @@ curl -fsS -X POST \
 | `app`, `environment` | the target |
 | `kind` | `deploy` or `rollback` |
 | `state` | current state; see [architecture.md](architecture.md#state-machine-and-concurrency) |
-| `trigger.source` | what triggered it: `webhook`, `poll`, `api`, `cli` or `system` (rollbacks queued by doorstep) |
-| `trigger.requested_by` | who triggered it, when known |
+| `trigger.source` | what triggered it: `webhook`, `poll`, `api`, `cli` or `system` ([automatic rollbacks](rollback.md#automatic-rollbacks) queued by doorstep) |
+| `trigger.requested_by` | who triggered it, when known; `system:doorstep` for an automatic rollback |
 | `commit.repository`, `commit.sha` | the app commit being deployed |
 | `image.repository`, `image.tag` | the requested image |
 | `image.digest` | the digest the tag resolved to; absent until resolved |

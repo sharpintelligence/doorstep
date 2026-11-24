@@ -93,6 +93,7 @@ apps:
       max_attempts: 4
       backoff: 30s
       max_backoff: 5m
+    auto_rollback: true
 `
 
 func strPtr(s string) *string { return &s }
@@ -151,8 +152,9 @@ func TestParse(t *testing.T) {
 					{Type: GateExternal, Name: "e2e", Reporters: []string{"token:ci-e2e"}},
 				},
 			},
-			Notify: []string{"ops", "hook"},
-			Retry:  &Retry{Enabled: new(true), MaxAttempts: intPtr(4), Backoff: durPtr(30 * time.Second), MaxBackoff: durPtr(5 * time.Minute)},
+			Notify:       []string{"ops", "hook"},
+			Retry:        &Retry{Enabled: new(true), MaxAttempts: intPtr(4), Backoff: durPtr(30 * time.Second), MaxBackoff: durPtr(5 * time.Minute)},
+			AutoRollback: true,
 		}},
 	}
 
@@ -246,6 +248,11 @@ func TestParseErrors(t *testing.T) {
 			name:    "wrong type",
 			input:   "apps: blog\n",
 			wantErr: []string{"line 1", "cannot unmarshal"},
+		},
+		{
+			name:    "auto_rollback is not a boolean",
+			input:   "apps:\n  - name: blog\n    auto_rollback: sometimes\n",
+			wantErr: []string{"line 3", "cannot unmarshal"},
 		},
 		{
 			name:    "syntax error",
@@ -470,6 +477,11 @@ func TestFileCatalogDefaults(t *testing.T) {
 		want   func(*App)
 	}{
 		{name: "minimal app", mutate: func(*App) {}, want: func(*App) {}},
+		{
+			name:   "auto rollback kept",
+			mutate: func(a *App) { a.AutoRollback = true },
+			want:   func(a *App) { a.AutoRollback = true },
+		},
 		{
 			name:   "explicit branches kept",
 			mutate: func(a *App) { a.Source.Branch = "trunk"; a.GitOps.Branch = "deploy" },

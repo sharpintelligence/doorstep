@@ -89,17 +89,18 @@ func (r RepoName) Name() string {
 }
 
 type App struct {
-	Name       string      `yaml:"name"`
-	Source     Source      `yaml:"source"`
-	Image      Image       `yaml:"image"`
-	GitOps     GitOps      `yaml:"gitops"`
-	Pin        Pin         `yaml:"pin"`
-	Deploy     Deploy      `yaml:"deploy"`
-	ArgoCD     ArgoCD      `yaml:"argocd"`
-	Gates      Gates       `yaml:"gates"`
-	Notify     []string    `yaml:"notify"`
-	Migrations *Migrations `yaml:"migrations"`
-	Retry      *Retry      `yaml:"retry"`
+	Name         string      `yaml:"name"`
+	Source       Source      `yaml:"source"`
+	Image        Image       `yaml:"image"`
+	GitOps       GitOps      `yaml:"gitops"`
+	Pin          Pin         `yaml:"pin"`
+	Deploy       Deploy      `yaml:"deploy"`
+	ArgoCD       ArgoCD      `yaml:"argocd"`
+	Gates        Gates       `yaml:"gates"`
+	Notify       []string    `yaml:"notify"`
+	Migrations   *Migrations `yaml:"migrations"`
+	Retry        *Retry      `yaml:"retry"`
+	AutoRollback bool        `yaml:"auto_rollback"`
 }
 
 const (

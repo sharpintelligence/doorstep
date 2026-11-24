@@ -403,6 +403,9 @@ func TestRollback(t *testing.T) {
 			if f.locked[0] != blog {
 				t.Errorf("locked %v, want %s", f.locked, blog)
 			}
+			if triggers := obs.triggered(); !slices.Equal(triggers, []rollback.Trigger{rollback.TriggerManual}) {
+				t.Errorf("observer triggers = %v, want manual", triggers)
+			}
 			if calls := obs.calls(); !slices.Equal(calls, []string{"blog"}) {
 				t.Errorf("observer calls = %v", calls)
 			}

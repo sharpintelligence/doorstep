@@ -78,6 +78,7 @@ type failureData struct {
 	Decision         DecisionReason         `json:"decision"`
 	RollbackEligible bool                   `json:"rollback_eligible"`
 	Diagnosis        json.RawMessage        `json:"diagnosis,omitempty"`
+	AutoRollback     *autoRollbackData      `json:"auto_rollback,omitempty"`
 }
 
 type retryData struct {
@@ -207,6 +208,27 @@ func (e *Engine) retryAttempt(ctx context.Context, d core.Deployment, f Failure,
 }
 
 func (e *Engine) failFinal(ctx context.Context, d core.Deployment, f Failure, decision Decision) (core.Deployment, Result, error) {
+	if rollbackEligible(f, decision) && e.rollbacks != nil && e.rollbacks.Enabled(d.Target) {
+		return e.failAndRollBack(ctx, d, f, decision)
+	}
+	return e.failPlain(ctx, d, f, decision)
+}
+
+func (e *Engine) failPlain(ctx context.Context, d core.Deployment, f Failure, decision Decision) (core.Deployment, Result, error) {
+	t, err := failureTransition(f, decision, nil)
+	if err != nil {
+		return d, Result{}, err
+	}
+	failed, err := e.store.Transition(ctx, t)
+	if err != nil {
+		return d, Result{}, err
+	}
+	e.announceFailure(ctx, failed, f, decision, "")
+	return failed, Result{}, nil
+}
+
+func failureTransition(f Failure, decision Decision, plan *RollbackPlan) (Transition, error) {
+	d := f.Deployment
 	data := failureData{
 		Stage:            f.Stage,
 		FailureClass:     decision.Class,
@@ -214,36 +236,44 @@ func (e *Engine) failFinal(ctx context.Context, d core.Deployment, f Failure, de
 		Decision:         decision.Reason,
 		RollbackEligible: rollbackEligible(f, decision),
 		Diagnosis:        decision.Diagnosis,
+		AutoRollback:     autoRollbackFor(plan),
 	}
 	if f.Sync != nil {
 		data.SyncReason = f.Sync.Reason
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
-		return d, Result{}, fmt.Errorf("encode failure of deployment %d: %w", d.ID, err)
+		return Transition{}, fmt.Errorf("encode failure of deployment %d: %w", d.ID, err)
 	}
 	message := "failed while " + string(f.Stage)
 	if f.Attempt > 1 {
 		message += " after " + strconv.Itoa(f.Attempt) + " attempts"
 	}
-	failed, err := e.store.Transition(ctx, Transition{
+	reason := f.Reason
+	if plan != nil {
+		message += "; " + rollbackMessage(*plan)
+		if plan.Outcome == RollbackWithheldMigrations {
+			reason = withheldReason(f.Reason)
+		}
+	}
+	return Transition{
 		ID:            d.ID,
 		From:          d.State,
 		To:            core.StateFailed,
 		Actor:         Actor,
 		Message:       message,
 		Data:          encoded,
-		FailureReason: f.Reason,
-	})
-	if err != nil {
-		return d, Result{}, err
-	}
-	e.logFor(d).WarnContext(ctx, "deployment failed",
+		FailureReason: reason,
+	}, nil
+}
+
+func (e *Engine) announceFailure(ctx context.Context, failed core.Deployment, f Failure, decision Decision, rollback string) {
+	e.logFor(f.Deployment).WarnContext(ctx, "deployment failed",
 		slog.String("stage", string(f.Stage)),
 		slog.String("failure_class", string(decision.Class)),
 		slog.String("decision", string(decision.Reason)),
 		slog.Int("attempts", f.Attempt),
-		slog.Bool("rollback_eligible", data.RollbackEligible),
+		slog.Bool("rollback_eligible", rollbackEligible(f, decision)),
 		slog.String("reason", f.Reason),
 	)
 	if f.Stage == core.StatePinning && !f.KeepPin {
@@ -254,8 +284,7 @@ func (e *Engine) failFinal(ctx context.Context, d core.Deployment, f Failure, de
 		outcome = OutcomeRollbackFailed
 	}
 	e.metrics.DeploymentFinished(failed.Target.App, outcome, runDuration(failed))
-	e.notify(ctx, core.NotificationDeployFailed, failed, finalMessage(f, decision))
-	return failed, Result{}, nil
+	e.notify(ctx, core.NotificationDeployFailed, failed, joinSentences(finalMessage(f, decision), rollback))
 }
 
 func rollbackEligible(f Failure, decision Decision) bool {
@@ -290,6 +319,16 @@ func finalMessage(f Failure, decision Decision) string {
 		return summary
 	}
 	return summary
+}
+
+func joinSentences(first, second string) string {
+	switch {
+	case first == "":
+		return second
+	case second == "":
+		return first
+	}
+	return first + "; " + second
 }
 
 func joinMessage(lead, detail string) string {
@@ -332,9 +371,16 @@ func cleanReason(reason string) string {
 	if reason == "" {
 		reason = unknownFailure
 	}
-	if utf8.RuneCountInString(reason) <= maxFailureReason {
-		return reason
+	return truncate(reason, maxFailureReason)
+}
+
+func truncate(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
+		return s
 	}
-	runes := []rune(reason)
-	return string(runes[:maxFailureReason-1]) + "…"
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	return string(runes[:limit-1]) + "…"
 }

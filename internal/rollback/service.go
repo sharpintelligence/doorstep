@@ -20,7 +20,7 @@ const (
 )
 
 type Observer interface {
-	RollbackRequested(app string)
+	RollbackRequested(app string, trigger Trigger)
 }
 
 type Options struct {
@@ -109,7 +109,7 @@ func (s *Service) Rollback(ctx context.Context, req Request) (Result, error) {
 		attrs = append(attrs, slog.Any("migration_deployment_ids", deploymentIDs(result.Migrations)))
 	}
 	s.logger.InfoContext(ctx, "rollback requested", attrs...)
-	s.observer.RollbackRequested(req.Target.App)
+	s.observer.RollbackRequested(req.Target.App, TriggerManual)
 	return result, nil
 }
 
@@ -159,8 +159,11 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 			return &core.MigrationRollbackError{To: to, Migrations: crossed}
 		}
 
-		block := blockFor(req, bad, to)
 		actor := req.Actor.String()
+		reason := req.Reason
+		if reason == "" {
+			reason = "rolled back by " + actor
+		}
 		var cancelled []core.DeploymentID
 		if !bad.State.Terminal() {
 			if _, err := tx.TransitionDeployment(ctx, store.Transition{
@@ -169,13 +172,6 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 				return err
 			}
 			cancelled = append(cancelled, bad.ID)
-		}
-		if block.Commit.SHA != "" {
-			ids, err := cancelQueuedDeploys(ctx, tx, req.Target, block.Commit.SHA, bad.ID, actor)
-			if err != nil {
-				return err
-			}
-			cancelled = append(cancelled, ids...)
 		}
 
 		rb, _, err := tx.EnqueueDeployment(ctx, core.Deployment{
@@ -193,16 +189,11 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 		if err != nil {
 			return err
 		}
-
-		var recorded *core.Block
-		if block.Digest != "" || block.Commit.SHA != "" {
-			block.RollbackID = &rb.ID
-			b, _, err := tx.CreateBlock(ctx, block)
-			if err != nil {
-				return err
-			}
-			recorded = &b
+		recorded, ids, err := blockReplaced(ctx, tx, blockFor(req.Target, reason, req.Actor, bad, to), rb.ID)
+		if err != nil {
+			return err
 		}
+		cancelled = append(cancelled, ids...)
 
 		bad, err = tx.GetDeployment(ctx, bad.ID)
 		if err != nil {
@@ -216,6 +207,26 @@ func (s *Service) rollbackOnce(ctx context.Context, req Request) (Result, error)
 		return tx.RecordAudit(ctx, entry)
 	})
 	return result, err
+}
+
+func blockReplaced(ctx context.Context, tx Repository, block core.Block, rollbackID core.DeploymentID) (*core.Block, []core.DeploymentID, error) {
+	var cancelled []core.DeploymentID
+	if block.Commit.SHA != "" {
+		ids, err := cancelQueuedDeploys(ctx, tx, block.Target, block.Commit.SHA, *block.DeploymentID, block.CreatedBy)
+		if err != nil {
+			return nil, nil, err
+		}
+		cancelled = ids
+	}
+	if block.Digest == "" && block.Commit.SHA == "" {
+		return nil, cancelled, nil
+	}
+	block.RollbackID = &rollbackID
+	recorded, _, err := tx.CreateBlock(ctx, block)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &recorded, cancelled, nil
 }
 
 func openRollback(ctx context.Context, tx Repository, t core.Target) error {
@@ -291,16 +302,12 @@ func selectTarget(ctx context.Context, tx Repository, req Request, bad core.Depl
 	return to, nil
 }
 
-func blockFor(req Request, bad, to core.Deployment) core.Block {
-	reason := req.Reason
-	if reason == "" {
-		reason = "rolled back by " + req.Actor.String()
-	}
+func blockFor(t core.Target, reason string, actor core.Actor, bad, to core.Deployment) core.Block {
 	b := core.Block{
-		Target:       req.Target,
+		Target:       t,
 		Digest:       bad.Digest,
 		Reason:       reason,
-		CreatedBy:    req.Actor.String(),
+		CreatedBy:    actor.String(),
 		DeploymentID: &bad.ID,
 	}
 	if bad.Commit.SHA != to.Commit.SHA {
@@ -337,6 +344,21 @@ func cancelQueuedDeploys(ctx context.Context, tx Repository, t core.Target, sha 
 }
 
 func rollbackAudit(req Request, r Result) (core.AuditEntry, error) {
+	detail := rollbackDetail(r, req.Reason)
+	if len(r.Migrations) > 0 {
+		detail["migration_confirmed"] = true
+		detail["migration_deployment_ids"] = deploymentIDs(r.Migrations)
+	}
+	return rollbackEntry(req.Target, req.Actor, req.Role, r.Rollback.ID, detail)
+}
+
+func rollbackEntry(t core.Target, actor core.Actor, role core.Role, rollbackID core.DeploymentID, detail map[string]any) (core.AuditEntry, error) {
+	entry, err := auditEntry(core.AuditRollbackRequest, t, actor, role, detail)
+	entry.DeploymentID = &rollbackID
+	return entry, err
+}
+
+func rollbackDetail(r Result, reason string) map[string]any {
 	detail := map[string]any{
 		"rolled_back_deployment_id": r.RolledBack.ID,
 		"to_deployment_id":          r.To.ID,
@@ -352,17 +374,10 @@ func rollbackAudit(req Request, r Result) (core.AuditEntry, error) {
 			detail["blocked_commit"] = r.Block.Commit.SHA
 		}
 	}
-	if req.Reason != "" {
-		detail["reason"] = req.Reason
+	if reason != "" {
+		detail["reason"] = reason
 	}
-	if len(r.Migrations) > 0 {
-		detail["migration_confirmed"] = true
-		detail["migration_deployment_ids"] = deploymentIDs(r.Migrations)
-	}
-	entry, err := auditEntry(core.AuditRollbackRequest, req.Target, req.Actor, req.Role, detail)
-	id := r.Rollback.ID
-	entry.DeploymentID = &id
-	return entry, err
+	return detail
 }
 
 func (s *Service) Block(ctx context.Context, req BlockRequest) (core.Block, bool, error) {
@@ -511,4 +526,4 @@ func nonNil(ids []core.DeploymentID) []core.DeploymentID {
 
 type nopObserver struct{}
 
-func (nopObserver) RollbackRequested(string) {}
+func (nopObserver) RollbackRequested(string, Trigger) {}
