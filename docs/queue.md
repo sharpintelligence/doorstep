@@ -78,13 +78,13 @@ Every transition of a deployment to a terminal state deletes its queue entry in 
 
 ## Wake-ups
 
-A row trigger on `queue_entries` calls `pg_notify('doorstep_queue', <schema>)` when an entry is inserted or deleted, and when an update clears a lease or changes `priority` or `available_at`. Claims and heartbeats do not notify, so busy replicas do not wake each other every few seconds. Every writer, including future engine transitions and rollback enqueues, produces wake-ups without remembering to.
+A row trigger on `queue_entries` calls `pg_notify('doorstep_queue', <schema>)` when an entry is inserted or deleted, and when an update clears a lease or changes `priority` or `available_at`. Claims and heartbeats do not notify, so busy replicas do not wake each other every few seconds. Every writer, including engine transitions and rollback enqueues, produces wake-ups without remembering to.
 
 `Store.ListenQueue` (and `Queue.Listen`) holds one dedicated connection outside the pool, ignores notifications whose payload is another schema, and calls `wake` for each relevant one. When the connection drops it reconnects with backoff (1 s doubling to 30 s) and wakes once after every successful `LISTEN`, because notifications sent while it was away are lost. Notifications are only a latency hint: the runner also polls, so a missed notification costs at most one poll interval, and doorstep works behind a PgBouncer in transaction mode (where `LISTEN` does not work) with polling alone.
 
 ## Runner
 
-`queue.Runner` is the worker loop. `serve` does not start it yet; the engine bead supplies the handler and starts it.
+`queue.Runner` is the worker loop. `serve` starts one per replica whenever apps are configured, with the [deployment engine](engine.md) as its handler (`Engine.Handle` through `cli.queueHandler`), at the package defaults below; there are no configuration keys for them.
 
 ```go
 q := queue.New(queue.Options{Store: st, MaxBatch: apps.MaxBatch, Logger: logger})
@@ -96,8 +96,8 @@ runner := queue.NewRunner(queue.RunnerOptions{
 	Logger:            logger,
 })
 err = runner.Run(ctx, func(ctx context.Context, c queue.Claimed) (queue.Result, error) {
-	// one engine step for c.Deployment
-	return queue.Result{}, nil
+	result, err := eng.Handle(ctx, engine.Claim{Deployment: c.Deployment, Attempt: c.Attempt, Superseded: c.Superseded})
+	return queue.Result{RequeueAfter: result.RequeueAfter}, err
 })
 ```
 
@@ -107,7 +107,7 @@ err = runner.Run(ctx, func(ctx context.Context, c queue.Claimed) (queue.Result, 
 - On shutdown the handler's context is cancelled and the entry is released with no delay, through a detached context bounded to 5 s, so another replica can take over at once instead of waiting for the lease to expire. `Run` returns nil after every handler has returned.
 - `NewWorkerID` returns the hostname plus 8 random hex characters.
 
-The handler contract for the engine: do one idempotent step (or the whole deployment) under the given context; when the deployment reaches a terminal state, delete its queue entry in the same transaction as the transition; otherwise return and let the runner release the entry so the next step is claimed.
+The handler contract: do one idempotent step (or the whole deployment) under the given context; when the deployment reaches a terminal state, delete its queue entry in the same transaction as the transition; otherwise return and let the runner release the entry so the next step is claimed. The engine runs every step it can within one claim and returns a `RequeueAfter` while gates are pending or an image is not pushed yet ([engine.md](engine.md#steps)).
 
 ## Observability
 

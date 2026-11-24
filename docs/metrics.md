@@ -38,7 +38,7 @@ spec:
 
 ## Metrics
 
-Deployment and gate series appear once the engine records into them; `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). Until then `doorstep_build_info`, `doorstep_notifications_total`, the webhook and poll cycle counters, the queue depth series (`serve` reads it from the queue), the Go runtime and the process metrics are emitted. Once an application is known, its labelled series are created at zero (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total`, `doorstep_webhook_deliveries_total` and `doorstep_intake_poll_cycles_total` series is created at zero on start.
+The [deployment engine](engine.md#notifications-and-metrics) counts `doorstep_deployments_started_total` when a deployment starts (`queued → resolving`) and observes `doorstep_deployment_duration_seconds` for every final outcome it performs or announces: `succeeded` and `failed` for deploys, `rolled_back` and `rollback_failed` for rollbacks, `cancelled` and `superseded`; a deployment that never started is observed with a duration of zero. Gate series come from the gate evaluator. `doorstep_rollbacks_total{reason="manual"}` is incremented by every accepted rollback request ([rollback.md](rollback.md)). `serve` creates every configured app's labelled series at zero on start (`Recorder.PrimeApp`) so `rate()` and `increase()` see the first event. Every `doorstep_notifications_total`, `doorstep_webhook_deliveries_total` and `doorstep_intake_poll_cycles_total` series is created at zero on start.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |

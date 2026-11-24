@@ -90,7 +90,7 @@ The defaults are `before: [checks]` and `after: [health]`; `lock`, `schedule` an
 
 ### Wiring
 
-The composition root (`serve`) registers all five types with one call and builds the plans from the catalog:
+The composition root (`serve`) registers all five types with one call and builds the plans from the catalog. In `internal/cli/gates.go`, `newGateEvaluator` runs every function returned by `gateRegistrars()` against a fresh registry (today `registerBuiltinGates`), builds the plans and creates the evaluator with `*store.Store` as its result store, the metrics recorder and the observers returned by `gateObservers()`; a new gate type or observer adds one entry there and a constructor in its own file, so `serve.go` does not change. The engine evaluates the phases ([engine.md](engine.md#steps)):
 
 ```go
 registry := gates.NewRegistry()
@@ -110,7 +110,7 @@ The ports are small interfaces in `internal/gates`:
 | `TrackedChecks` | `TrackedCommits(ctx, repository, sha) ([]core.TrackedCommit, error)` | `*store.Store` |
 | `LiveChecks` | `Checks(ctx, repository, sha, required) (core.ChecksEvaluation, error)` | `intake.LiveChecks`: GitHub checks read through intake's `CheckSource` and judged by `intake.Evaluate` |
 | `FreezeReader` | `Blocking(ctx, core.Target) ([]core.Lock, error)` | `*locks.Service` |
-| `ApplicationReader` | `Application(ctx, namespace, name) (gates.Application, error)` | an adapter over the Argo CD client, written in the composition root |
+| `ApplicationReader` | `Application(ctx, namespace, name) (gates.Application, error)` | `cli.argoApplications`: finds the app configured for that Application and reads it with `(*argocd.Watcher).Status`, mapping not found to `gates.ErrApplicationNotFound` |
 
 `gates.Application` carries the Application's sync status, revision, health status, health message and operation phase as the plain strings Argo CD reports; `gates` defines constants for the values it acts on (`SyncSynced`, `HealthHealthy`, `HealthDegraded`, `OperationRunning`, ...). The adapter returns an error wrapping `gates.ErrApplicationNotFound` when the Application does not exist. `Builtins.Now` (default `time.Now`) is the clock for soak, grace and schedule decisions, and `Builtins.DegradedGrace` (default `gates.DefaultDegradedGrace`, one minute) exists for tests; neither is a configuration key. `Live` is the only optional dependency; a missing required one is a startup error.
 

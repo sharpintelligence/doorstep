@@ -14,6 +14,7 @@ func TestStateTransitionMatrix(t *testing.T) {
 
 	allowed := map[edge]bool{
 		{StateQueued, StateResolving}:     true,
+		{StateQueued, StateFailed}:        true,
 		{StateQueued, StateCancelled}:     true,
 		{StateQueued, StateSuperseded}:    true,
 		{StateResolving, StatePinning}:    true,

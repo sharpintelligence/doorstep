@@ -55,11 +55,11 @@ The host is not compared, so GitHub Enterprise URLs match too. If no source matc
 
 ## Timeouts
 
-`apps[].argocd.sync_timeout` (default `10m`, must be positive) bounds each wait. The adapter applies it itself, so the engine just calls `WaitSynced`:
+`apps[].argocd.sync_timeout` (default `10m`, must be positive) bounds each wait. The adapter applies it itself on every call:
 
 - When the app's own timeout expires, `WaitSynced` returns `core.ErrSyncTimeout` with the last observed status. The message names the reason, for example `argocd: sync timed out after 10m0s: application health is degraded: Deployment web: Deployment exceeded its progress deadline`.
 - If the Application could not be read at all during the wait, the error also wraps `core.ErrSyncUnavailable` and the reason is `unavailable`.
-- If the caller's context has an earlier deadline, or is cancelled (for example on shutdown), `WaitSynced` returns that context error unchanged, never `ErrSyncTimeout`, so a shutdown is not reported as a failed deploy. The engine can resume a wait after a restart with the remaining time as a context deadline.
+- If the caller's context has an earlier deadline, or is cancelled (for example on shutdown), `WaitSynced` returns that context error unchanged, never `ErrSyncTimeout`, so a shutdown is not reported as a failed deploy. The engine resumes a wait after a restart with the remaining time as a context deadline (measured from when the deployment entered `syncing`, at least 10 seconds) and tells its own deadline apart from a shutdown, treating the former as a sync timeout ([engine.md](engine.md#resuming-a-sync-wait)).
 
 The `health` gate has its own `timeout` (default `10m`), measured from its first evaluation. Because `WaitSynced` already waited for health, the gate normally passes on its first evaluation; its timeout only matters when health is lost again after syncing.
 
@@ -122,12 +122,12 @@ An Application without automated sync stays `OutOfSync` after the pin lands unti
 
 ## Connecting to the cluster
 
-The `kubernetes` section of the configuration file (or flags and environment variables) selects the connection:
+The `kubernetes` section of the configuration file (or flags and environment variables) selects the connection. `serve` connects whenever apps are configured and refuses to start when it cannot build the client (for example an unreadable kubeconfig, or no in-cluster ServiceAccount outside a cluster); it reads nothing from the cluster until a deployment syncs or a gate reads an Application:
 
 | Key | Flag | Environment variable | Default |
 | --- | --- | --- | --- |
-| `kubernetes.kubeconfig` | `--kubeconfig` (`argocd status` only) | `DOORSTEP_KUBECONFIG` | empty: in-cluster |
-| `kubernetes.context` | `--kube-context` (`argocd status` only) | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` |
+| `kubernetes.kubeconfig` | `--kubeconfig` (`serve`, `argocd status`) | `DOORSTEP_KUBECONFIG` | empty: in-cluster |
+| `kubernetes.context` | `--kube-context` (`serve`, `argocd status`) | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` |
 
 ### In the cluster
 

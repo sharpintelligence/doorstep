@@ -38,7 +38,7 @@ Leaving `events` out means the default set above. An empty list, an unknown even
 
 A rollback is a separate deployment of kind `rollback` ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, you see `deploy.failed` for the deploy, then `deploy.started` for the rollback, then either `deploy.rolled_back` (the rollback worked) or `deploy.failed` for the rollback (it did not, and someone has to act).
 
-The engine decides which locks to announce: the intent is that manual freeze locks produce `lock.changed` and periodic `lock.reminder` events, while the per-deployment lock every deploy takes does not.
+Manual freeze locks produce `lock.changed` (acquired, released, and released when a lock expires) and periodic `lock.reminder` events; nothing else does. An app freeze is sent to that app's targets. A global freeze has no app, so it is sent once per app, addressed to that app and marked `global freeze`, skipping an app whose targets all already received it, so a channel shared by every app gets one message rather than one per app.
 
 ## Links
 
@@ -143,7 +143,7 @@ Answer with any `2xx` status. A target that returns HTML or JSON in the body nee
 
 ## Delivery
 
-> **Not wired into `serve` yet.** The dispatcher, targets and GitHub reporter described here are built and tested, and `doorstep notify test` uses them, but nothing emits notifications until the deployment engine lands (doorstep-ehl.4.4), which builds the dispatcher in `serve`, hands it to the engine and closes it with the shutdown timeout. Until then `notifications[]` and `apps[].notify` are validated but `serve` sends nothing.
+`serve` builds one dispatcher at startup, hands it to the [deployment engine](engine.md#notifications-and-metrics) and to the lock service and reminder, and closes it after the listeners and workers have stopped, bounded by `server.shutdown_timeout`. The worker that performs a transition emits its `deploy.*` event; `deploy.queued` and `deploy.cancelled` are announced right after the enqueue or cancellation commits. Because `deploy.queued` is sent after the commit, a deployment claimed at once can report `deploy.started` before it.
 
 - **Non-blocking.** The engine hands each notification to a dispatcher and carries on. The dispatcher checks it, picks the targets of its app plus the GitHub reporter, and puts it on each target's queue without any network I/O.
 - **Per-target queues.** Every target has its own queue of 64 notifications and its own worker, so a slow Slack never delays GitHub statuses, and each target receives events in the order they happened (`started` before `succeeded`). When a queue is full the new notification is dropped, logged at `warn` and counted.

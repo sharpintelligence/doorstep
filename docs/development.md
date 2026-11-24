@@ -96,6 +96,14 @@ Tests never need a cluster: `argocdtest.NewServer(t)` (in `internal/argocd/argoc
 
 Tests that need GitHub never call the real API and need no credentials. `githubtest.NewServer(t)` (in `internal/github/githubtest`) starts a fake API with a freshly generated App key: it verifies App JWTs, serves installation lookup and token minting (`Install`, `Suspend`, `Uninstall`, call counters, an injectable clock) and authenticates extra handlers registered with `Handle` by installation token. Point `github.Options.BaseURL` at its `URL`, using its `AppID` and `PrivateKey`.
 
+## Registries in tests
+
+`registrytest.NewServer(t)` (in `internal/registry/registrytest`) is a fake OCI registry on plain HTTP: it answers the `/v2/` ping and `HEAD`/`GET` manifest requests with `Docker-Content-Digest` for tags registered with `Push(name, tag)`, which returns the digest, and `404 MANIFEST_UNKNOWN` for anything else. Use `Repo(name)` as an image repository; go-containerregistry talks plain HTTP to loopback hosts, so the real resolver works against it.
+
+## The engine end to end
+
+`internal/cli/engine_integration_test.go` runs the real `serve` against a test database, the GitHub fake (App auth, green checks on the source repository and an in-memory GitOps repository), the registry fake, the Argo CD fake (through `DOORSTEP_KUBECONFIG`) and an `httptest` webhook that records notifications. A small helper moves the fake Application to the newest GitOps commit, so a push webhook runs through every state to `succeeded` without polling waits. Serve tests that configure apps use the same fixture (`newEngineFixture`), because `serve` refuses to start with apps but without the GitHub App and a Kubernetes connection.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request, on pushes to `main` and weekly (Monday 06:23 UTC, so new advisories surface without waiting for a pull request); the weekly run executes only `govulncheck`. All jobs run on `ubuntu-24.04`. The `check` job:

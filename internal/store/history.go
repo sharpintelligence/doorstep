@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -60,6 +61,13 @@ FROM deployment_events
 WHERE deployment_id = $1
 ORDER BY id DESC
 LIMIT $2`
+
+const selectStateEnteredAtSQL = `
+SELECT occurred_at
+FROM deployment_events
+WHERE deployment_id = $1 AND type = 'transition' AND to_state = $2
+ORDER BY id DESC
+LIMIT 1`
 
 const selectRelatedDeploymentsSQL = `SELECT` + deploymentColumns + deploymentTables + `
 WHERE d.rollback_of_id = $1 OR d.parent_id = $1
@@ -257,4 +265,16 @@ func (s *Store) CurrentDeployment(ctx context.Context, t core.Target) (core.Depl
 		return core.Deployment{}, fmt.Errorf("current deployment of %s: %w", t, err)
 	}
 	return d, nil
+}
+
+func (s *Store) StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error) {
+	var at time.Time
+	err := s.db.QueryRow(ctx, selectStateEnteredAtSQL, id, state).Scan(&at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("deployment %d never entered %s: %w", id, state, core.ErrNotFound)
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read when deployment %d entered %s: %w", id, state, err)
+	}
+	return at, nil
 }

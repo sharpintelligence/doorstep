@@ -84,7 +84,7 @@ func (s State) Transition(to State) error {
 
 func transitions() map[State][]State {
 	return map[State][]State{
-		StateQueued:    {StateResolving, StateCancelled, StateSuperseded},
+		StateQueued:    {StateResolving, StateFailed, StateCancelled, StateSuperseded},
 		StateResolving: {StatePinning, StateFailed, StateCancelled, StateSuperseded},
 		StatePinning:   {StateSyncing, StateFailed, StateCancelled},
 		StateSyncing:   {StateVerifying, StateFailed, StateCancelled},

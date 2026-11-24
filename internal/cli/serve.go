@@ -11,17 +11,21 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sharpintelligence/doorstep/internal/api"
+	"github.com/sharpintelligence/doorstep/internal/argocd"
 	"github.com/sharpintelligence/doorstep/internal/auth"
 	"github.com/sharpintelligence/doorstep/internal/buildinfo"
 	"github.com/sharpintelligence/doorstep/internal/config"
 	"github.com/sharpintelligence/doorstep/internal/core"
+	"github.com/sharpintelligence/doorstep/internal/github"
 	"github.com/sharpintelligence/doorstep/internal/locks"
 	"github.com/sharpintelligence/doorstep/internal/logging"
 	"github.com/sharpintelligence/doorstep/internal/metrics"
+	"github.com/sharpintelligence/doorstep/internal/notify"
 	"github.com/sharpintelligence/doorstep/internal/queue"
 	"github.com/sharpintelligence/doorstep/internal/registry"
 	"github.com/sharpintelligence/doorstep/internal/rollback"
@@ -70,6 +74,7 @@ func newServeCommand(lookupEnv LookupEnv) *cobra.Command {
 		"external base URL of doorstep, used for links in notifications and GitHub deployment statuses, and required for sign-in (https unless loopback); links are left out when empty (env "+config.EnvPublicURL+")")
 	bindLogFlags(flags, &overrides)
 	bindDatabaseFlags(flags, &overrides)
+	bindKubernetesFlags(flags, &overrides)
 	addRegistryCredentialsFlag(flags, &overrides.Registry.CredentialsFile)
 	return cmd
 }
@@ -124,6 +129,10 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		return err
 	}
 	logGitHubApp(ctx, logger, cfg.GitHub, githubApp)
+	watcher, err := engineWatcher(cfg, in.catalog, in.lookupEnv, githubApp, logger)
+	if err != nil {
+		return err
+	}
 
 	if cfg.Registry.CredentialsFile != "" {
 		creds, err := registry.LoadDockerConfigFile(cfg.Registry.CredentialsFile)
@@ -146,7 +155,14 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 
 	apps := newCatalogApps(in.catalog)
 	q := queue.New(queue.Options{Store: st, MaxBatch: apps.MaxBatch, Logger: logger})
-	locksService, reminder, err := newLocks(st, cfg.Locks, logger)
+	build := buildinfo.Read()
+	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
+	dispatcher, err := newNotifier(in.catalog, cfg, in.lookupEnv, githubApp, logger, m.Recorder())
+	if err != nil {
+		return fmt.Errorf("notifications: %w", err)
+	}
+	defer drainNotifications(ctx, dispatcher, cfg.Server.ShutdownTimeout, logger)
+	locksService, reminder, err := newLocks(st, cfg.Locks, newLockNotifier(dispatcher, in.catalog), logger)
 	if err != nil {
 		return err
 	}
@@ -160,8 +176,6 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	defer stopProbe()
 	probeAuth(probeCtx, &background, logger, authService)
 
-	build := buildinfo.Read()
-	m := metrics.New(metrics.Options{Logger: logger, Build: build, QueueDepth: q.Depth})
 	rollbacks, err := rollback.New(rollback.Options{
 		Repository: rollback.NewRepository(st),
 		Observer:   rollbackMetrics{recorder: m.Recorder()},
@@ -169,6 +183,36 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	var engineRuns []func(context.Context) error
+	var rollbackAPI api.RollbackService = rollbacks
+	var commitAnnouncer announcer
+	if watcher != nil {
+		wiring, err := newEngine(engineInput{
+			config:    cfg,
+			catalog:   in.catalog,
+			apps:      apps,
+			store:     st,
+			queue:     q,
+			githubApp: githubApp,
+			watcher:   watcher,
+			locks:     locksService,
+			blocks:    rollbacks,
+			notifier:  dispatcher,
+			recorder:  m.Recorder(),
+			logger:    logger,
+			lookupEnv: in.lookupEnv,
+		})
+		if err != nil {
+			return fmt.Errorf("engine: %w", err)
+		}
+		engineRuns = wiring.runs
+		rollbackAPI = announcingRollbacks{rollbacks: rollbacks, announcer: wiring.engine}
+		commitAnnouncer = wiring.engine
+		logger.InfoContext(ctx, "engine started", slog.Int("apps", len(apps)))
+	} else {
+		logger.InfoContext(ctx, "engine idle: no apps configured")
 	}
 
 	intakeWiring, err := newIntake(ctx, intakeInput{
@@ -179,6 +223,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		maxBatch:  apps.MaxBatch,
 		readFile:  config.ReadSecretFile,
 		recorder:  m.Recorder(),
+		announcer: commitAnnouncer,
 		logger:    logger,
 	})
 	if err != nil {
@@ -192,7 +237,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		Queue:         q,
 		Apps:          apps,
 		Locks:         locksService,
-		Rollbacks:     rollbacks,
+		Rollbacks:     rollbackAPI,
 		Blocks:        rollbacks,
 		KnownApp:      knownApp(in.catalog),
 		Authenticator: principalAuthenticator{},
@@ -231,6 +276,7 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 		func(ctx context.Context) error { return reminder.Run(ctx, locks.SweepInterval) },
 	}
 	runs = append(runs, intakeWiring.runs...)
+	runs = append(runs, engineRuns...)
 	if cfg.Server.MetricsListenAddr == "" {
 		maps.Copy(mainRoutes, metricsRoutes)
 	} else {
@@ -252,12 +298,35 @@ func serve(ctx context.Context, logOutput io.Writer, in serveInput) error {
 	return nil
 }
 
-func newLocks(st *store.Store, cfg config.Locks, logger *slog.Logger) (*locks.Service, *locks.Reminder, error) {
-	service, err := locks.New(locks.Options{Repository: st, Logger: logger})
+func engineWatcher(cfg config.Config, catalog config.Catalog, lookupEnv LookupEnv, githubApp *github.App, logger *slog.Logger) (*argocd.Watcher, error) {
+	if len(catalog.Apps) == 0 {
+		return nil, nil
+	}
+	if githubApp == nil {
+		return nil, fmt.Errorf("engine: %d apps are configured but the GitHub App is not; doorstep needs it to pin digests in the GitOps repository: set %s and %s or %s",
+			len(catalog.Apps), config.EnvGitHubAppID, config.EnvGitHubAppPrivateKey, config.EnvGitHubAppPrivateKeyFile)
+	}
+	watcher, err := newSyncWatcher(cfg, catalog, lookupEnv, githubApp, logger)
+	if err != nil {
+		return nil, fmt.Errorf("engine: %d apps are configured, so doorstep must read their Argo CD Applications: %w", len(catalog.Apps), err)
+	}
+	return watcher, nil
+}
+
+func drainNotifications(ctx context.Context, dispatcher *notify.Dispatcher, timeout time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if err := dispatcher.Close(ctx); err != nil {
+		logger.WarnContext(ctx, "close notifications", slog.String("error", err.Error()))
+	}
+}
+
+func newLocks(st *store.Store, cfg config.Locks, notifier locks.Notifier, logger *slog.Logger) (*locks.Service, *locks.Reminder, error) {
+	service, err := locks.New(locks.Options{Repository: st, Notifier: notifier, Logger: logger})
 	if err != nil {
 		return nil, nil, err
 	}
-	reminder, err := locks.NewReminder(locks.ReminderOptions{Repository: st, Logger: logger, Every: cfg.ReminderInterval})
+	reminder, err := locks.NewReminder(locks.ReminderOptions{Repository: st, Notifier: notifier, Logger: logger, Every: cfg.ReminderInterval})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -75,19 +75,6 @@ func newKubeClient(cfg config.Kubernetes, lookupEnv LookupEnv, readFile func(str
 	return client, nil
 }
 
-func syncApplications(catalog config.Catalog) map[core.Target]argocd.Application {
-	apps := make(map[core.Target]argocd.Application, len(catalog.Apps))
-	for _, a := range catalog.Apps {
-		apps[core.AppTarget(a.Name)] = argocd.Application{
-			Namespace:   a.ArgoCD.Namespace,
-			Name:        a.ArgoCD.Application,
-			Repository:  string(a.GitOps.Repo),
-			SyncTimeout: a.ArgoCD.Timeout(),
-		}
-	}
-	return apps
-}
-
 func newSyncWatcher(cfg config.Config, catalog config.Catalog, lookupEnv LookupEnv, githubApp *github.App, logger *slog.Logger) (*argocd.Watcher, error) {
 	client, err := newKubeClient(cfg.Kubernetes, lookupEnv, os.ReadFile)
 	if err != nil {

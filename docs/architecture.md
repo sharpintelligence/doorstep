@@ -51,7 +51,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | Package | Responsibility | Status |
 | --- | --- | --- |
 | `cmd/doorstep` | `main`: wires OS signals, arguments, stdio and environment into `cli.Run`; embeds the IANA time zone database (`time/tzdata`) | built |
-| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file; `lock`, `unlock` and `locks` call the API through a small shared client; `rollback`, `block`, `unblock` and `blocks` call the API too; `argocd status` reads an app's Argo CD Application | built |
+| `internal/cli` | cobra command tree built by a constructor; `serve` is the composition root; `config validate` checks a configuration file; `lock`, `unlock` and `locks` call the API through a small shared client; `rollback`, `block`, `unblock` and `blocks` call the API too; `argocd status` reads an app's Argo CD Application; `serve` also holds the engine's adapters (`engine.go`), the app mapping (`apps.go`), gate wiring (`gates.go`) and the lock notifier (`locknotify.go`) | built |
 | `internal/config` | configuration model, defaults, environment overrides and validation; YAML file loader, app catalog (apps, gates with their deploy windows, notification targets) and secret references | built |
 | `internal/windows` | recurring time windows: five-field cron parsing (`robfig/cron`), time zone loading and the active/next arithmetic behind `schedule` gates; a leaf used by `config` for validation and by `gates` for evaluation | built |
 | `internal/logging` | builds the injected `*slog.Logger` (JSON or text, level) | built |
@@ -65,6 +65,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/github/githubtest` | fake GitHub API for tests: verifies App JWTs, serves installation lookup and token minting, paginated check runs (with `check_name` filtering), statuses, check suites and branch refs, authenticates extra handlers with installation tokens; in-memory fake repository (branches, commits, contents, refs, commit comparisons, pull requests with squash merges) with hooks to inject concurrent writes, blocked merges and conflicts | built |
 | `internal/intake` | merge and CI detection: tracks pushes to app branches, evaluates required checks and enqueues green commits exactly once; the signed GitHub webhook handler with delivery deduplication and the polling safety net that drive it; see [Merge and CI detection](#merge-and-ci-detection) and [Webhooks and polling](#webhooks-and-polling). `LiveChecks` reads and judges a commit's checks on demand for the `checks` gate. API and CLI deploy requests are later beads | built |
 | `internal/registry` | OCI tag to digest resolution through go-containerregistry, Docker `config.json` credentials matched per registry and path prefix | built |
+| `internal/registry/registrytest` | fake OCI registry for tests: `/v2/` ping and manifest `HEAD`/`GET` with `Docker-Content-Digest` for pushed tags | built |
 | `internal/gitops` | pin writer: kustomize `images` and YAML-path strategies, byte-preserving edits, committed through the GitHub Contents API directly or through a pull request doorstep merges; commit trailers; see [gitops.md](gitops.md) | built |
 | `internal/argocd` | read-only `Application` watcher through the Kubernetes API: `WaitSynced` (synced to a revision containing the pin commit and healthy, with a per-app timeout), `Check` and `Health`; a get and a watch per wait, no cache; see [argocd.md](argocd.md) | built |
 | `internal/argocd/argocdtest` | fake Kubernetes API for Argo CD `Application` resources: get and watch (field selector, resource version, timeout), event pushes, closed and expired watches, injected `401`/`403`/`404`/`5xx`, request counts and a generated kubeconfig | built |
@@ -72,7 +73,7 @@ There is one binary, `cmd/doorstep`. Everything else lives under `internal/`, so
 | `internal/gates` | gate model and evaluation: the `Gate` interface, a registry that builds per-app before/after plans from the configuration, and an evaluator that runs a phase, records results through its `ResultStore` port, enforces timeouts, skips gates on rollbacks, aggregates the verdict and notifies observers; the built-in `checks`, `lock`, `schedule`, `health` and `soak` gate types, registered by `RegisterBuiltins` over small read ports; see [gates.md](gates.md#built-in-gates) | built |
 | `internal/rollback` | rollback requests and blocks: picks the current version and the previous good, unblocked digest, cancels the deploy it replaces and queued deploys of the blocked commit, queues the rollback deployment at rollback priority, records the block and the audit row in one transaction (retried on state conflicts); manual block, unblock and list; the engine's `BlockList` port. Depends on `core` and a `Repository` port with `InTx` over `*store.Store`; see [rollback.md](rollback.md) | built |
 | `internal/notify` | Slack and generic webhook notifications; GitHub deployment statuses; see [notifications.md](notifications.md) | built |
-| `internal/engine` | deployment orchestration state machine; declares the ports it consumes | planned |
+| `internal/engine` | the deployment state machine: claims run admit (before gates), resolve, pin, sync and verify (after gates) as idempotent, resumable steps; classifies errors, bounds retries per state, routes every failure through a `FailurePolicy`, records transitions, emits `deploy.*` notifications and deployment metrics; declares the ports it consumes and imports only `core`; see [engine.md](engine.md) | built |
 | `internal/api` | HTTP JSON API (`/api/v1`): one mux, one file per resource, JSON error envelope, role-checked endpoints (viewer reads, deployer changes locks, requests rollbacks and changes blocks), queue, lock, rollback, block and deploy history endpoints; see [api.md](api.md) | built |
 | `internal/web` | server-rendered UI with `html/template` and embedded htmx | planned |
 | `internal/auth` | viewer, deployer and admin roles; hashed API tokens; OIDC or GitHub sign-in with Postgres-backed sessions; authentication middleware with CSRF enforcement and `RequireRole`; see [authentication.md](authentication.md) | built |
@@ -90,38 +91,24 @@ The design is ports and adapters.
 - Adapters (`store`, `queue`, `locks`, `registry`, `gitops`, `argocd`, `gates`, `rollback`, `notify`) implement engine ports. They never import `engine` or each other, with two exceptions: `gitops`, `intake`, `notify` and `auth` (for GitHub sign-in) use `github`, and Postgres-backed adapters (`queue`, `locks`, `intake`'s `PostgresCommits`, `auth`, `rollback`, and later `gates` persistence) may import `store` for the connection handle, `InTx` and row helpers. `intake` imports only `core`, `github` and `store`; it does not import `config` or `metrics` (its `Observer` port is adapted to `metrics.Recorder` in `cli`).
 - `store` imports only `core`.
 - Actions are audited through `(*store.Store).RecordAudit`, called on the transaction-bound store in the same `InTx` as the action. Consumers declare a one-method `RecordAudit(ctx, core.AuditEntry) error` port rather than importing `auth`.
-- `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers, wrapped in `auth.RequireRole` or `auth.RequireRoleOrLogin`, which `serve` also wraps in the authenticator; `server` owns the listener, logging, panic recovery and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port. Rollback requests and blocks are the other exception: a rollback request is a queue and block write, not orchestration, so `api` calls `rollback.Service` directly through its `RollbackService` and `BlockService` ports, and the engine later executes the queued rollback deployment like any other.
+- `api` and `web` call `engine` for commands and `store` read models for queries. History is part of `store` rather than a package of its own: a transition must update the deployment, append its event and delete its queue entry atomically through the store's transaction handle. They contribute handlers, wrapped in `auth.RequireRole` or `auth.RequireRoleOrLogin`, which `serve` also wraps in the authenticator; `server` owns the listener, logging, panic recovery and health endpoints. Lock commands are the exception: they do not involve a deployment, so `api` calls `locks.Service` directly through its own small `LockService` port. Rollback requests and blocks are the other exception: a rollback request is a queue and block write, not orchestration, so `api` calls `rollback.Service` directly through its `RollbackService` and `BlockService` ports, and the engine executes the queued rollback deployment like any other. `cli` wraps `rollback.Service` for the API so that the engine announces the queued rollback and the cancelled deployments after the request commits.
 - `gates` imports `core`, `config` (the typed `App` and `Gate` its factories read), `windows` (deploy window arithmetic) and `metrics` (only the label types of its `Metrics` port). It reaches Postgres only through its `ResultStore` and `TrackedChecks` ports, which `*store.Store` satisfies, and never imports `store`, `engine` or another adapter: freezes come through `FreezeReader` (`*locks.Service`), live CI state through `LiveChecks` (`intake.LiveChecks`) and Argo CD through `ApplicationReader`, for which the composition root adapts the `argocd` package to the gates-owned `gates.Application` type.
 - `windows` imports only the standard library and `robfig/cron`, so configuration validation and gate evaluation share one parser: a configuration that validates cannot fail to build its gates at startup.
-- `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`.
+- `cli` `serve` is the only composition root: it constructs adapters, injects them into `engine`, and mounts handlers on `server`. Adapters that only translate types or classify errors for the engine live in `cli`, so no adapter package imports `engine`.
 - No package-level mutable state, no `init()`, no `slog.SetDefault`. Dependencies, including the logger and clock, are passed through constructors. The only exceptions are the link-time `buildinfo.version`, `buildinfo.commit` and `buildinfo.commitTime` variables, which the release image build sets because it has no `.git` directory. The store is the one place that does not take the injected clock: row timestamps and lease expiry use Postgres `now()`, the only clock all replicas share ([database.md](database.md#clock)).
 - `context.Context` is the first parameter of anything that does I/O or may block.
 - Errors are wrapped with `%w` and inspected with `errors.Is` / `errors.As`.
 
 ## Engine ports
 
-Illustrative signatures; the engine bead finalises them.
+`internal/engine` drives deployments through their states ([engine.md](engine.md), [ADR 0012](decisions/0012-deployment-engine.md)). It declares the ports it consumes over its own small types, so it imports only `core`:
 
 ```go
 type DeploymentStore interface {
-	Create(ctx context.Context, d core.Deployment) (core.Deployment, error)
 	Get(ctx context.Context, id core.DeploymentID) (core.Deployment, error)
-	TransitionDeployment(ctx context.Context, t store.Transition) (core.Deployment, error)
+	Transition(ctx context.Context, t engine.Transition) (core.Deployment, error)
 	SetLineage(ctx context.Context, id core.DeploymentID, l core.Lineage, actor string) (core.Deployment, error)
-	LastSuccessfulDeployment(ctx context.Context, t core.Target, excludeDigest core.Digest) (core.Deployment, error)
-}
-
-type Queue interface {
-	Enqueue(ctx context.Context, d core.Deployment, opts queue.EnqueueOptions) (queue.EnqueueResult, error)
-	Expedite(ctx context.Context, id core.DeploymentID, actor string) error
-	Claim(ctx context.Context, workerID string) (queue.Claimed, bool, error)
-	Heartbeat(ctx context.Context, id core.DeploymentID, workerID string) (time.Time, error)
-	Release(ctx context.Context, id core.DeploymentID, workerID string, delay time.Duration) error
-	Complete(ctx context.Context, id core.DeploymentID, workerID string) error
-}
-
-type Locker interface {
-	Blocking(ctx context.Context, t core.Target) ([]core.Lock, error)
+	StateEnteredAt(ctx context.Context, id core.DeploymentID, state core.State) (time.Time, error)
 }
 
 type DigestResolver interface {
@@ -129,9 +116,9 @@ type DigestResolver interface {
 }
 
 type PinWriter interface {
-	Pin(ctx context.Context, req gitops.Request) (gitops.Result, error)
-	Current(ctx context.Context, t gitops.Target) (gitops.Pinned, error)
-	Abandon(ctx context.Context, req gitops.Request) error
+	Pin(ctx context.Context, req engine.PinRequest) (engine.PinResult, error)
+	Current(ctx context.Context, t core.Target) (core.Digest, error)
+	Abandon(ctx context.Context, req engine.PinRequest) error
 }
 
 type SyncWatcher interface {
@@ -141,11 +128,6 @@ type SyncWatcher interface {
 
 type GateEvaluator interface {
 	Evaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
-	Reevaluate(ctx context.Context, d core.Deployment, phase core.GatePhase) (core.GateOutcome, error)
-}
-
-type Notifier interface {
-	Notify(ctx context.Context, n core.Notification)
 }
 
 type BlockList interface {
@@ -154,34 +136,33 @@ type BlockList interface {
 	MarkMirrored(ctx context.Context, t core.Target, trailers core.BlockTrailers, commit core.Commit) error
 }
 
-type Clock interface {
-	Now() time.Time
+type Notifier interface {
+	Notify(ctx context.Context, n core.Notification)
+}
+
+type Metrics interface {
+	DeploymentStarted(app string)
+	DeploymentFinished(app string, outcome engine.Outcome, duration time.Duration)
+}
+
+type FailurePolicy interface {
+	Decide(ctx context.Context, f engine.Failure) (engine.FailureAction, error)
 }
 ```
 
-`*queue.Queue` implements the `Queue` port today (see [queue.md](queue.md)); its `Claimed`, `EnqueueOptions` and `EnqueueResult` types live in `queue`, so the engine bead either moves them to `core` or declares the port over its own types with a thin adapter, keeping `engine` free of adapter imports. `queue.Runner` drives the engine through a `Handler` and is started by `serve` once the engine exists.
+`serve` is the composition root. `internal/cli/engine.go` holds the thin adapters: `engineStore` maps `engine.Transition` to `store.Transition`; `digestResolver` calls `registry.Resolver.ResolveCommit` and wraps its sentinels in `engine.ErrPermanent` or `engine.ErrImageNotReady`; `pinWriter` maps each app to its `gitops.Target` (built by `appWiring` in `internal/cli/apps.go`, which also maps apps to `intake.App` and `argocd.Application`) and classifies `gitops` errors; `engineMetrics` adapts `metrics.Recorder`; `queueHandler` turns `queue.Claimed` into `engine.Claim`. `*argocd.Watcher`, `*gates.Evaluator`, `*rollback.Service` and `*notify.Dispatcher` satisfy their ports as they are, and `engine.FailPolicy` is the default policy.
 
-`Locker` is what `locks.Service` offers the engine: the live freezes (app and global) that block a target. The same method satisfies `gates.FreezeReader`, through which the opt-in `lock` gate records a held deployment as pending with the owner and reason as evidence. The claim itself already skips frozen deploys ([locks.md](locks.md)). Per-target serialisation needs no lock rows: head-of-line claiming and the one-active-deployment index provide it, and kind `deployment` lock rows are reserved for the engine.
+There is no queue port: `queue.Runner` claims, heartbeats and releases, and a terminal transition deletes the queue entry in the same transaction, so the engine never calls the queue. There is no locker port either: the claim skips frozen deploys and the opt-in `lock` gate reads freezes. `LastSuccessfulDeployment` and an enqueue port are left to automatic rollback (doorstep-ehl.6.5), which also adds the failure policy action that fails a deploy, enqueues its rollback and creates the block in one transaction.
 
-The store already implements the deployment side: `TransitionDeployment`, `SetLineage` and `LastSuccessfulDeployment` ([database.md](database.md#transitions-and-lineage)). The engine bead decides whether its port takes `store.Transition` as is or a mirror type in `core`, keeping `engine` free of a `store` import.
-
-`BlockList` is `*rollback.Service` ([rollback.md](rollback.md), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)). The engine must:
-
-- for kind `deploy`, call `Blocked` with the resolved digest right after resolving and fail the deployment, naming the block, when it reports one; rollbacks are never refused;
-- before every `Pin`, call `PendingTrailers` and pass them as `gitops.Request.Blocks` and `Unblocks`, and after a `Pin` whose result has `Changed`, call `MarkMirrored` with `Result.Commit`;
-- for kind `rollback`, use the preset `Digest` without resolving, and stop as soon as a transition returns `core.ErrStateConflict` or the context is cancelled;
-- before a rollback succeeds, confirm `PinWriter.Current` equals the rollback's digest and pin again if it does not. A rollback request cancels an in-flight deploy with a compare-and-set and that deploy's queue entry goes with it, so the rollback can be claimed while the cancelled worker, inside `Pin`, may still land its commit for up to one heartbeat interval; the final check closes that window ([rollback.md](rollback.md#the-late-pin-race));
-- create the block of an automatic rollback through `CreateBlock` on the transaction-bound store, in the transaction that fails the deploy and enqueues the rollback.
-
-`LastSuccessfulDeployment` skips digests with an active block, so automatic and operator rollbacks never pick a blocked target.
+`BlockList` is `*rollback.Service` ([rollback.md](rollback.md), [ADR 0009](decisions/0009-blocks-in-postgres-mirrored-to-git.md)). The engine calls `Blocked` with the resolved digest of a deploy and fails it when blocked, passes `PendingTrailers` with every pin and calls `MarkMirrored` after a pin that wrote a commit, pins a rollback's preset digest without resolving, and confirms `PinWriter.Current` before a rollback succeeds, pinning again if a cancelled deploy's late pin replaced it ([rollback.md](rollback.md#the-late-pin-race)).
 
 `Notifier` has no error result on purpose: `notify.Dispatcher` validates and queues the notification without network I/O and returns, so a notification can never block or fail a deploy (see [Notifications](#notifications)).
 
-`PinWriter` is `*gitops.Writer`. Like the registry adapter, `gitops` owns its request and result types (plain strings plus `core.Digest`, `core.Commit`, `core.DeploymentID` and `core.Kind`) and imports only `core` and `github`, never `config`; the engine maps `config.App` to `gitops.Target`. It has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). See [GitOps pin writer](#gitops-pin-writer).
+`PinWriter` wraps `*gitops.Writer`. `gitops` owns its request and result types (plain strings plus `core.Digest`, `core.Commit`, `core.DeploymentID` and `core.Kind`) and imports only `core` and `github`, never `config`. It has two strategies: editing the `images` list of a `kustomization.yaml`, and setting a value at a YAML path (for Helm values files and plain manifests). See [GitOps pin writer](#gitops-pin-writer).
 
-`SyncWatcher` is `*argocd.Watcher`. `core.SyncStatus`, `core.Health`, `core.SyncFailure` and the sentinels `core.ErrSyncTimeout`, `core.ErrSyncFailed`, `core.ErrSyncTargetNotFound`, `core.ErrSyncForbidden` and `core.ErrSyncUnavailable`, and `core.DefaultSyncTimeout`, live in `core/sync.go`, so the engine switches on them without importing the adapter. `WaitSynced` returns the last observed status with every error; its `Failure` carries a stable reason and a class hint (`transient`, `version`, `configuration`, `unknown`) for rollback policy. The per-app timeout is applied inside the adapter, and a caller deadline or cancellation comes back as the plain context error. The watcher also offers a non-blocking `Check(ctx, target, revision)` with the same assessment, for the `health` gate. `cli.newSyncWatcher` builds it from the catalog; `serve` does not call it yet, the engine bead does, and that is also when `serve` gains the `--kubeconfig` and `--kube-context` flags that `argocd status` already has. See [argocd.md](argocd.md).
+`SyncWatcher` is `*argocd.Watcher`. `core.SyncStatus`, `core.Health`, `core.SyncFailure` and the sentinels `core.ErrSyncTimeout`, `core.ErrSyncFailed`, `core.ErrSyncTargetNotFound`, `core.ErrSyncForbidden` and `core.ErrSyncUnavailable`, and `core.DefaultSyncTimeout`, live in `core/sync.go`, so the engine switches on them without importing the adapter. `WaitSynced` returns the last observed status with every error; its `Failure` carries a stable reason and a class hint (`transient`, `version`, `configuration`, `unknown`) that the engine passes to its failure policy. The per-app timeout is applied inside the adapter, and a caller deadline or cancellation comes back as the plain context error, so the engine passes the remaining time of a resumed wait as its own deadline and tells it apart from a shutdown. The watcher also offers a non-blocking `Check(ctx, target, revision)` with the same assessment, and `Status`, which the `health` gate reads. `serve` builds it with `cli.newSyncWatcher` whenever apps are configured, from the `--kubeconfig`/`--kube-context` flags or the in-cluster ServiceAccount. See [argocd.md](argocd.md).
 
-`GateEvaluator` is `*gates.Evaluator`. A `before` outcome of `passed` lets the deploy start pinning; an `after` outcome of `passed` makes it succeed and `failed` triggers a rollback; `pending` means poll again. Individual gates implement `gates.Gate` and are built from the configuration by `gates.Registry`; the engine never sees them. `serve` registers the built-in types with one `gates.RegisterBuiltins` call, passing `*store.Store`, `intake.LiveChecks`, `*locks.Service` and an adapter from the `argocd` package to `gates.ApplicationReader` ([gates.md](gates.md#wiring)). A `schedule` gate can keep a before phase `pending` for days, so the engine should release a claimed deployment with a delay while its before phase is pending rather than hold the lease. See [gates.md](gates.md).
+`GateEvaluator` is `*gates.Evaluator`. The engine evaluates the `before` phase while the deployment is still `queued` and releases it with a delay while that is `pending`; a `before` failure fails it from `queued`. An `after` outcome of `passed` makes it succeed and `failed` fails it. Individual gates implement `gates.Gate` and are built from the configuration by `gates.Registry`; the engine never sees them. `internal/cli/gates.go` registers the built-in types with `gates.RegisterBuiltins`, passing `*store.Store`, `intake.LiveChecks`, `*locks.Service` and `argoApplications`, an adapter from `(*argocd.Watcher).Status` to `gates.ApplicationReader` ([gates.md](gates.md#wiring)).
 
 ## Registry resolution
 
@@ -192,7 +173,7 @@ resolver := registry.New(registry.Options{Credentials: registry.FileCredentials{
 digest, err := resolver.ResolveCommit(ctx, "ghcr.io/owner/app", commitSHA)
 ```
 
-- Inputs are plain strings and the result is `registry.Digest` (`algorithm:hex`), so no go-containerregistry type leaks out. The engine bead adds a small adapter from `core.ImageRef` to `Resolve` and from `registry.Digest` to `core.Digest`.
+- Inputs are plain strings and the result is `registry.Digest` (`algorithm:hex`), so no go-containerregistry type leaks out. `cli.digestResolver` adapts `core.ImageRef` to `ResolveCommit` and `registry.Digest` to `core.Digest` for the engine.
 - The repository must not carry a tag or digest, and the tag must be a non-empty, valid OCI tag. Nothing defaults to `latest`. `ResolveCommit` encodes the convention that images are tagged with the full commit SHA: it rejects anything but 40 lowercase hex characters with `ErrInvalidReference` before contacting the registry, and is what the engine calls. `Resolve` accepts any tag, which `doorstep image resolve` uses.
 - It sends `HEAD /v2/<name>/manifests/<tag>` accepting OCI index, OCI manifest, Docker manifest list and Docker v2 manifest, and returns `Docker-Content-Digest`. A multi-architecture image therefore resolves to its index digest, which stays valid on every node architecture. HEAD is not counted against Docker Hub pull limits.
 - Only when HEAD fails without a registry verdict (no digest header, `405`, other unexpected `4xx`) does it fall back to `GET` and hash the manifest body.
@@ -211,7 +192,7 @@ Context cancellation and deadlines stay visible through `errors.Is(err, context.
 
 Credentials come from a Docker `config.json` (the `.dockerconfigjson` key of a `kubernetes.io/dockerconfigjson` Secret) parsed by a small parser in the package. Keys are `host[/path-prefix]` and the longest whole-segment prefix of `host/repository` wins, so each GitHub owner on `ghcr.io` can have its own token. `FileCredentials` re-reads the file on every lookup, so a rotated Secret is picked up without a restart. See [configuration.md](configuration.md#registry-credentials).
 
-`serve` loads the credentials file once at startup only to fail fast on a missing or malformed file; nothing in `serve` resolves images yet. The engine bead wires a `Resolver` into `serve` with `Credentials: registry.FileCredentials{Path: cfg.Registry.CredentialsFile}`, the same source `doorstep image resolve` uses, so rotation works at runtime.
+`serve` loads the credentials file once at startup to fail fast on a missing or malformed file, and gives the engine a `Resolver` with `Credentials: registry.FileCredentials{Path: cfg.Registry.CredentialsFile}`, the same source `doorstep image resolve` uses, so rotation works at runtime.
 
 ## Merge and CI detection
 
@@ -252,7 +233,7 @@ poller             ──► Service.Open(limit) + Reevaluate      still follow 
 - **Enqueued deployment.** `core.Deployment{Target, Kind: deploy, Source and RequestedBy from the push, Commit{Repository, SHA}, Image{ImageRepository, Tag: full SHA}}`, following the convention that images are tagged with the full commit SHA.
 - **Errors.** If the branch head cannot be read, the push is not recorded and the error is returned so the delivery is retried. Once recorded, a commit is evaluated; if reading checks fails, it stays `pending` and the wrapped error is returned (`github.ErrNotInstalled` and friends stay inspectable with `errors.Is`). Failures for one app are joined with `errors.Join` and do not block other apps. There are no retries inside `intake`: webhook redeliveries, later check events and the poller retry.
 - **Ignored input.** Pushes to repositories or branches no app follows, the all-zero SHA of a deleted branch and pushes that are no longer the branch head return no results and no error. The caller strips `refs/heads/` before calling.
-- **Wiring.** `serve` builds the service in `internal/cli/intake.go` when the GitHub App is configured and apps exist: each `config.App` becomes `intake.App{Target: core.AppTarget(name), Repository, Branch, RequiredChecks, ImageRepository}`, `intake.GitHub{Clients: app}` supplies checks and branch heads, and `PostgresCommits` gets a factory that wraps `queue.New` over the transaction-bound store. Enqueued deployments wait in the queue until the engine consumes them. The engine bead reuses or moves this helper.
+- **Wiring.** `serve` builds the service in `internal/cli/intake.go` when the GitHub App is configured and apps exist: each `config.App` becomes `intake.App{Target: core.AppTarget(name), Repository, Branch, RequiredChecks, ImageRepository}`, `intake.GitHub{Clients: app}` supplies checks and branch heads, and `PostgresCommits` gets a factory that wraps `queue.New` over the transaction-bound store. The mapping lives in `appWiring.intake()` (`internal/cli/apps.go`). When the engine runs, `PostgresCommits` is wrapped so that `Engine.Queued` announces each enqueued deployment after its settlement commits, and the engine's queue runner picks the deployment up.
 - **Not here.** `intake` applies no timeout to commits that stay pending (the `checks` gate owns the 30 minute timeout).
 
 ## Webhooks and polling
@@ -337,7 +318,7 @@ engine ── Notify(n) ──► Dispatcher: validate, route by app, enqueue (n
 
 - Routing: `apps[].notify` names the Slack and webhook targets of each app; the GitHub reporter is global and skips apps with `source.deployments: false`. Each target filters by event kind (`notifications[].events`, six kinds by default).
 - Delivery is in memory and best effort ([ADR 0006](decisions/0006-notifications-are-best-effort.md)): per-target queues keep order and isolate slow targets, a full queue drops and counts, and `Dispatcher.Close(ctx)` drains until the shutdown deadline. Outcomes are counted in `doorstep_notifications_total`.
-- `notify` does not import `config` or `metrics`. `cli` maps the catalog to `notify.SlackOptions`, `notify.WebhookOptions` and routes, passes secrets as closures over `SecretRef.Read` (read on every send), and adapts `metrics.Recorder` to `notify.Observer`. `cli.newNotifier` builds the dispatcher. Nothing calls it from `serve` yet: the engine bead (doorstep-ehl.4.4) calls it, hands the dispatcher to the engine and closes it with the shutdown timeout, and until then only `doorstep notify test` delivers anything.
+- `notify` does not import `config` or `metrics`. `cli` maps the catalog to `notify.SlackOptions`, `notify.WebhookOptions` and routes, passes secrets as closures over `SecretRef.Read` (read on every send), and adapts `metrics.Recorder` to `notify.Observer`. `cli.newNotifier` builds the dispatcher; `serve` hands it to the engine and, through `cli.lockNotifier`, to the lock service and reminder, and closes it with the shutdown timeout after every worker has stopped. A global freeze has no app, so `lockNotifier` sends it once per app, skipping apps whose targets were already covered.
 - The GitHub reporter keeps no state that matters: it finds the GitHub deployment by commit, environment (the app name) and the `doorstep_deployment_id` in its payload, or creates it, and caches IDs in a bounded map until the deployment ends. A `403` or `404` that is not a rate limit is a permission problem and is not retried; a rate-limited `403` or `429` is retried, honouring `Retry-After` or `x-ratelimit-reset`. Status descriptions never carry the failure reason, because GitHub shows them to every reader of the repository.
 
 ## State machine and concurrency
@@ -350,7 +331,7 @@ queued → resolving → pinning → syncing → verifying → succeeded
                                               └────► failed
 ```
 
-Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `failed` (an unresolvable tag or a GitHub error fails a deploy before verification). Any non-terminal deployment can become `cancelled` (operator action), and a `queued` or `resolving` deployment can become `superseded` (a newer deployment for the same target was queued before this one started pinning).
+Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `failed` (an unresolvable tag or a GitHub error fails a deploy before verification), and so can `queued` when a `before` gate fails: the engine evaluates the `before` phase while the deployment is still `queued` and releases it with a delay while that phase is pending, so a deploy waiting for a window does not hold its target in flight ([engine.md](engine.md#before-gates-hold-the-deployment-in-queued)). Any non-terminal deployment can become `cancelled` (operator action), and a `queued` or `resolving` deployment can become `superseded` (a newer deployment for the same target was queued before this one started pinning).
 
 - Terminal states: `succeeded`, `failed`, `cancelled`, `superseded`. A terminal state has no outgoing transitions.
 - Active states: `resolving`, `pinning`, `syncing`, `verifying`. At most one deployment per target is active.
@@ -358,7 +339,7 @@ Any of `resolving`, `pinning`, `syncing` and `verifying` can also move to `faile
 - A rollback is a separate deployment of kind `rollback` with `rollback_of_id` set, queued at a higher priority, and it goes through the same states ([ADR 0002](decisions/0002-rollback-is-a-new-deployment.md)). When a deploy's gates fail, the engine moves it to `failed`, removes its queue entry and enqueues the rollback in one transaction. A deploy still in flight when a rollback is requested is `cancelled`, and so are queued deploys of the commit the rollback blocks; other queued deploys run after the rollback ([rollback.md](rollback.md)).
 
 - Every transition is a compare-and-set on `(id, from_state)` through `store.TransitionDeployment` and is recorded in history in the same transaction; a lost race returns `core.ErrStateConflict` ([database.md](database.md#transitions-and-lineage)).
-- Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA.
+- Every step is idempotent and resumable: after a restart a worker re-claims the deployment and re-runs the current step. Pinning compares the desired digest with the file in Git before committing; watching keys on the commit SHA and resumes with the remaining sync time. One claim runs as many steps as it can.
 - Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED` and hold a lease column refreshed by heartbeat. An expired lease makes the row claimable again, so a crashed replica never wedges a target. A claim only takes the head entry of a target whose deployment is `queued` or active, and never while another entry of that target holds a live lease. Lease expiry uses the database clock; see [database.md](database.md#claiming-work).
 - A target's queue runs in-flight deployments first, then by priority (`normal` 0, `urgent` 100, `rollback` 200), then oldest first. An urgent deploy jumps queued work but never preempts an in-flight deployment.
 - Claiming a queued deploy batches it: the deploy with the newest commit among the first `deploy.max_batch` queued deploys at the head's priority runs and the older ones become `superseded`; an urgent deploy also supersedes every older queued normal deploy of an older commit. Commit age is the order in which commits were first enqueued. Rollbacks never batch and are never superseded ([ADR 0005](decisions/0003-queue-batching-and-urgent.md), [queue.md](queue.md)).
@@ -470,7 +451,7 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 ## Testing strategy
 
 - Standard library `testing` only (no testify), table-driven with `t.Run` and `t.Parallel`, `httptest` for HTTP.
-- Engine logic is tested against hand-written fakes of its ports; no Postgres, GitHub or Kubernetes needed.
+- Engine logic is tested against hand-written fakes of every port; no Postgres, GitHub or Kubernetes needed. An integration test runs `serve` end to end against Postgres and the GitHub, registry and Argo CD fakes.
 - Tests always run with the race detector and shuffled order (`just test`).
 - Postgres integration tests read `DOORSTEP_TEST_DATABASE_URL` and call `t.Skip` when it is unset. Each test gets an isolated schema through `internal/store/storetest`.
 - CI runs a `postgres:18-alpine` service (pinned by digest), exports `DOORSTEP_TEST_DATABASE_URL` and sets `DOORSTEP_TEST_REQUIRE_DATABASE=true`, so integration tests run on every pull request and a missing database fails the build instead of skipping.
@@ -478,4 +459,4 @@ On `SIGINT` or `SIGTERM` the server marks itself not ready and keeps serving for
 - The queue runner, the intake poller and the webhook delivery sweeper are tested with fakes inside `testing/synctest` bubbles, so wake-ups, polling, heartbeats and backoff run on a fake clock.
 - The Argo CD watcher is tested against `argocdtest`, a real HTTP fake of the Kubernetes API, so the wire format, field selectors, watch reconnects and timeouts are exercised; the assessment itself is a pure function with table tests. `internal/kube` is tested against TLS test servers with generated CAs and client certificates.
 
-See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [authentication.md](authentication.md) for sign-in, tokens and the audit log, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [gates.md](gates.md) for gate evaluation, [argocd.md](argocd.md) for waiting on Argo CD, [api.md](api.md) for the HTTP API, [rollback.md](rollback.md) for rollbacks and blocks and [metrics.md](metrics.md) for the exported metrics.
+See [development.md](development.md) for the commands, [configuration.md](configuration.md) for runtime settings, [authentication.md](authentication.md) for sign-in, tokens and the audit log, [database.md](database.md) for the schema, [queue.md](queue.md) for queue behaviour, [engine.md](engine.md) for the deployment engine, [gates.md](gates.md) for gate evaluation, [argocd.md](argocd.md) for waiting on Argo CD, [api.md](api.md) for the HTTP API, [rollback.md](rollback.md) for rollbacks and blocks and [metrics.md](metrics.md) for the exported metrics.

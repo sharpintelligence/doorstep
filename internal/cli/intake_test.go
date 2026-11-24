@@ -43,9 +43,20 @@ func newIntakeGitHub(t *testing.T) *githubtest.Server {
 	t.Helper()
 	srv := githubtest.NewServer(t)
 	srv.Install("example-user", "blog", 1)
+	greenHead(srv)
+	return srv
+}
+
+func newIntakeFixture(t *testing.T) *engineFixture {
+	t.Helper()
+	f := newEngineFixture(t)
+	greenHead(f.github)
+	return f
+}
+
+func greenHead(srv *githubtest.Server) {
 	srv.SetBranch("example-user", "blog", "main", intakeTestSHA)
 	srv.SetCheckRuns("example-user", "blog", intakeTestSHA, githubtest.CheckRun{ID: 1, Name: "test", Status: "completed", Conclusion: "success"})
-	return srv
 }
 
 func githubEnv(srv *githubtest.Server, extra map[string]string) map[string]string {
@@ -135,11 +146,11 @@ func TestRunServeIntake(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			srv := newIntakeGitHub(t)
+			f := newIntakeFixture(t)
 			args, env := withDatabase(t, databaseURLEnv, []string{
 				"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "", "--shutdown-delay", "0s",
-				"--config", writeConfig(t, intakeConfig),
-			}, githubEnv(srv, tt.env))
+				"--config", writeConfig(t, f.config(intakeConfig)),
+			}, f.env(tt.env))
 			var stdout bytes.Buffer
 			var stderr lockedBuffer
 			ctx, cancel := context.WithCancel(t.Context())
@@ -198,11 +209,12 @@ func TestRunServeIntake(t *testing.T) {
 func TestRunServeIntakeDisabled(t *testing.T) {
 	t.Parallel()
 
-	srv := newIntakeGitHub(t)
+	f := newIntakeFixture(t)
+	srv := f.github
 	args, env := withDatabase(t, databaseURLEnv, []string{
 		"serve", "--listen-addr", "127.0.0.1:0", "--metrics-listen-addr", "127.0.0.1:0", "--shutdown-delay", "0s",
-		"--config", writeConfig(t, intakeConfig),
-	}, githubEnv(srv, map[string]string{config.EnvPollInterval: "0"}))
+		"--config", writeConfig(t, f.config(intakeConfig)),
+	}, f.env(map[string]string{config.EnvPollInterval: "0"}))
 	var stdout bytes.Buffer
 	var stderr lockedBuffer
 	ctx, cancel := context.WithCancel(t.Context())

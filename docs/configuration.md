@@ -30,12 +30,14 @@ Apps, notification targets and the `auth` section are only read from the configu
 | | `DOORSTEP_DATABASE_URL` | none | Postgres connection URL. Required unless a URL file is given; see [Database](#database). |
 | `--database-url-file` | `DOORSTEP_DATABASE_URL_FILE` | none | Path to a file holding the Postgres connection URL. Required unless `DOORSTEP_DATABASE_URL` is set; see [Database](#database). |
 | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` | empty (anonymous) | Path to a Docker `config.json` with registry credentials; see [Registry credentials](#registry-credentials). When set, `serve` reads it at startup and refuses to start if it is unreadable or malformed. |
-| | `DOORSTEP_KUBECONFIG` | empty (in-cluster) | Kubeconfig file used to read Argo CD Applications. Empty uses the pod's ServiceAccount; doorstep never falls back to `$KUBECONFIG` or `~/.kube/config`. Only a subset of kubeconfig settings is supported; see [argocd.md](argocd.md#connecting-to-the-cluster). `serve` does not read Applications yet; the `--kubeconfig` flag is offered by [`argocd status`](#doorstep-argocd-status). |
-| | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` | Context in that kubeconfig. Requires a kubeconfig. The `--kube-context` flag is offered by `argocd status`. |
+| `--kubeconfig` | `DOORSTEP_KUBECONFIG` | empty (in-cluster) | Kubeconfig file used to read Argo CD Applications. Empty uses the pod's ServiceAccount; doorstep never falls back to `$KUBECONFIG` or `~/.kube/config`. Only a subset of kubeconfig settings is supported; see [argocd.md](argocd.md#connecting-to-the-cluster). Required, like the [GitHub App](#github-app), whenever apps are configured: `serve` refuses to start without a usable Kubernetes connection. |
+| `--kube-context` | `DOORSTEP_KUBE_CONTEXT` | the kubeconfig's `current-context` | Context in that kubeconfig. Requires a kubeconfig. |
 | | `DOORSTEP_LOCK_REMINDER_INTERVAL` | `24h` | How long a freeze lock may be held before doorstep sends a reminder, and how often it repeats while the lock stays held. Go duration syntax. `0s` disables reminders (expired locks are still cleaned up); otherwise at least `1m`; must not be negative. See [locks.md](locks.md#reminders). |
 | | `DOORSTEP_POLL_INTERVAL` | `1m` | How often doorstep polls GitHub for new branch heads and re-checks open commits, as a safety net for missed or unreachable webhooks. Go duration syntax. `0s` disables polling; otherwise at least `10s`; must not be negative. See [Intake](#intake). |
 
-The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval, the poll interval and the Kubernetes connection have no `serve` flag.
+The GitHub App settings are described in [GitHub App](#github-app). Every setting in this table except `--config` and `DOORSTEP_DATABASE_URL` can also be set in the configuration file; see [Runtime settings](#runtime-settings). The lock reminder interval and the poll interval have no `serve` flag.
+
+With at least one app configured, `serve` runs the [deployment engine](engine.md) and needs the GitHub App (to pin digests in the GitOps repository) and a Kubernetes connection (to read Argo CD Applications); it exits at startup with an error naming what is missing. Without apps the engine is idle and neither is required.
 
 Example:
 
@@ -289,8 +291,8 @@ Each key overrides the built-in default and is itself overridden by the environm
 | `github.webhook_secret_file` | none | `DOORSTEP_GITHUB_WEBHOOK_SECRET_FILE` or `DOORSTEP_GITHUB_WEBHOOK_SECRET` |
 | `registry.credentials_file` | `--registry-credentials-file` | `DOORSTEP_REGISTRY_CREDENTIALS_FILE` |
 | `locks.reminder_interval` | none | `DOORSTEP_LOCK_REMINDER_INTERVAL` |
-| `kubernetes.kubeconfig` | `--kubeconfig` (`argocd status` only) | `DOORSTEP_KUBECONFIG` |
-| `kubernetes.context` | `--kube-context` (`argocd status` only) | `DOORSTEP_KUBE_CONTEXT` |
+| `kubernetes.kubeconfig` | `--kubeconfig` (`serve`, `argocd status`) | `DOORSTEP_KUBECONFIG` |
+| `kubernetes.context` | `--kube-context` (`serve`, `argocd status`) | `DOORSTEP_KUBE_CONTEXT` |
 | `intake.poll_interval` | none | `DOORSTEP_POLL_INTERVAL` |
 
 A key that is present is applied even when its value is zero, so `shutdown_delay: 0s` disables the delay and `metrics_listen_addr: ""` serves `/metrics` on the main listener. The database URL, the GitHub App private key and the webhook secret can only be referenced by file path; there are no keys for the values themselves (see [Secrets](#secrets)).

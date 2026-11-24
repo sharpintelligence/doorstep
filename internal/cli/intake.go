@@ -23,6 +23,7 @@ type intakeInput struct {
 	maxBatch  func(app string) int
 	readFile  func(string) ([]byte, error)
 	recorder  *metrics.Recorder
+	announcer announcer
 	logger    *slog.Logger
 }
 
@@ -45,9 +46,13 @@ func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
 		return wiring, nil
 	}
 	apps := intakeApps(in.catalog)
+	var commits intake.Commits = intake.NewPostgresCommits(in.store, queueFor(in.maxBatch, in.logger))
+	if in.announcer != nil {
+		commits = announcingCommits{Commits: commits, announcer: in.announcer}
+	}
 	service, err := intake.New(intake.Options{
 		Apps:     apps,
-		Commits:  intake.NewPostgresCommits(in.store, queueFor(in.maxBatch, in.logger)),
+		Commits:  commits,
 		Checks:   intake.GitHub{Clients: in.githubApp},
 		Branches: intake.GitHub{Clients: in.githubApp},
 		Logger:   in.logger,
@@ -107,20 +112,6 @@ func newIntake(ctx context.Context, in intakeInput) (intakeWiring, error) {
 		in.logger.InfoContext(ctx, "github polling disabled, webhooks only")
 	}
 	return wiring, nil
-}
-
-func intakeApps(catalog config.Catalog) []intake.App {
-	apps := make([]intake.App, 0, len(catalog.Apps))
-	for _, a := range catalog.Apps {
-		apps = append(apps, intake.App{
-			Target:          core.AppTarget(a.Name),
-			Repository:      string(a.Source.Repo),
-			Branch:          a.Source.Branch,
-			RequiredChecks:  a.Source.RequiredChecks,
-			ImageRepository: a.Image.Repository,
-		})
-	}
-	return apps
 }
 
 func queueFor(maxBatch func(app string) int, logger *slog.Logger) func(tx *store.Store) intake.Queue {
