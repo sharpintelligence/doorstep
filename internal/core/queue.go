@@ -16,10 +16,6 @@ const (
 
 var ErrLeaseLost = errors.New("queue lease lost")
 
-func Priorities() []Priority {
-	return []Priority{PriorityNormal, PriorityUrgent, PriorityRollback}
-}
-
 func (p Priority) String() string {
 	switch p {
 	case PriorityNormal:

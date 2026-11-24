@@ -30,12 +30,6 @@ type Authenticator interface {
 	Authenticate(r *http.Request, required core.Role) (Caller, error)
 }
 
-type RejectAll struct{}
-
-func (RejectAll) Authenticate(*http.Request, core.Role) (Caller, error) {
-	return Caller{}, ErrUnauthenticated
-}
-
 type LockService interface {
 	Lock(ctx context.Context, req locks.Request) (core.Lock, error)
 	Unlock(ctx context.Context, target *core.Target, actor core.Actor, role core.Role) (core.Lock, error)

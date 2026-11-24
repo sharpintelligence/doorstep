@@ -136,13 +136,6 @@ func (s *Server) Update(namespace, name string, fn func(*Application)) bool {
 	return true
 }
 
-func (s *Server) Get(namespace, name string) (Application, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	app, ok := s.apps[appKey(namespace, name)]
-	return app.Clone(), ok
-}
-
 func (s *Server) Delete(namespace, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

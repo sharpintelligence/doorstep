@@ -28,14 +28,11 @@ func TestPriorityString(t *testing.T) {
 func TestPrioritiesAreOrdered(t *testing.T) {
 	t.Parallel()
 
-	priorities := Priorities()
-	for i := 1; i < len(priorities); i++ {
-		if priorities[i] <= priorities[i-1] {
-			t.Errorf("Priorities()[%d] = %d is not above %d", i, priorities[i], priorities[i-1])
+	ascending := []Priority{PriorityNormal, PriorityUrgent, PriorityRollback}
+	for i := 1; i < len(ascending); i++ {
+		if ascending[i] <= ascending[i-1] {
+			t.Errorf("%s (%d) is not above %s (%d)", ascending[i], ascending[i], ascending[i-1], ascending[i-1])
 		}
-	}
-	if PriorityNormal >= PriorityUrgent || PriorityUrgent >= PriorityRollback {
-		t.Errorf("want normal < urgent < rollback, got %d, %d, %d", PriorityNormal, PriorityUrgent, PriorityRollback)
 	}
 }
 

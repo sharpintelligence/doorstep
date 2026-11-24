@@ -466,10 +466,6 @@ func (s *Service) Unblock(ctx context.Context, t core.Target, ref core.BlockRef,
 	return cleared, nil
 }
 
-func (s *Service) MigrationsCrossed(ctx context.Context, t core.Target, to, current core.Deployment) ([]core.Deployment, error) {
-	return s.repo.MigrationsBetween(ctx, t, to, current)
-}
-
 func (s *Service) ListBlocks(ctx context.Context, t core.Target) ([]core.Block, error) {
 	return s.repo.ListBlocks(ctx, t, false)
 }

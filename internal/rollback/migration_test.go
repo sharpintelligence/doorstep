@@ -177,11 +177,6 @@ func TestConfirmedRollbackRecordsTheCrossing(t *testing.T) {
 	if got.RolledBack.ID != v4.ID || got.RolledBack.State != core.StateCancelled {
 		t.Errorf("RolledBack = %+v", got.RolledBack)
 	}
-
-	crossed, err := svc.MigrationsCrossed(t.Context(), blog, v1, v4)
-	if err != nil || !slices.Equal(deploymentIDs(crossed), []core.DeploymentID{v2.ID, v4.ID}) {
-		t.Errorf("MigrationsCrossed = %v, %v", deploymentIDs(crossed), err)
-	}
 }
 
 func TestMigrationCheckKeepsEarlierErrorsFirst(t *testing.T) {

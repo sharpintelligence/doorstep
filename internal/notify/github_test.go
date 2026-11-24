@@ -15,6 +15,12 @@ import (
 	"github.com/sharpintelligence/doorstep/internal/github/githubtest"
 )
 
+func (g *GitHub) cacheLen() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.ids)
+}
+
 type fakeGitHubDeployment struct {
 	ID          int64           `json:"id"`
 	SHA         string          `json:"sha"`

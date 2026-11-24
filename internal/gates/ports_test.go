@@ -12,8 +12,6 @@ import (
 var (
 	_ gates.ResultStore     = (*store.Store)(nil)
 	_ gates.Metrics         = (*metrics.Recorder)(nil)
-	_ gates.Gate            = gates.GateFunc(nil)
-	_ gates.Observer        = gates.ObserverFunc(nil)
 	_ gates.TrackedChecks   = (*store.Store)(nil)
 	_ gates.FreezeReader    = (*locks.Service)(nil)
 	_ gates.LiveChecks      = intake.LiveChecks{}

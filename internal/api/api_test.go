@@ -21,6 +21,12 @@ import (
 
 const goodToken = "Bearer good-token"
 
+type rejectAll struct{}
+
+func (rejectAll) Authenticate(*http.Request, core.Role) (Caller, error) {
+	return Caller{}, ErrUnauthenticated
+}
+
 var (
 	errBoom   = errors.New("database password=hunter2 unreachable")
 	createdAt = time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
@@ -146,8 +152,8 @@ func TestLockRoutesNeedEveryDependency(t *testing.T) {
 		opts Options
 	}{
 		{"nothing", Options{}},
-		{"no locks", Options{KnownApp: knownApp, Authenticator: RejectAll{}}},
-		{"no app lookup", Options{Locks: &fakeLocks{}, Authenticator: RejectAll{}}},
+		{"no locks", Options{KnownApp: knownApp, Authenticator: rejectAll{}}},
+		{"no app lookup", Options{Locks: &fakeLocks{}, Authenticator: rejectAll{}}},
 		{"no authenticator", Options{Locks: &fakeLocks{}, KnownApp: knownApp}},
 	}
 	for _, tt := range tests {
@@ -203,7 +209,7 @@ func TestAuthentication(t *testing.T) {
 		auth   Authenticator
 		header string
 	}{
-		{name: "reject all", auth: RejectAll{}, header: goodToken},
+		{name: "reject all", auth: rejectAll{}, header: goodToken},
 		{name: "missing token", auth: fakeAuth{}},
 		{name: "wrong token", auth: fakeAuth{}, header: "Bearer nope"},
 		{name: "empty actor", auth: emptyActorAuth{}, header: goodToken},

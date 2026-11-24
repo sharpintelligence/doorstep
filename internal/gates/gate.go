@@ -26,12 +26,6 @@ type Evaluation struct {
 	Evidence json.RawMessage
 }
 
-type GateFunc func(ctx context.Context, req Request) (Evaluation, error)
-
-func (f GateFunc) Evaluate(ctx context.Context, req Request) (Evaluation, error) {
-	return f(ctx, req)
-}
-
 type Binding struct {
 	Name           string
 	Type           config.GateType
